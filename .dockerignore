@@ -1,0 +1,8 @@
+# Что НЕ попадает в «коробку» при сборке
+.git
+.env
+secrets/
+data/
+__pycache__/
+*.pyc
+.venv/

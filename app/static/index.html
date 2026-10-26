@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SupplyBro — конкурсы</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SupplyBro <span class="ver" id="version"></span></div>
+    <button class="btn ghost" id="refresh" type="button" title="Заново загрузить данные из NocoDB">Обновить из NocoDB</button>
+  </header>
+
+  <main>
+    <!-- Выбор: клиент → юр. лицо → конкурс -->
+    <section class="panel pickers">
+      <label class="field">
+        <span class="label">Клиент</span>
+        <select id="client"></select>
+      </label>
+      <label class="field">
+        <span class="label">Юр. лицо</span>
+        <select id="entity"></select>
+      </label>
+      <label class="field wide">
+        <span class="label">Конкурс</span>
+        <select id="tender" disabled><option>Загрузка…</option></select>
+      </label>
+      <p class="hint" id="pickers-hint" hidden></p>
+    </section>
+
+    <div id="empty" class="empty">Выберите конкурс — здесь появятся данные из NocoDB и спецификация.</div>
+
+    <!-- Шапка конкурса -->
+    <section class="panel" id="head" hidden>
+      <div class="head-top">
+        <div>
+          <div class="tender-no" id="head-no"></div>
+          <h1 id="head-title"></h1>
+        </div>
+        <div class="links" id="head-links"></div>
+      </div>
+      <div class="chips" id="head-chips"></div>
+    </section>
+
+    <!-- Данные из «Реестра конкурсов» -->
+    <section class="panel" id="card" hidden>
+      <div class="section-head">
+        <h2>Данные из NocoDB</h2>
+        <div class="section-tools">
+          <label class="inline">Представление
+            <select id="reg-view"></select>
+          </label>
+          <label class="inline check"><input type="checkbox" id="hide-empty" checked> скрыть пустые</label>
+        </div>
+      </div>
+      <div class="status" id="card-status"></div>
+      <dl class="fields" id="fields"></dl>
+    </section>
+
+    <!-- Спецификация -->
+    <section class="panel" id="spec" hidden>
+      <div class="section-head">
+        <h2>Спецификация <span class="muted" id="spec-count"></span></h2>
+        <div class="section-tools">
+          <label class="inline">Представление
+            <select id="spec-view"></select>
+          </label>
+          <a class="btn ghost small" id="spec-link" target="_blank" rel="noopener" hidden>Открыть в NocoDB ↗</a>
+        </div>
+      </div>
+      <div class="status" id="spec-status"></div>
+      <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

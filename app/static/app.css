@@ -1,0 +1,152 @@
+/* SupplyBro — оформление страницы. Цвета — переменными, тёмная тема — по настройке системы. */
+:root {
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --text: #1c2230;
+  --muted: #687385;
+  --line: #e3e6eb;
+  --line-strong: #cfd4dc;
+  --accent: #2557d6;
+  --accent-soft: #e8eefc;
+  --chip: #f0f2f5;
+  --ok: #157a52;
+  --bad: #b3261e;
+  --warn-bg: #fff6e0;
+  --warn-text: #7a5300;
+  --row-alt: #fafbfc;
+  --sticky: #ffffff;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121418;
+    --panel: #1b1e24;
+    --text: #e7e9ed;
+    --muted: #9aa3b2;
+    --line: #2b3038;
+    --line-strong: #3a414c;
+    --accent: #7ea2ff;
+    --accent-soft: #1f2a44;
+    --chip: #252a32;
+    --ok: #4cc38a;
+    --bad: #ff8a80;
+    --warn-bg: #2e2614;
+    --warn-text: #f0c060;
+    --row-alt: #1e2128;
+    --sticky: #1b1e24;
+    --shadow: none;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+a { color: var(--accent); }
+h1 { font-size: 20px; line-height: 1.3; margin: 2px 0 0; font-weight: 600; }
+h2 { font-size: 16px; margin: 0; font-weight: 600; }
+.muted { color: var(--muted); font-weight: 400; }
+
+/* Верхняя полоса */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 5;
+}
+.brand { font-weight: 700; letter-spacing: .2px; }
+.ver { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+
+main { max-width: 1400px; margin: 0 auto; padding: 16px 20px 40px; display: grid; gap: 14px; }
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; box-shadow: var(--shadow); min-width: 0;
+}
+
+/* Выпадающие списки */
+.pickers { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(200px, 1fr) minmax(260px, 2.4fr); gap: 12px; }
+.field { display: grid; gap: 4px; min-width: 0; }
+.label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+select {
+  width: 100%; min-width: 0; padding: 8px 10px; font: inherit; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px;
+}
+select:disabled { opacity: .6; }
+.inline select { width: auto; padding: 5px 8px; margin-left: 6px; }
+.hint {
+  grid-column: 1 / -1; margin: 0; padding: 8px 10px; border-radius: 8px;
+  background: var(--warn-bg); color: var(--warn-text); font-size: 13px;
+}
+
+.btn {
+  font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line-strong); background: var(--panel); color: var(--text); text-decoration: none;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.small { padding: 4px 10px; }
+
+.empty { text-align: center; color: var(--muted); padding: 40px 16px; }
+
+/* Шапка конкурса */
+.head-top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.tender-no { color: var(--muted); font-size: 13px; }
+.links { display: flex; gap: 8px; flex-wrap: wrap; }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.chip { background: var(--chip); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
+.chip b { font-weight: 600; }
+
+/* Заголовок раздела с настройками */
+.section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.section-tools { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.check { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.status { font-size: 13px; color: var(--muted); }
+.status.error { color: var(--bad); }
+.status:empty { display: none; }
+
+/* Поля карточки */
+.fields { display: grid; grid-template-columns: minmax(160px, 260px) 1fr; margin: 0; }
+.fields dt, .fields dd { padding: 7px 0; border-top: 1px solid var(--line); margin: 0; }
+.fields dt { color: var(--muted); padding-right: 16px; font-size: 13px; }
+.fields dd { white-space: pre-wrap; word-break: break-word; min-width: 0; }
+.fields dd.empty-val { color: var(--muted); }
+
+/* Длинный текст: свёрнут до нескольких строк, раскрывается по щелчку */
+.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; cursor: pointer; }
+.clamp.open { display: block; -webkit-line-clamp: unset; }
+.more { font-size: 12px; color: var(--accent); cursor: pointer; user-select: none; }
+
+.files { display: flex; gap: 6px; flex-wrap: wrap; }
+.file { background: var(--accent-soft); border-radius: 6px; padding: 2px 8px; font-size: 13px; text-decoration: none; }
+.sel { display: inline-block; background: var(--chip); border-radius: 6px; padding: 1px 8px; margin: 0 4px 2px 0; }
+
+/* Таблица спецификации */
+.table-wrap { overflow: auto; max-height: 75vh; border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 100%; }
+th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); vertical-align: top; text-align: left; }
+th {
+  position: sticky; top: 0; z-index: 2; background: var(--sticky); font-weight: 600;
+  min-width: 90px; max-width: 220px; border-bottom: 1px solid var(--line-strong);
+}
+td { max-width: 340px; min-width: 70px; white-space: pre-wrap; word-break: break-word; }
+tbody tr:nth-child(even) td { background: var(--row-alt); }
+tbody tr:nth-child(odd) td { background: var(--panel); }
+td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* «№» и «Наименование позиции» закреплены слева */
+.stick0 { position: sticky; left: 0; z-index: 1; min-width: 44px; }
+.stick1 { position: sticky; left: var(--stick1-left, 44px); z-index: 1; min-width: 240px; box-shadow: 1px 0 0 var(--line-strong); }
+th.stick0, th.stick1 { z-index: 3; }
+td .clamp { -webkit-line-clamp: 3; }
+
+/* Телефон и узкие окна */
+@media (max-width: 760px) {
+  main { padding: 12px 12px 32px; }
+  .topbar { padding: 10px 12px; }
+  .pickers { grid-template-columns: 1fr; }
+  .fields { grid-template-columns: 1fr; }
+  .fields dt { border-top: 1px solid var(--line); padding-bottom: 0; }
+  .fields dd { border-top: 0; padding-top: 2px; }
+  .stick1 { position: static; min-width: 180px; box-shadow: none; }
+}

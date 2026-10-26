@@ -1,0 +1,23 @@
+{
+  "_comment": "Клиенты сайта: у каждого своя база NocoDB и свои юр. лица. Ключ API здесь не хранится — token_file это путь внутри контейнера (файл подключается в compose.yml из NOCODB_TOKEN_FILE в .env). Правки применяются без перезапуска — достаточно обновить страницу.",
+  "clients": [
+    {
+      "id": "main",
+      "name": "Наша компания",
+      "nocodb": {
+        "url": "https://app.nocodb.com",
+        "workspace_id": "wzs963xn",
+        "base_id": "pf3o1felxit8s5b",
+        "registry_table_id": "mdbebnsirecunr5",
+        "token_file": "/run/secrets/nocodb_main",
+        "participant_column": "Участник",
+        "default_registry_view": "Вся таблица",
+        "default_spec_view": "Сбор цен"
+      },
+      "legal_entities": [
+        { "id": "prostor", "name": "ООО «Простор»", "inn": "7842219678", "aliases": ["Простор"] },
+        { "id": "strok", "name": "ИП Строк А. В.", "inn": "650110731107", "aliases": ["ИП Строк"] }
+      ]
+    }
+  ]
+}

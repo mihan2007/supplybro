@@ -1,0 +1,36 @@
+# Как запускать сайт (в Ubuntu, из папки проекта):
+#   bash run.sh                    — собрать «коробку» и запустить (после любой правки кода)
+#   docker compose ps              — посмотреть, запущен ли
+#   docker compose logs -f web     — смотреть журнал (выход — Ctrl+C)
+#   docker compose down            — остановить
+# Настройки (папка данных, порт, прокси, ключ NocoDB) — в файле .env рядом.
+# На этом компьютере дополнительно подключается compose.local.yml (см. COMPOSE_FILE в .env).
+
+name: supplybro
+
+services:
+  web:
+    image: supplybro-web:dev
+    ports:
+      # Только 127.0.0.1 — сайт открывается лишь на этом компьютере, из сети его не видно.
+      - "127.0.0.1:${WEB_PORT:-8000}:8000"
+    environment:
+      DATA_DIR_IN_CONTAINER: /data
+      CLIENTS_FILE: /app/config/clients.json
+      # Выход в интернет (NocoDB) через прокси, если он указан в .env.
+      HTTPS_PROXY: ${OUTBOUND_PROXY:-}
+      HTTP_PROXY: ${OUTBOUND_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1
+    volumes:
+      # Папка данных из .env (внутри Ubuntu) подключается в контейнер как /data.
+      - "${DATA_DIR:?Укажите DATA_DIR в файле .env}:/data"
+      # Клиенты и юр. лица — правятся без пересборки.
+      - "./config:/app/config:ro"
+      # Ключ NocoDB — только для чтения; сам файл остаётся в папке secrets проекта.
+      - type: bind
+        source: "${NOCODB_TOKEN_FILE:?Укажите NOCODB_TOKEN_FILE в файле .env}"
+        target: /run/secrets/nocodb_main
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped
