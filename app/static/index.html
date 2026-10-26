@@ -27,10 +27,38 @@
         <span class="label">Конкурс</span>
         <select id="tender" disabled><option>Загрузка…</option></select>
       </label>
+      <div class="field add-field">
+        <span class="label">&nbsp;</span>
+        <button class="btn primary" id="new-tender-btn" type="button">+ Новый конкурс</button>
+      </div>
       <p class="hint" id="pickers-hint" hidden></p>
+
+      <!-- Новый конкурс: папка в Dropbox по шаблону «К---» + сразу загрузка документации -->
+      <form class="newtender" id="new-tender" hidden>
+        <div class="nt-title">Новый конкурс — папка в Dropbox по шаблону «К---»</div>
+        <label class="field">
+          <span class="label">Внутренний номер</span>
+          <input id="nt-number" required autocomplete="off">
+        </label>
+        <label class="field wide">
+          <span class="label">Заказчик и предмет (для названия папки)</span>
+          <input id="nt-title" placeholder="например: БГК Testo" autocomplete="off">
+        </label>
+        <div class="drop nt-drop" id="nt-drop">
+          <div class="drop-main">Тендерная документация: перетащите сюда файлы или архив</div>
+          <div class="drop-sub">или <label class="link">выберите на компьютере<input type="file" id="nt-files" multiple hidden></label>
+            — файлы лягут в «Конкурсная документация» и сразу пойдут в обработку</div>
+          <div class="nt-files" id="nt-file-list"></div>
+        </div>
+        <div class="nt-actions">
+          <button class="btn primary" type="submit">Создать конкурс</button>
+          <button class="btn" type="button" id="nt-cancel">Отмена</button>
+        </div>
+        <p class="status" id="nt-status"></p>
+      </form>
     </section>
 
-    <div id="empty" class="empty">Выберите конкурс — здесь появятся данные из NocoDB и спецификация.</div>
+    <div id="empty" class="empty">Выберите конкурс — здесь появятся его документы, данные из NocoDB и спецификация.</div>
 
     <!-- Шапка конкурса -->
     <section class="panel" id="head" hidden>
@@ -42,6 +70,37 @@
         <div class="links" id="head-links"></div>
       </div>
       <div class="chips" id="head-chips"></div>
+    </section>
+
+    <!-- Документы конкурса -->
+    <section class="panel" id="docs" hidden>
+      <div class="section-head">
+        <h2>Документы <span class="muted" id="docs-count"></span></h2>
+        <div class="section-tools">
+          <button class="btn small" id="docs-process" type="button" title="Обработать новые и изменённые файлы">Обработать заново</button>
+        </div>
+      </div>
+      <div class="path" id="docs-path"></div>
+      <div class="status" id="docs-status"></div>
+      <div class="nofolder" id="docs-nofolder" hidden>
+        <span>Папки этого конкурса в Dropbox нет.</span>
+        <button class="btn small primary" id="docs-create" type="button">Создать папку</button>
+      </div>
+      <div id="docs-body" hidden>
+        <div class="drop" id="drop">
+          <div class="drop-main">Перетащите сюда файлы или архив</div>
+          <div class="drop-sub">
+            или <label class="link">выберите на компьютере<input type="file" id="file-input" multiple hidden></label>
+            · положить в <select id="upload-target"></select>
+          </div>
+          <div class="progress" id="upload-progress" hidden><span id="upload-bar"></span></div>
+        </div>
+        <div class="job" id="job" hidden>
+          <div class="progress"><span id="job-bar"></span></div>
+          <div class="job-text" id="job-text"></div>
+        </div>
+        <div class="table-wrap docs-wrap"><table id="docs-table"></table></div>
+      </div>
     </section>
 
     <!-- Данные из «Реестра конкурсов» -->

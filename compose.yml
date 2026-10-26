@@ -1,36 +1,60 @@
 # Как запускать сайт (в Ubuntu, из папки проекта):
 #   bash run.sh                    — собрать «коробку» и запустить (после любой правки кода)
-#   docker compose ps              — посмотреть, запущен ли
-#   docker compose logs -f web     — смотреть журнал (выход — Ctrl+C)
+#   docker compose ps              — посмотреть, запущены ли сайт и обработчик
+#   docker compose logs -f web     — журнал сайта (выход — Ctrl+C)
+#   docker compose logs -f worker  — журнал обработчика документов
 #   docker compose down            — остановить
-# Настройки (папка данных, порт, прокси, ключ NocoDB) — в файле .env рядом.
+# Настройки (папки, порт, прокси, ключ NocoDB) — в файле .env рядом.
 # На этом компьютере дополнительно подключается compose.local.yml (см. COMPOSE_FILE в .env).
 
 name: supplybro
 
 services:
+  # Сайт: страница и адреса /api/...
   web:
     image: supplybro-web:dev
     ports:
       # Только 127.0.0.1 — сайт открывается лишь на этом компьютере, из сети его не видно.
       - "127.0.0.1:${WEB_PORT:-8000}:8000"
-    environment:
+    environment: &env
       DATA_DIR_IN_CONTAINER: /data
+      TENDERS_DIR_IN_CONTAINER: /tenders
       CLIENTS_FILE: /app/config/clients.json
       # Выход в интернет (NocoDB) через прокси, если он указан в .env.
       HTTPS_PROXY: ${OUTBOUND_PROXY:-}
       HTTP_PROXY: ${OUTBOUND_PROXY:-}
       NO_PROXY: localhost,127.0.0.1
     volumes:
-      # Папка данных из .env (внутри Ubuntu) подключается в контейнер как /data.
+      # Папка данных (база сайта, очередь задач) — внутри Ubuntu, из DATA_DIR в .env.
       - "${DATA_DIR:?Укажите DATA_DIR в файле .env}:/data"
       # Клиенты и юр. лица — правятся без пересборки.
       - "./config:/app/config:ro"
+      # Папки конкурсов (Dropbox\Агент) — из TENDERS_DIR в .env.
+      - type: bind
+        source: "${TENDERS_DIR:?Укажите TENDERS_DIR в файле .env}"
+        target: /tenders
+        bind:
+          create_host_path: false
       # Ключ NocoDB — только для чтения; сам файл остаётся в папке secrets проекта.
       - type: bind
         source: "${NOCODB_TOKEN_FILE:?Укажите NOCODB_TOKEN_FILE в файле .env}"
         target: /run/secrets/nocodb_main
         read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+
+  # Обработчик документов: распаковка, конвертация, текст, распознавание (задачи из очереди).
+  worker:
+    image: supplybro-web:dev
+    command: ["python", "-m", "app.worker"]
+    environment: *env
+    volumes:
+      - "${DATA_DIR:?Укажите DATA_DIR в файле .env}:/data"
+      - "./config:/app/config:ro"
+      - type: bind
+        source: "${TENDERS_DIR:?Укажите TENDERS_DIR в файле .env}"
+        target: /tenders
         bind:
           create_host_path: false
     restart: unless-stopped

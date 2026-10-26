@@ -2,6 +2,11 @@
 .git
 .env
 secrets/
+**/secrets/
+*API_key*
+*api_key*
+*.key
+*.pem
 data/
 __pycache__/
 *.pyc

@@ -1,12 +1,14 @@
-// SupplyBro — логика страницы: выпадающие списки «клиент → юр. лицо → конкурс»
-// и вывод карточки конкурса и спецификации из NocoDB.
+// SupplyBro — логика страницы: выпадающие списки «клиент → юр. лицо → конкурс»,
+// документы конкурса (папка в Dropbox), карточка из NocoDB и спецификация.
 // Выбор запоминается в адресе страницы (?client=…&entity=…&tender=…), поэтому
 // страницу можно обновить или сохранить в закладки.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const DOCS_TARGET = "Конкурсная документация"; // куда кладутся документы из формы нового конкурса
 const NUMERIC = new Set(["Decimal", "Number", "Currency", "Percent", "Rating"]);
 const UNKNOWN_GROUP = "Участник не указан";
+const FOLDER_GROUP = "Есть папка, в NocoDB ещё нет";
 
 const url = new URLSearchParams(location.search);
 const state = {
@@ -17,9 +19,12 @@ const state = {
   regView: url.get("rv") || "",
   specView: url.get("sv") || "",
   fresh: false,
+  tenders: new Map(),   // id → конкурс из последнего списка
+  nextNumber: "",
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0 };
+let docsTimer = null;
 
 // ---------- общее ----------
 
@@ -32,11 +37,11 @@ function saveUrl() {
   history.replaceState(null, "", p.toString() ? "?" + p : location.pathname);
 }
 
-async function api(path, query = {}) {
+async function api(path, query = {}, options = {}) {
   const u = new URL(path, location.origin);
   for (const [k, v] of Object.entries(query)) if (v) u.searchParams.set(k, v);
   if (state.fresh) u.searchParams.set("fresh", "1");
-  const r = await fetch(u);
+  const r = await fetch(u, options);
   let body = {};
   try { body = await r.json(); } catch (_) { /* ответ не JSON */ }
   if (!r.ok) throw new Error(body.detail || `ошибка ${r.status}`);
@@ -70,6 +75,10 @@ function entityName(id) {
   const client = state.clients.find((c) => c.id === state.client);
   const e = client && client.entities.find((x) => x.id === id);
   return e ? e.name : id;
+}
+
+function clientPath(suffix) {
+  return `/api/clients/${encodeURIComponent(state.client)}${suffix}`;
 }
 
 // ---------- значения полей ----------
@@ -203,7 +212,7 @@ async function loadTenders() {
   if (!state.client) return;
   let data;
   try {
-    data = await api(`/api/clients/${encodeURIComponent(state.client)}/tenders`, { entity: state.entity });
+    data = await api(clientPath("/tenders"), { entity: state.entity });
   } catch (err) {
     if (my !== seq.tenders) return;
     fillSelect(select, [{ value: "", label: "Не удалось загрузить конкурсы" }]);
@@ -212,49 +221,116 @@ async function loadTenders() {
   }
   if (my !== seq.tenders) return;
 
-  setPickersHint(data.participant_column_exists ? "" :
-    `В «Реестре конкурсов» нет колонки «${data.participant_column}», поэтому юр. лицо известно только там, ` +
-    `где агент записал «Участник: …» в перечне документов заявки. Остальные конкурсы — в группе «${UNKNOWN_GROUP}».`);
+  const hints = [];
+  if (data.noco_error) hints.push("NocoDB: " + data.noco_error);
+  if (data.folders_error) hints.push("Папки конкурсов: " + data.folders_error);
+  if (!data.participant_column_exists && !data.noco_error) {
+    hints.push(`В «Реестре конкурсов» нет колонки «${data.participant_column}», поэтому юр. лицо известно только там, ` +
+      `где агент записал «Участник: …» в перечне документов заявки. Остальные конкурсы — в группе «${UNKNOWN_GROUP}».`);
+  }
+  setPickersHint(hints.join(" "));
+  state.nextNumber = data.next_number || "";
+  state.tenders = new Map(data.tenders.map((t) => [t.id, t]));
 
-  // Группы в списке: по юр. лицу-участнику, «Участник не указан» — последней.
+  // Группы: по юр. лицу-участнику, затем «Участник не указан», затем папки без записи в NocoDB.
   const groups = new Map();
   for (const t of data.tenders) {
-    const key = t.participants.length ? t.participants.map(entityName).join(" + ") : UNKNOWN_GROUP;
+    const key = t.source === "folder" ? FOLDER_GROUP
+      : (t.participants.length ? t.participants.map(entityName).join(" + ") : UNKNOWN_GROUP);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(t);
   }
-  const keys = [...groups.keys()].sort((a, b) => (a === UNKNOWN_GROUP) - (b === UNKNOWN_GROUP));
-  select.replaceChildren(el("option", { value: "", text: data.tenders.length ? "— выберите конкурс —" : "Конкурсов нет" }));
+  const rank = (k) => (k === FOLDER_GROUP ? 2 : k === UNKNOWN_GROUP ? 1 : 0);
+  const keys = [...groups.keys()].sort((a, b) => rank(a) - rank(b));
+  select.replaceChildren(
+    el("option", { value: "", text: data.tenders.length ? "— выберите конкурс —" : "Конкурсов нет" }));
   for (const key of keys) {
     const og = el("optgroup", { label: `${key} (${groups.get(key).length})` });
-    for (const t of groups.get(key)) og.append(el("option", { value: String(t.id), title: t.title, text: tenderLabel(t) }));
+    for (const t of groups.get(key)) og.append(el("option", { value: t.id, title: t.title, text: tenderLabel(t) }));
     select.append(og);
   }
   select.disabled = false;
-  if (data.tenders.some((t) => String(t.id) === state.tender)) {
+  if (state.tenders.has(state.tender)) {
     select.value = state.tender;
     await loadTender();
   } else {
     state.tender = "";
-    showTender(false);
+    showTender(null);
     state.fresh = false;
   }
   saveUrl();
 }
 
-// ---------- карточка конкурса ----------
+// ---------- новый конкурс ----------
 
-function showTender(on) {
-  for (const id of ["head", "card", "spec"]) $(id).hidden = !on;
-  $("empty").hidden = on;
+// Файлы документации, выбранные в форме нового конкурса (загрузятся сразу после создания папки).
+let newTenderFiles = [];
+
+function showNewTenderForm(on) {
+  $("new-tender").hidden = !on;
+  $("new-tender-btn").hidden = on;
+  if (on) {
+    $("nt-number").value = state.nextNumber;
+    $("nt-title").value = "";
+    setNewTenderFiles([]);
+    setStatus("nt-status", "");
+    $("nt-title").focus();
+  }
+}
+
+function setNewTenderFiles(files) {
+  newTenderFiles = [...files];
+  const box = $("nt-file-list");
+  box.replaceChildren();
+  if (newTenderFiles.length) {
+    const total = newTenderFiles.reduce((s, f) => s + f.size, 0);
+    box.append(el("div", { text: `Выбрано файлов: ${newTenderFiles.length} (${fmtSize(total)})` }));
+    for (const f of newTenderFiles.slice(0, 8)) box.append(el("div", { class: "muted", text: "• " + f.name }));
+    if (newTenderFiles.length > 8) box.append(el("div", { class: "muted", text: `… и ещё ${newTenderFiles.length - 8}` }));
+  }
+}
+
+async function createFolder(number, title) {
+  const data = await api(clientPath("/folders"), {}, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ number, title }),
+  });
+  return data.folder;
+}
+
+// ---------- конкурс ----------
+
+function currentTender() {
+  return state.tenders.get(state.tender) || null;
+}
+
+function showTender(t) {
+  $("head").hidden = $("docs").hidden = !t;
+  $("card").hidden = $("spec").hidden = !(t && t.source === "nocodb");
+  $("empty").hidden = Boolean(t);
 }
 
 async function loadTender() {
-  if (!state.tender) { showTender(false); saveUrl(); return; }
-  showTender(true);
+  const t = currentTender();
+  showTender(t);
   saveUrl();
-  await Promise.all([loadCard(), loadSpec()]);
+  if (!t) return;
+  stopDocsPolling();
+  if (t.source === "nocodb") {
+    await Promise.all([loadCard(), loadSpec(), loadDocs()]);
+  } else {
+    renderFolderHead(t);
+    await loadDocs();
+  }
   state.fresh = false;
+}
+
+function renderFolderHead(t) {
+  $("head-no").textContent = t.internal || "без внутр. номера";
+  $("head-title").textContent = t.title || t.folder;
+  $("head-links").replaceChildren();
+  const c = el("span", { class: "chip" });
+  c.append(el("b", { text: "NocoDB: " }), "записи пока нет — появится после анализа документов");
+  $("head-chips").replaceChildren(c);
 }
 
 async function loadCard() {
@@ -263,7 +339,7 @@ async function loadCard() {
   $("fields").replaceChildren();
   let d;
   try {
-    d = await api(`/api/clients/${encodeURIComponent(state.client)}/tenders/${state.tender}`, { view: state.regView });
+    d = await api(clientPath(`/tenders/${state.tender}`), { view: state.regView });
   } catch (err) {
     if (my === seq.card) setStatus("card-status", "Не удалось загрузить данные: " + err.message, true);
     return;
@@ -313,6 +389,176 @@ function renderFields(fields) {
   dl._fields = fields; // для переключателя «скрыть пустые»
 }
 
+// ---------- документы ----------
+
+const STATUS_CLASS = { ok: "ok", ocr: "ocr", pending: "wait", skipped: "muted", archive: "muted", empty: "warn", error: "bad" };
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + " Б";
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " КБ";
+  return (bytes / 1024 / 1024).toFixed(1).replace(".", ",") + " МБ";
+}
+
+function stopDocsPolling() {
+  if (docsTimer) { clearTimeout(docsTimer); docsTimer = null; }
+}
+
+async function loadDocs() {
+  const t = currentTender();
+  const my = ++seq.docs;
+  stopDocsPolling();
+  if (!t) return;
+  if (!t.folder) {
+    $("docs-nofolder").hidden = false;
+    $("docs-body").hidden = true;
+    $("docs-process").hidden = true;
+    $("docs-path").textContent = "";
+    $("docs-count").textContent = "";
+    setStatus("docs-status", "");
+    return;
+  }
+  $("docs-nofolder").hidden = true;
+  let d;
+  try {
+    d = await api(clientPath("/docs"), { folder: t.folder });
+  } catch (err) {
+    if (my === seq.docs) {
+      setStatus("docs-status", "Не удалось прочитать папку конкурса: " + err.message, true);
+      $("docs-body").hidden = true;
+    }
+    return;
+  }
+  if (my !== seq.docs) return;
+  setStatus("docs-status", "");
+  $("docs-body").hidden = false;
+  $("docs-process").hidden = false;
+  $("docs-path").textContent = "Папка: " + d.display_path;
+  const target = $("upload-target");
+  if (!target.options.length || target._folder !== d.folder) {
+    fillSelect(target, d.targets.map((x) => ({ value: x, label: x })), d.targets[0]);
+    target._folder = d.folder;
+  }
+  renderDocs(d.files);
+  const active = renderJob(d.job);
+  // Файлы положили в папку вручную (не через сайт) — запускаем обработку сами, один раз за показ.
+  const pending = d.files.some((f) => f.status === "pending");
+  if (pending && !active && t._autoQueued !== d.folder) {
+    t._autoQueued = d.folder;
+    try {
+      await api(clientPath("/docs/process"), { folder: d.folder }, { method: "POST" });
+    } catch (_) { /* покажем на следующем обновлении */ }
+    docsTimer = setTimeout(loadDocs, 1000);
+    return;
+  }
+  if (active) docsTimer = setTimeout(loadDocs, 2000);
+}
+
+function renderDocs(files) {
+  const docs = files.filter((f) => f.kind !== "archive");
+  const ocr = docs.reduce((s, f) => s + (f.ocr_pages || 0), 0);
+  const warn = files.filter((f) => f.flags.includes("⚠")).length;
+  const parts = [`${docs.length} файл(ов)`];
+  if (ocr) parts.push(`распознано страниц: ${ocr}`);
+  if (warn) parts.push(`⚠ ${warn}`);
+  $("docs-count").textContent = files.length ? "· " + parts.join(" · ") : "";
+
+  const table = $("docs-table");
+  if (!files.length) {
+    table.replaceChildren(el("tbody", {}, el("tr", {}, el("td", { class: "empty-val", text: "Документов пока нет — загрузите их выше." }))));
+    return;
+  }
+  const head = el("tr", {}, ...["Файл", "Страниц", "Статус", "Пометки", "Размер", ""].map((h) => el("th", { text: h })));
+  const body = el("tbody");
+  for (const f of files) {
+    const segs = f.name.split("/");
+    const nameCell = el("td", { class: "doc-name" });
+    if (segs.length > 1) nameCell.append(el("div", { class: "doc-dir", text: segs.slice(0, -1).join(" / ") }));
+    const base = segs[segs.length - 1];
+    if (f.has_text) {
+      const q = new URLSearchParams({ folder: currentTender().folder, path: f.path });
+      nameCell.append(el("a", { href: clientPath("/docs/text") + "?" + q, target: "_blank", rel: "noopener",
+        title: "Открыть извлечённый текст", text: base }));
+    } else {
+      nameCell.append(el("span", { text: base }));
+    }
+    const pages = f.pages ? (f.ocr_pages ? `${f.pages} (распозн. ${f.ocr_pages})` : String(f.pages)) : "";
+    const note = [f.flags, f.error].filter(Boolean).join("; ");
+    const q = new URLSearchParams({ folder: currentTender().folder, path: f.path });
+    body.append(el("tr", {},
+      nameCell,
+      el("td", { class: "num", text: f.kind === "xlsx" && f.pages ? `${f.pages} л.` : pages }),
+      el("td", {}, el("span", { class: "badge " + (STATUS_CLASS[f.status] || ""), text: f.status_label })),
+      el("td", { class: "doc-note" + (note.includes("⚠") || f.error ? " warn-text" : ""), text: note }),
+      el("td", { class: "num", text: fmtSize(f.size) }),
+      el("td", {}, el("a", { href: clientPath("/docs/file") + "?" + q, title: "Скачать исходный файл", text: "⤓" })),
+    ));
+  }
+  table.replaceChildren(el("thead", {}, head), body);
+}
+
+// Возвращает true, если задача ещё идёт (нужно обновлять).
+function renderJob(job) {
+  const box = $("job");
+  if (!job) { box.hidden = true; return false; }
+  box.hidden = false;
+  box.classList.remove("error", "done");
+  const bar = $("job-bar");
+  if (job.status === "queued") {
+    bar.style.width = "0%";
+    $("job-text").textContent = job.age > 20
+      ? "В очереди… Обработчик не отвечает — проверьте, что сайт запущен через «Запустить SupplyBro.bat»."
+      : "В очереди…";
+    return true;
+  }
+  if (job.status === "running") {
+    bar.style.width = Math.round((job.progress || 0) * 100) + "%";
+    $("job-text").textContent = "Обработка: " + (job.step || "…");
+    return true;
+  }
+  bar.style.width = "100%";
+  const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
+  if (job.status === "error") {
+    box.classList.add("error");
+    $("job-text").textContent = `Ошибка обработки (${when}): ${job.message}`;
+  } else {
+    box.classList.add("done");
+    $("job-text").textContent = `Обработано ${when}. ${job.message}`;
+  }
+  return false;
+}
+
+function uploadFiles(fileList, target) {
+  const t = currentTender();
+  if (!t || !t.folder || !fileList.length) return;
+  const form = new FormData();
+  for (const f of fileList) form.append("files", f, f.name);
+  const q = new URLSearchParams({ folder: t.folder, target: target || $("upload-target").value || DOCS_TARGET });
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", clientPath("/docs/upload") + "?" + q);
+  $("upload-progress").hidden = false;
+  $("upload-bar").style.width = "0%";
+  setStatus("docs-status", `Загрузка ${fileList.length} файл(ов)…`);
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) $("upload-bar").style.width = Math.round((e.loaded / e.total) * 100) + "%";
+  };
+  xhr.onload = () => {
+    $("upload-progress").hidden = true;
+    let body = {};
+    try { body = JSON.parse(xhr.responseText); } catch (_) { /* не JSON */ }
+    if (xhr.status >= 200 && xhr.status < 300) {
+      setStatus("docs-status", `Загружено: ${body.saved.length}. Документы поставлены в обработку.`);
+    } else {
+      setStatus("docs-status", "Не удалось загрузить: " + (body.detail || xhr.status), true);
+    }
+    loadDocs();
+  };
+  xhr.onerror = () => {
+    $("upload-progress").hidden = true;
+    setStatus("docs-status", "Не удалось загрузить: нет связи с сайтом", true);
+  };
+  xhr.send(form);
+}
+
 // ---------- спецификация ----------
 
 async function loadSpec() {
@@ -323,7 +569,7 @@ async function loadSpec() {
   $("spec-link").hidden = true;
   let d;
   try {
-    d = await api(`/api/clients/${encodeURIComponent(state.client)}/tenders/${state.tender}/spec`, { view: state.specView });
+    d = await api(clientPath(`/tenders/${state.tender}/spec`), { view: state.specView });
   } catch (err) {
     if (my === seq.spec) setStatus("spec-status", "Не удалось загрузить спецификацию: " + err.message, true);
     return;
@@ -379,10 +625,66 @@ $("entity").addEventListener("change", (e) => {
   loadTenders();
 });
 $("tender").addEventListener("change", (e) => {
+  showNewTenderForm(false);
   state.tender = e.target.value;
   state.specView = ""; // у каждой спецификации свои представления
   loadTender();
 });
+$("new-tender").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  setStatus("nt-status", "Создаю папку…");
+  const files = newTenderFiles;
+  try {
+    const folder = await createFolder($("nt-number").value.trim(), $("nt-title").value.trim());
+    showNewTenderForm(false);
+    state.tender = "f:" + folder;
+    await loadTenders();
+    if (files.length) uploadFiles(files, DOCS_TARGET);
+  } catch (err) {
+    setStatus("nt-status", "Не удалось создать папку: " + err.message, true);
+  }
+});
+$("new-tender-btn").addEventListener("click", () => showNewTenderForm(true));
+$("nt-files").addEventListener("change", (e) => { setNewTenderFiles(e.target.files); e.target.value = ""; });
+const ntDrop = $("nt-drop");
+for (const ev of ["dragenter", "dragover"]) {
+  ntDrop.addEventListener(ev, (e) => { e.preventDefault(); ntDrop.classList.add("over"); });
+}
+for (const ev of ["dragleave", "drop"]) {
+  ntDrop.addEventListener(ev, (e) => { e.preventDefault(); ntDrop.classList.remove("over"); });
+}
+ntDrop.addEventListener("drop", (e) => setNewTenderFiles([...newTenderFiles, ...e.dataTransfer.files]));
+$("nt-cancel").addEventListener("click", () => showNewTenderForm(false));
+$("docs-create").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t) return;
+  setStatus("docs-status", "Создаю папку…");
+  try {
+    await createFolder(t.internal || state.nextNumber, (t.title || "").slice(0, 60));
+    await loadTenders();
+  } catch (err) {
+    setStatus("docs-status", "Не удалось создать папку: " + err.message, true);
+  }
+});
+$("docs-process").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  try {
+    await api(clientPath("/docs/process"), { folder: t.folder }, { method: "POST" });
+  } catch (err) {
+    setStatus("docs-status", "Не удалось запустить обработку: " + err.message, true);
+  }
+  loadDocs();
+});
+$("file-input").addEventListener("change", (e) => { uploadFiles(e.target.files); e.target.value = ""; });
+const drop = $("drop");
+for (const ev of ["dragenter", "dragover"]) {
+  drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); });
+}
+for (const ev of ["dragleave", "drop"]) {
+  drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); });
+}
+drop.addEventListener("drop", (e) => uploadFiles(e.dataTransfer.files));
 $("reg-view").addEventListener("change", (e) => { state.regView = e.target.value; loadCard(); });
 $("spec-view").addEventListener("change", (e) => { state.specView = e.target.value; loadSpec(); });
 $("hide-empty").addEventListener("change", () => { const f = $("fields")._fields; if (f) renderFields(f); });

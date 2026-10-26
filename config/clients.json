@@ -4,6 +4,7 @@
     {
       "id": "main",
       "name": "Наша компания",
+      "tenders_folder": "Наша",
       "nocodb": {
         "url": "https://app.nocodb.com",
         "workspace_id": "wzs963xn",

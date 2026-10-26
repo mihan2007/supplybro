@@ -1,5 +1,6 @@
 # Из чего собирается «коробка» сайта.
-# Одна и та же на компьютере и на будущем сервере.
+# Одна и та же на компьютере и на будущем сервере. Из неё запускаются два процесса:
+# сайт (web) и обработчик документов (worker) — см. compose.yml.
 
 # Основа: официальный образ Python 3.12 на Debian (bookworm), облегчённый вариант.
 FROM python:3.12-slim-bookworm
@@ -8,6 +9,22 @@ FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Программы для документов:
+#   LibreOffice без окна — конвертация .doc/.xls/.rtf/.odt в .docx/.xlsx;
+#   Tesseract с русским языком — распознавание сканов;
+#   unrar — архивы RAR (раздел non-free Debian).
+# Если какого-то пакета нет — ставится запасной вариант (обычный LibreOffice, свободный unar).
+# Прокси (если нужен) и зеркало пакетов Debian (APT_MIRROR, например mirror.yandex.ru) — из run.sh.
+ARG APT_MIRROR=""
+RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; fi \
+ && sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
+ && (apt-get install -y --no-install-recommends libreoffice-writer-nogui libreoffice-calc-nogui \
+     || apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc) \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-rus fonts-dejavu-core \
+ && (apt-get install -y --no-install-recommends unrar || apt-get install -y --no-install-recommends unar) \
+ && rm -rf /var/lib/apt/lists/*
+
 # Обычный пользователь вместо root. UID 1000 совпадает с пользователем Ubuntu (user_1),
 # поэтому файлы в папке данных будут принадлежать вам, а не root.
 RUN useradd --create-home --uid 1000 app
@@ -15,12 +32,12 @@ RUN useradd --create-home --uid 1000 app
 WORKDIR /app
 
 # Сначала только список библиотек: при правке кода этот шаг берётся из кэша и не скачивается заново.
-# Прокси для скачивания (если нужен) передаётся при сборке из run.sh.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Код сайта и номер версии.
+# Код сайта, скрипты и номер версии.
 COPY VERSION .
+COPY tools ./tools
 COPY app ./app
 
 USER app

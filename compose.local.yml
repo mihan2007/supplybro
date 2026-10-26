@@ -2,7 +2,7 @@
 #
 # Сайту нужен интернет (NocoDB), а выход наружу здесь идёт через прокси Windows
 # на 127.0.0.1:10809. Из отдельной сети контейнера этот адрес не виден, поэтому
-# контейнер работает в сети самой Ubuntu (network_mode: host), а сайт слушает
+# контейнеры работают в сети самой Ubuntu (network_mode: host), а сайт слушает
 # только 127.0.0.1 — его по-прежнему видно лишь с этого компьютера.
 #
 # Подключается строкой COMPOSE_FILE=compose.yml:compose.local.yml в .env.
@@ -13,3 +13,6 @@ services:
     network_mode: host
     ports: !reset []
     command: ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "${WEB_PORT:-8000}"]
+
+  worker:
+    network_mode: host

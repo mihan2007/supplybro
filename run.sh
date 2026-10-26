@@ -48,10 +48,21 @@ if [ ! -s "${NOCODB_TOKEN_FILE:?Укажите NOCODB_TOKEN_FILE в .env}" ]; th
   exit 1
 fi
 
+# 3а. Папка конкурсов (Dropbox\Агент) должна быть видна из Ubuntu.
+if [ ! -d "${TENDERS_DIR:?Укажите TENDERS_DIR в .env}" ]; then
+  echo "Не найдена папка конкурсов: $TENDERS_DIR — проверьте TENDERS_DIR в .env" >&2
+  exit 1
+fi
+
 # 4. Сборка образа (через прокси, если он указан в BUILD_PROXY).
+#    Прокси передаётся в обоих написаниях: apt читает строчные http_proxy/https_proxy, pip — любые.
+#    Первая сборка после добавления LibreOffice и распознавания текста — 5–15 минут, дальше — секунды.
 docker build --network host \
   --build-arg HTTP_PROXY="${BUILD_PROXY:-}" \
   --build-arg HTTPS_PROXY="${BUILD_PROXY:-}" \
+  --build-arg http_proxy="${BUILD_PROXY:-}" \
+  --build-arg https_proxy="${BUILD_PROXY:-}" \
+  --build-arg APT_MIRROR="${APT_MIRROR:-}" \
   -t supplybro-web:dev .
 
 # 5. Запуск (или перезапуск с новым образом) в фоне.

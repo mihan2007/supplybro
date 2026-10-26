@@ -62,6 +62,8 @@ class Client:
     name: str
     nocodb: NocoSettings
     legal_entities: list[LegalEntity]
+    # Папка клиента внутри папки конкурсов (Dropbox\Агент): «Наша», «ИП Саргсян» …
+    tenders_folder: str = ""
 
     def entity(self, entity_id: str | None) -> LegalEntity | None:
         return next((e for e in self.legal_entities if e.id == entity_id), None)
@@ -74,5 +76,6 @@ def load_clients() -> dict[str, Client]:
     for c in raw.get("clients", []):
         noco = NocoSettings(**c["nocodb"])
         entities = [LegalEntity(**e) for e in c.get("legal_entities", [])]
-        clients[c["id"]] = Client(id=c["id"], name=c["name"], nocodb=noco, legal_entities=entities)
+        clients[c["id"]] = Client(id=c["id"], name=c["name"], nocodb=noco, legal_entities=entities,
+                                  tenders_folder=c.get("tenders_folder", ""))
     return clients

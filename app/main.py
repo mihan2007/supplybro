@@ -2,23 +2,30 @@
 SupplyBro — локальный сайт.
 
 Страница «/» — выбор клиента → юр. лица → конкурса; по конкурсу показываются
-карточка из «Реестра конкурсов» NocoDB и его спецификация.
+документы конкурса (папка в Dropbox), карточка из «Реестра конкурсов» NocoDB и его спецификация.
 
 Данные страница берёт из JSON-адресов /api/... (ниже). Сайт только читает NocoDB.
+Документы обрабатывает отдельный процесс (app/worker.py) — сайт ставит задачу в очередь.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import db
 from .config import Client, load_clients
+from .docs.names import fix_path
+from .docs.pipeline import ARCHIVE_EXT, walk_docs
 from .nocodb import NocoClient, NocoError
+from .tenders import (DOC_SUBFOLDERS, FolderError, client_root, create_folder, folder_path, inside,
+                      list_folders, next_number, norm_number, safe_name)
 
 ROOT = Path(__file__).resolve().parent
 VERSION_FILE = ROOT.parent / "VERSION"
@@ -45,10 +52,18 @@ app = FastAPI(title="SupplyBro", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
+db.init()
+
+
 @app.exception_handler(NocoError)
 async def noco_error_handler(_, exc: NocoError):
     # Ошибку NocoDB показываем на странице понятным текстом.
     return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(FolderError)
+async def folder_error_handler(_, exc: FolderError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 # ---------- вспомогательное ----------
@@ -138,30 +153,55 @@ def api_clients():
 
 @app.get("/api/clients/{client_id}/tenders")
 async def api_tenders(client_id: str, entity: str | None = None, fresh: bool = False):
-    """Конкурсы клиента из «Реестра конкурсов» с отметкой, к какому юр. лицу они относятся."""
+    """Конкурсы клиента: записи «Реестра конкурсов» NocoDB + папки конкурсов в Dropbox.
+
+    У записи NocoDB указывается её папка (по внутреннему номеру в начале имени папки).
+    Папки, для которых записи в NocoDB ещё нет, идут отдельными строками (id «f:<папка>»).
+    """
     client = get_client(client_id)
     noco = NocoClient(client.nocodb)
     reg_id = client.nocodb.registry_table_id
-    meta = await noco.table_meta(reg_id, fresh)
-    titles = {c["title"] for c in meta["columns"]}
-    has_participant_col = client.nocodb.participant_column in titles
+    has_participant_col, rows, noco_error = False, [], ""
+    try:
+        meta = await noco.table_meta(reg_id, fresh)
+        titles = {c["title"] for c in meta["columns"]}
+        has_participant_col = client.nocodb.participant_column in titles
+        wanted = [F_INTERNAL, F_NUMBER, F_TITLE, F_STAGE, F_DEADLINE, F_SPEC_LINK, F_DOCS]
+        if has_participant_col:
+            wanted.append(client.nocodb.participant_column)
+        fields = ["Id"] + [f for f in wanted if f in titles]
+        rows = await noco.records(reg_id, fields=fields, sort="-Id")
+    except NocoError as exc:
+        noco_error = str(exc)  # папки всё равно показываем
 
-    wanted = [F_INTERNAL, F_NUMBER, F_TITLE, F_STAGE, F_DEADLINE, F_SPEC_LINK, F_DOCS]
-    if has_participant_col:
-        wanted.append(client.nocodb.participant_column)
-    fields = ["Id"] + [f for f in wanted if f in titles]
-    rows = await noco.records(reg_id, fields=fields, sort="-Id")
+    folders = list_folders(client)
+    by_number = {}
+    for f in folders:
+        if f["number"] and f["number"] not in by_number:
+            by_number[f["number"]] = f["name"]
+    try:
+        client_root(client)
+        folders_error = ""
+    except FolderError as exc:
+        folders_error = str(exc)
 
-    tenders = []
+    tenders, used_folders, numbers = [], set(), set()
     for r in rows:
         internal, number = clean(r.get(F_INTERNAL)), clean(r.get(F_NUMBER))
         if not internal and not number:
             continue  # пустые строки реестра
+        norm = norm_number(internal)
+        if norm:
+            numbers.add(norm)
+        folder = by_number.get(norm) if norm else None
+        if folder:
+            used_folders.add(folder)
         parts = participants_of(r, client)
         if entity and parts and entity not in parts:
             continue  # конкурс другого юр. лица
         tenders.append({
-            "id": r["Id"],
+            "id": str(r["Id"]),
+            "source": "nocodb",
             "internal": internal,
             "number": number,
             "title": first_line(r.get(F_TITLE)),
@@ -169,9 +209,24 @@ async def api_tenders(client_id: str, entity: str | None = None, fresh: bool = F
             "deadline": first_line(r.get(F_DEADLINE)),
             "participants": parts,
             "has_spec": bool(spec_table_id(r.get(F_SPEC_LINK))),
+            "folder": folder,
+        })
+    for f in folders:
+        if f["number"]:
+            numbers.add(f["number"])
+        if f["name"] in used_folders:
+            continue
+        title = f["name"][len(f["number"] or ""):].strip() if f["number"] else f["name"]
+        tenders.append({
+            "id": "f:" + f["name"], "source": "folder", "internal": f["number"] or "", "number": "",
+            "title": title, "stage": "", "deadline": "", "participants": [], "has_spec": False,
+            "folder": f["name"],
         })
     return {"participant_column": client.nocodb.participant_column,
             "participant_column_exists": has_participant_col,
+            "noco_error": noco_error,
+            "folders_error": folders_error,
+            "next_number": next_number(numbers),
             "tenders": tenders}
 
 
@@ -246,3 +301,120 @@ async def api_spec(client_id: str, record_id: int, view: str | None = None, fres
         "columns": columns,
         "rows": [{c["title"]: r.get(c["title"]) for c in columns} for r in rows],
     }
+
+
+# ---------- документы конкурса (папка в Dropbox) ----------
+
+TENDERS_DISPLAY = os.environ.get("TENDERS_DISPLAY", "Dropbox\\Агент")
+STATUS_LABELS = {
+    "ok": "текст извлечён", "ocr": "распознан", "empty": "текста нет", "skipped": "пропущен",
+    "error": "ошибка", "archive": "архив", "pending": "ждёт обработки",
+}
+
+
+@app.get("/api/clients/{client_id}/docs")
+def api_docs(client_id: str, folder: str):
+    """Файлы конкурса со статусами обработки и последняя задача обработки."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    rows = db.doc_rows(client.id, folder)
+    files = []
+    for path in walk_docs(base):
+        rel = path.relative_to(base).as_posix()
+        r = rows.get(rel)
+        is_archive = path.name.lower().endswith(ARCHIVE_EXT)
+        status = r["status"] if r else "pending"
+        files.append({
+            "path": rel,
+            "name": fix_path(rel),
+            "size": path.stat().st_size,
+            "kind": (r or {}).get("kind") or ("archive" if is_archive else ""),
+            "status": status,
+            "status_label": STATUS_LABELS.get(status, status),
+            "pages": (r or {}).get("pages") or 0,
+            "ocr_pages": (r or {}).get("ocr_pages") or 0,
+            "chars": (r or {}).get("chars") or 0,
+            "flags": (r or {}).get("flags") or "",
+            "error": (r or {}).get("error") or "",
+            "has_text": bool((r or {}).get("text_path")),
+        })
+    job = db.latest_job(client.id, folder)
+    if job:
+        job["age"] = round(time.time() - (job.get("created_at") or time.time()))
+    return {
+        "folder": folder,
+        "display_path": f"{TENDERS_DISPLAY}\\{client.tenders_folder}\\{folder}",
+        "targets": DOC_SUBFOLDERS,
+        "files": files,
+        "job": job,
+    }
+
+
+def _unique(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for i in range(2, 1000):
+        candidate = path.with_name(f"{path.stem} ({i}){path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FolderError("слишком много файлов с одинаковым именем")
+
+
+@app.post("/api/clients/{client_id}/docs/upload")
+async def api_upload(client_id: str, folder: str, target: str = DOC_SUBFOLDERS[0],
+                     files: list[UploadFile] = File(...)):
+    """Загрузка файлов в подпапку конкурса и постановка обработки в очередь."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    if target not in DOC_SUBFOLDERS:
+        raise FolderError(f"нельзя загружать в «{target}»")
+    dest_dir = base / target
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for upload in files:
+        name = safe_name(Path(upload.filename or "").name) or "файл"
+        dest = _unique(dest_dir / name)
+        with open(dest, "wb") as out:
+            while chunk := await upload.read(1 << 20):
+                out.write(chunk)
+        saved.append(fix_path(dest.relative_to(base).as_posix()))
+    job_id = db.enqueue(client.id, folder, "prepare")
+    return {"saved": saved, "job_id": job_id}
+
+
+@app.post("/api/clients/{client_id}/docs/process")
+def api_process(client_id: str, folder: str):
+    """Запустить подготовку документов заново (обработаются только новые и изменённые файлы)."""
+    client = get_client(client_id)
+    folder_path(client, folder)
+    return {"job_id": db.enqueue(client.id, folder, "prepare")}
+
+
+@app.get("/api/clients/{client_id}/docs/text", response_class=PlainTextResponse)
+def api_doc_text(client_id: str, folder: str, path: str):
+    """Извлечённый текст файла — для просмотра в браузере."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    row = db.doc_rows(client.id, folder).get(path)
+    if not row or not row.get("text_path"):
+        raise HTTPException(404, "текста для этого файла нет")
+    return PlainTextResponse(inside(base, row["text_path"]).read_text(encoding="utf-8"))
+
+
+@app.get("/api/clients/{client_id}/docs/file")
+def api_doc_file(client_id: str, folder: str, path: str):
+    """Сам файл (скачать / открыть)."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    target = inside(base, path)
+    if not target.is_file():
+        raise HTTPException(404, "файл не найден")
+    return FileResponse(target, filename=fix_path(path).split("/")[-1])
+
+
+@app.post("/api/clients/{client_id}/folders")
+def api_create_folder(client_id: str, data: dict = Body(...)):
+    """Новый конкурс: папка «<номер> <заказчик и предмет>» по шаблону «К---»."""
+    client = get_client(client_id)
+    name = create_folder(client, str(data.get("number", "")), str(data.get("title", "")))
+    return {"folder": name}
