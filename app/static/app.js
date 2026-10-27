@@ -23,8 +23,11 @@ const state = {
   nextNumber: "",
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0, docs: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0 };
 let docsTimer = null;
+let anTimer = null;
+let anLastJob = null;   // последняя увиденная задача анализа — чтобы заметить её окончание
+let anTab = "fields";
 
 // ---------- общее ----------
 
@@ -305,6 +308,7 @@ function currentTender() {
 
 function showTender(t) {
   $("head").hidden = $("docs").hidden = !t;
+  $("analysis").hidden = !(t && t.folder);
   $("card").hidden = $("spec").hidden = !(t && t.source === "nocodb");
   $("empty").hidden = Boolean(t);
 }
@@ -315,11 +319,13 @@ async function loadTender() {
   saveUrl();
   if (!t) return;
   stopDocsPolling();
+  stopAnalysisPolling();
+  anLastJob = null;
   if (t.source === "nocodb") {
-    await Promise.all([loadCard(), loadSpec(), loadDocs()]);
+    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis()]);
   } else {
     renderFolderHead(t);
-    await loadDocs();
+    await Promise.all([loadDocs(), loadAnalysis()]);
   }
   state.fresh = false;
 }
@@ -546,7 +552,9 @@ function uploadFiles(fileList, target) {
     let body = {};
     try { body = JSON.parse(xhr.responseText); } catch (_) { /* не JSON */ }
     if (xhr.status >= 200 && xhr.status < 300) {
-      setStatus("docs-status", `Загружено: ${body.saved.length}. Документы поставлены в обработку.`);
+      setStatus("docs-status", `Загружено: ${body.saved.length}. Документы поставлены в обработку` +
+        (body.auto_analyze ? ", затем — анализ и запись в NocoDB." : "."));
+      loadAnalysis();
     } else {
       setStatus("docs-status", "Не удалось загрузить: " + (body.detail || xhr.status), true);
     }
@@ -557,6 +565,270 @@ function uploadFiles(fileList, target) {
     setStatus("docs-status", "Не удалось загрузить: нет связи с сайтом", true);
   };
   xhr.send(form);
+}
+
+// ---------- анализ документов (ИИ) ----------
+
+const VERDICT_TEXT = {
+  match: "✅ совпало с DeepSeek",
+  ours_confirmed: "🔺 расхождение с DeepSeek, перепроверено — оставлено",
+  theirs_correct: "исправлено по перепроверке",
+  not_found_by_them: "DeepSeek не нашёл",
+  not_found_both: "не найдено обеими моделями",
+};
+const QUOTE_TEXT = {
+  ok: ["цитата найдена", "ok"], other_file: ["цитата найдена (в другом документе)", "ok"],
+  partial: ["цитата найдена частями", "warn"], not_found: ["цитата не найдена", "bad"],
+  empty: ["без цитаты", "warn"], none: ["", ""], computed: ["собрано из позиций", "muted"],
+};
+const ANALOG_CLASS = { "Да": "ok", "Нет": "bad", "Уточни": "warn" };
+
+function stopAnalysisPolling() {
+  if (anTimer) { clearTimeout(anTimer); anTimer = null; }
+}
+
+async function loadAnalysis() {
+  const t = currentTender();
+  const my = ++seq.an;
+  stopAnalysisPolling();
+  if (!t || !t.folder) { $("analysis").hidden = true; return; }
+  $("analysis").hidden = false;
+  let d;
+  try {
+    d = await api(clientPath("/analysis"), { folder: t.folder });
+  } catch (err) {
+    if (my === seq.an) setStatus("an-status", "Не удалось загрузить анализ: " + err.message, true);
+    return;
+  }
+  if (my !== seq.an) return;
+  setStatus("an-status", "");
+  const jobActive = renderAnalysisJob(d.job);
+  const busy = jobActive || d.prepare_active;
+  renderAnalysis(d, busy);
+
+  // Задача закончилась — обновить список конкурсов и данные NocoDB (могла появиться или обновиться запись).
+  const finished = anLastJob && d.job && anLastJob.id === d.job.id &&
+    ["queued", "running"].includes(anLastJob.status) && !["queued", "running"].includes(d.job.status);
+  anLastJob = d.job ? { id: d.job.id, status: d.job.status } : null;
+  if (finished) {
+    const noco = d.result && d.result.noco;
+    if (noco && noco.status === "saved") {
+      state.fresh = true;
+      if (t.source === "folder" && noco.record_id) state.tender = String(noco.record_id);
+      await loadTenders();
+      return;
+    }
+  }
+  if (busy) anTimer = setTimeout(loadAnalysis, 2500);
+}
+
+function renderAnalysisJob(job) {
+  const box = $("an-job");
+  if (!job) { box.hidden = true; return false; }
+  box.hidden = false;
+  box.classList.remove("error", "done");
+  const what = job.kind === "noco" ? "Запись в NocoDB" : "Анализ";
+  if (job.status === "queued") {
+    $("an-bar").style.width = "0%";
+    $("an-job-text").textContent = `${what}: в очереди…` + (job.age > 30 ? " (обработчик занят другой задачей или не запущен)" : "");
+    return true;
+  }
+  if (job.status === "running") {
+    $("an-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
+    $("an-job-text").textContent = `${what}: ${job.step || "…"}`;
+    return true;
+  }
+  $("an-bar").style.width = "100%";
+  const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
+  if (job.status === "error") {
+    box.classList.add("error");
+    $("an-job-text").textContent = `${what} — ошибка (${when}): ${job.message}`;
+  } else {
+    box.classList.add("done");
+    $("an-job-text").textContent = `${what} — готово (${when}). ${job.message}`;
+  }
+  return false;
+}
+
+function renderAnalysis(d, busy) {
+  const r = d.result;
+  const run = $("an-run");
+  run.textContent = r ? "Повторить анализ" : "Запустить анализ";
+  run.disabled = busy || !d.docs_with_text;
+  run.title = d.docs_with_text ? "Анализ документов ИИ (Claude + перепроверка DeepSeek) и запись в NocoDB"
+    : "Сначала загрузите документы — анализировать пока нечего";
+  $("an-stale").hidden = !(d.stale && !busy);
+  $("an-info").textContent = r
+    ? `· ${r.analyzed_at_text} · ${r.models.claude}` + (r.seconds ? ` · ${Math.max(1, Math.round(r.seconds / 60))} мин` : "")
+    : "";
+  if (!r) {
+    $("an-body").hidden = true;
+    $("an-noco").replaceChildren();
+    $("an-checks").replaceChildren();
+    if (!busy) {
+      setStatus("an-status", d.docs_with_text
+        ? "Анализа ещё нет. «Запустить анализ» — ИИ извлечёт поля конкурса и позиции, перепроверит важные поля и запишет результат в NocoDB."
+        : "Анализ появится после загрузки документов.");
+    }
+    return;
+  }
+  renderNoco(r, busy);
+  $("an-checks").replaceChildren(...(r.checks || []).map((c) =>
+    el("li", { class: c.startsWith("✅") ? "" : "warn", text: c })));
+  $("an-body").hidden = false;
+  renderAnalysisFields(r.fields || []);
+  renderAnalysisPositions(r.positions || []);
+  $("an-pos-count").textContent = (r.positions || []).length ? `(${r.positions.length})` : "";
+  showAnalysisTab(anTab);
+  $("an-usage").textContent = usageText(r.usage && r.usage.totals);
+}
+
+function renderNoco(r, busy) {
+  const box = $("an-noco");
+  const n = r.noco;
+  if (!n) {
+    const b = el("div", { class: "notice" }, "В NocoDB ещё не записано.");
+    if (!busy) b.append(el("br"), saveButton("Записать в NocoDB", false));
+    box.replaceChildren(b);
+    return;
+  }
+  if (n.status === "saved") {
+    const b = el("div", { class: "notice ok" });
+    b.append(`✅ NocoDB: запись ${n.record_id} ${n.action === "created" ? "создана" : "обновлена"}` +
+      (n.at ? ` (${new Date(n.at * 1000).toLocaleString("ru-RU")})` : "") + ". ");
+    b.append(el("a", { href: n.link, target: "_blank", rel: "noopener", text: "Открыть запись ↗" }));
+    if (n.spec && n.spec.url) {
+      b.append(" · ", el("a", { href: n.spec.url, target: "_blank", rel: "noopener", text: "Спецификация ↗" }));
+    }
+    const issues = [...((n.verification && n.verification.issues) || []),
+                    ...((n.spec && n.spec.verification && n.spec.verification.issues) || [])];
+    if (n.spec && n.spec.status === "kept") b.append(el("div", { text: n.spec.text }));
+    if (issues.length) {
+      const ul = el("ul");
+      for (const i of issues.slice(0, 10)) {
+        ul.append(el("li", { text: `${i.column || ""}${i.row ? " (строка " + i.row + ")" : ""}: ${i.problem}` }));
+      }
+      b.append(el("div", { class: "warn-text", text: "⚠ Проверка записанного нашла расхождения:" }), ul);
+    }
+    box.replaceChildren(b);
+    return;
+  }
+  if (n.status === "conflict") {
+    const c = n.conflict || {};
+    const b = el("div", { class: "notice warn" });
+    b.append(el("div", { text: "⚠ В NocoDB не записано: " + (c.text || "") }));
+    if (!busy) {
+      b.append(el("br"));
+      b.append(saveButton(c.kind === "duplicate"
+        ? `Записать отдельной записью ${r.internal_number}` : `Обновить запись ${r.internal_number} данными анализа`, true));
+    }
+    box.replaceChildren(b);
+    return;
+  }
+  const b = el("div", { class: "notice bad", text: "Запись в NocoDB не удалась: " + (n.text || "") });
+  if (!busy) b.append(el("br"), saveButton("Повторить запись", false));
+  box.replaceChildren(b);
+}
+
+function saveButton(label, force) {
+  const btn = el("button", { class: "btn small" + (force ? "" : " primary"), type: "button", text: label });
+  btn.addEventListener("click", async () => {
+    const t = currentTender();
+    if (!t || !t.folder) return;
+    btn.disabled = true;
+    try {
+      await api(clientPath("/analysis/save"), { folder: t.folder, force: force ? "1" : "" }, { method: "POST" });
+    } catch (err) {
+      setStatus("an-status", "Не удалось запустить запись: " + err.message, true);
+    }
+    loadAnalysis();
+  });
+  return btn;
+}
+
+function renderAnalysisFields(fields) {
+  const head = el("tr", {}, ...["Поле", "Значение", "Источник", "Проверка"].map((h) => el("th", { text: h })));
+  const body = el("tbody");
+  const BLOCKS = { 1: "Блок 1 — Товар и поставка", 2: "Блок 2 — Цена и условия оплаты", 3: "Блок 3 — Обеспечение",
+    4: "Блок 4 — Ключевые даты", 5: "Блок 5 — Организатор и заказчик", 6: "Блок 6 — Площадка и процедура",
+    7: "Блок 7 — Национальный режим (ПП РФ № 1875)" };
+  let block = null;
+  for (const f of fields) {
+    if (f.block !== block) {
+      block = f.block;
+      body.append(el("tr", {}, el("td", { class: "block-row", colspan: "4", text: BLOCKS[block] || "" })));
+    }
+    const src = el("td");
+    if (f.file) src.append(el("div", { class: "src-file", text: f.file.split("/").pop() }));
+    if (f.quote) {
+      const q = el("div", { class: "quote clamp", title: "Щёлкните, чтобы развернуть", text: "«" + f.quote + "»" });
+      q.addEventListener("click", () => q.classList.toggle("open"));
+      src.append(q);
+    }
+    const chk = el("td");
+    const [qt, qc] = QUOTE_TEXT[f.quote_status] || ["", ""];
+    if (qt) chk.append(el("span", { class: "badge " + qc, text: qt }));
+    if (f.check) {
+      const v = el("div", { class: "src-file", text: VERDICT_TEXT[f.check.verdict] || f.check.verdict });
+      if (f.check.comment) v.title = f.check.comment;
+      chk.append(v);
+    }
+    const val = el("td");
+    const node = renderValue(f.value, "");
+    if (node) val.append(node);
+    body.append(el("tr", {}, el("td", { text: f.label }), val, src, chk));
+  }
+  $("an-fields-table").replaceChildren(el("thead", {}, head), body);
+}
+
+function renderAnalysisPositions(rows) {
+  const cols = ["№", "Наименование позиции", "Кол-во", "Ед. изм.", "Марка/модель", "Производитель",
+    "Страна происхождения", "Аналог (статус)", "Аналог допускается", "НМЦК за позицию", "Стоимость НМЦ",
+    "Техническое задание", "Ошибки в документации", "Примечание"];
+  if (!rows.length) {
+    $("an-pos-table").replaceChildren(el("tbody", {}, el("tr", {}, el("td", { class: "empty-val", text: "Позиции не найдены." }))));
+    return;
+  }
+  const head = el("tr", {}, ...cols.map((c, i) => el("th", { class: i === 0 ? "stick0" : (i === 1 ? "stick1" : null), text: c })));
+  const body = el("tbody");
+  for (const r of rows) {
+    const tr = el("tr");
+    cols.forEach((c, i) => {
+      const v = r[c];
+      const cls = [i === 0 ? "stick0" : (i === 1 ? "stick1" : ""), typeof v === "number" ? "num" : ""].filter(Boolean).join(" ") || null;
+      const td = el("td", { class: cls });
+      if (c === "Аналог (статус)" && v) td.append(el("span", { class: "badge " + (ANALOG_CLASS[v] || ""), text: v }));
+      else if (["Техническое задание", "Ошибки в документации", "Примечание", "Аналог допускается"].includes(c) && v) td.append(longText(String(v)));
+      else { const node = renderValue(v, ""); if (node) td.append(node); }
+      tr.append(td);
+    });
+    body.append(tr);
+  }
+  const table = $("an-pos-table");
+  table.replaceChildren(el("thead", {}, head), body);
+  const first = table.querySelector("th.stick0");
+  if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
+}
+
+function showAnalysisTab(tab) {
+  anTab = tab;
+  for (const b of document.querySelectorAll("#analysis .tab")) b.classList.toggle("active", b.dataset.tab === tab);
+  $("an-fields").hidden = tab !== "fields";
+  $("an-positions").hidden = tab !== "positions";
+  if (tab === "positions") {
+    const table = $("an-pos-table");
+    const first = table.querySelector("th.stick0");
+    if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
+  }
+}
+
+function usageText(totals) {
+  if (!totals) return "";
+  const n = (x) => fmtInt.format(x || 0);
+  const parts = Object.entries(totals).map(([model, u]) =>
+    `${model}: вызовов ${u.calls}, вход ${n(u.input)}` + (u.cache_write ? `, в кэш ${n(u.cache_write)}` : "") +
+    (u.cache_read ? `, из кэша ${n(u.cache_read)}` : "") + `, ответ ${n(u.output)}`);
+  return parts.length ? "Токены — " + parts.join("; ") : "";
 }
 
 // ---------- спецификация ----------
@@ -685,6 +957,18 @@ for (const ev of ["dragleave", "drop"]) {
   drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); });
 }
 drop.addEventListener("drop", (e) => uploadFiles(e.dataTransfer.files));
+$("an-run").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  $("an-run").disabled = true;
+  try {
+    await api(clientPath("/analysis/run"), { folder: t.folder }, { method: "POST" });
+  } catch (err) {
+    setStatus("an-status", "Не удалось запустить анализ: " + err.message, true);
+  }
+  loadAnalysis();
+});
+for (const b of document.querySelectorAll("#analysis .tab")) b.addEventListener("click", () => showAnalysisTab(b.dataset.tab));
 $("reg-view").addEventListener("change", (e) => { state.regView = e.target.value; loadCard(); });
 $("spec-view").addEventListener("change", (e) => { state.specView = e.target.value; loadSpec(); });
 $("hide-empty").addEventListener("change", () => { const f = $("fields")._fields; if (f) renderFields(f); });

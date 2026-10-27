@@ -103,6 +103,33 @@
       </div>
     </section>
 
+    <!-- Анализ документов (ИИ): поля блоков 1–7, позиции, проверки, запись в NocoDB -->
+    <section class="panel" id="analysis" hidden>
+      <div class="section-head">
+        <h2>Анализ документов <span class="muted" id="an-info"></span></h2>
+        <div class="section-tools">
+          <button class="btn small primary" id="an-run" type="button">Запустить анализ</button>
+        </div>
+      </div>
+      <div class="status" id="an-status"></div>
+      <div class="job" id="an-job" hidden>
+        <div class="progress"><span id="an-bar"></span></div>
+        <div class="job-text" id="an-job-text"></div>
+      </div>
+      <div class="notice warn" id="an-stale" hidden>Документы изменились после анализа — запустите анализ заново.</div>
+      <div id="an-noco"></div>
+      <ul class="checks" id="an-checks"></ul>
+      <div id="an-body" hidden>
+        <div class="tabs" role="tablist">
+          <button class="tab active" type="button" data-tab="fields">Поля конкурса</button>
+          <button class="tab" type="button" data-tab="positions">Позиции <span class="muted" id="an-pos-count"></span></button>
+        </div>
+        <div class="table-wrap an-wrap" id="an-fields"><table id="an-fields-table"></table></div>
+        <div class="table-wrap an-wrap" id="an-positions" hidden><table id="an-pos-table"></table></div>
+        <div class="usage" id="an-usage"></div>
+      </div>
+    </section>
+
     <!-- Данные из «Реестра конкурсов» -->
     <section class="panel" id="card" hidden>
       <div class="section-head">

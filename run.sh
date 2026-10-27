@@ -48,7 +48,16 @@ if [ ! -s "${NOCODB_TOKEN_FILE:?Укажите NOCODB_TOKEN_FILE в .env}" ]; th
   exit 1
 fi
 
-# 3а. Папка конкурсов (Dropbox\Агент) должна быть видна из Ubuntu.
+# 3а. Ключи Claude и DeepSeek — для анализа документов (сами ключи не выводятся).
+for pair in "CLAUDE_KEY_FILE:Claude" "DEEPSEEK_KEY_FILE:DeepSeek"; do
+  var="${pair%%:*}"; name="${pair#*:}"; file="${!var:-}"
+  if [ -z "$file" ] || [ ! -s "$file" ]; then
+    echo "Нет файла с ключом $name: ${file:-(не указан)} — проверьте $var в .env" >&2
+    exit 1
+  fi
+done
+
+# 3б. Папка конкурсов (Dropbox\Агент) должна быть видна из Ubuntu.
 if [ ! -d "${TENDERS_DIR:?Укажите TENDERS_DIR в .env}" ]; then
   echo "Не найдена папка конкурсов: $TENDERS_DIR — проверьте TENDERS_DIR в .env" >&2
   exit 1

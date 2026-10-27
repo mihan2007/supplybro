@@ -4,7 +4,7 @@
 #   docker compose logs -f web     — журнал сайта (выход — Ctrl+C)
 #   docker compose logs -f worker  — журнал обработчика документов
 #   docker compose down            — остановить
-# Настройки (папки, порт, прокси, ключ NocoDB) — в файле .env рядом.
+# Настройки (папки, порт, прокси, ключи, модели ИИ) — в файле .env рядом.
 # На этом компьютере дополнительно подключается compose.local.yml (см. COMPOSE_FILE в .env).
 
 name: supplybro
@@ -24,6 +24,14 @@ services:
       HTTPS_PROXY: ${OUTBOUND_PROXY:-}
       HTTP_PROXY: ${OUTBOUND_PROXY:-}
       NO_PROXY: localhost,127.0.0.1
+      # Анализ документов (ИИ) — см. .env.
+      AUTO_ANALYZE: ${AUTO_ANALYZE:-1}
+      NOCODB_WRITE: ${NOCODB_WRITE:-1}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5-5}
+      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-medium}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
+      CLAUDE_KEY_FILE_IN_CONTAINER: /run/secrets/claude
+      DEEPSEEK_KEY_FILE_IN_CONTAINER: /run/secrets/deepseek
     volumes:
       # Папка данных (база сайта, очередь задач) — внутри Ubuntu, из DATA_DIR в .env.
       - "${DATA_DIR:?Укажите DATA_DIR в файле .env}:/data"
@@ -44,7 +52,8 @@ services:
           create_host_path: false
     restart: unless-stopped
 
-  # Обработчик документов: распаковка, конвертация, текст, распознавание (задачи из очереди).
+  # Обработчик задач: подготовка документов (распаковка, конвертация, текст, распознавание),
+  # анализ документов ИИ (Claude + перепроверка DeepSeek) и запись результата в NocoDB.
   worker:
     image: supplybro-web:dev
     command: ["python", "-m", "app.worker"]
@@ -55,6 +64,25 @@ services:
       - type: bind
         source: "${TENDERS_DIR:?Укажите TENDERS_DIR в файле .env}"
         target: /tenders
+        bind:
+          create_host_path: false
+      # Ключи — только для чтения; сами файлы остаются в папке secrets проекта.
+      - type: bind
+        source: "${NOCODB_TOKEN_FILE:?Укажите NOCODB_TOKEN_FILE в файле .env}"
+        target: /run/secrets/nocodb_main
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${CLAUDE_KEY_FILE:?Укажите CLAUDE_KEY_FILE в файле .env}"
+        target: /run/secrets/claude
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${DEEPSEEK_KEY_FILE:?Укажите DEEPSEEK_KEY_FILE в файле .env}"
+        target: /run/secrets/deepseek
+        read_only: true
         bind:
           create_host_path: false
     restart: unless-stopped

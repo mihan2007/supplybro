@@ -213,3 +213,28 @@ input[type="text"], input:not([type]), .newtender input {
   .newtender { grid-template-columns: 1fr; }
   .doc-name { min-width: 180px; }
 }
+
+/* ---------- Анализ документов ---------- */
+.btn:disabled { opacity: .55; cursor: default; }
+.btn.primary:disabled:hover { filter: none; }
+.notice { padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; background: var(--chip); }
+.notice.warn { background: var(--warn-bg); color: var(--warn-text); }
+.notice.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.notice.bad { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); }
+.notice .btn { margin-top: 8px; margin-right: 8px; }
+.notice ul { margin: 6px 0 0; padding-left: 18px; }
+.checks { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap: 4px; font-size: 13px; }
+.checks li { padding: 4px 10px; border-radius: 6px; background: var(--chip); }
+.checks li.warn { background: var(--warn-bg); color: var(--warn-text); }
+.tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+.tab {
+  font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line-strong); background: var(--panel); color: var(--text);
+}
+.tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.an-wrap { max-height: 70vh; }
+.an-wrap td { max-width: 520px; }
+td.block-row { background: var(--chip) !important; font-weight: 600; }
+.src-file { font-size: 12px; color: var(--muted); word-break: break-word; }
+.quote { font-size: 12px; color: var(--muted); font-style: italic; margin-top: 4px; }
+.usage { font-size: 12px; color: var(--muted); margin-top: 10px; }

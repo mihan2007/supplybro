@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id   TEXT NOT NULL,
     folder      TEXT NOT NULL,              -- папка конкурса внутри папки клиента
-    kind        TEXT NOT NULL,              -- 'prepare'
+    kind        TEXT NOT NULL,              -- 'prepare' / 'analyze' / 'noco'
     status      TEXT NOT NULL DEFAULT 'queued',  -- queued / running / done / error
     step        TEXT NOT NULL DEFAULT '',
     progress    REAL NOT NULL DEFAULT 0,    -- 0..1
@@ -60,6 +61,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunks USING fts5(
     client_id UNINDEXED, folder UNINDEXED, rel_path UNINDEXED, label UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+
+-- Какая запись NocoDB относится к конкурсу и создал ли её сайт (чужие записи без подтверждения не меняются).
+CREATE TABLE IF NOT EXISTS noco_links (
+    client_id       TEXT NOT NULL,
+    internal        TEXT NOT NULL,              -- внутренний номер (К992)
+    folder          TEXT NOT NULL DEFAULT '',
+    record_id       INTEGER,
+    created_by_site INTEGER NOT NULL DEFAULT 0,
+    spec_table_id   TEXT DEFAULT '',
+    updated_at      REAL,
+    PRIMARY KEY (client_id, internal)
+);
 """
 
 
@@ -73,22 +86,39 @@ def connect() -> sqlite3.Connection:
 def init() -> None:
     with connect() as con:
         con.executescript(SCHEMA)
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
+        if "params" not in cols:  # с 0.2.0: параметры задачи (JSON)
+            try:
+                con.execute("ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # колонку только что добавил другой процесс (сайт и обработчик стартуют одновременно)
 
 
 # ---------- очередь задач ----------
 
-def enqueue(client_id: str, folder: str, kind: str = "prepare") -> int:
-    """Ставит задачу в очередь. Если такая же уже ждёт — возвращает её (не плодит дубли)."""
+def enqueue(client_id: str, folder: str, kind: str = "prepare", params: dict | None = None) -> int:
+    """Ставит задачу в очередь. Если такая же уже ждёт — возвращает её (не плодит дубли),
+    дополнив её параметры новыми (например, «после подготовки — анализ»)."""
     with connect() as con:
         row = con.execute(
-            "SELECT id FROM jobs WHERE client_id=? AND folder=? AND kind=? AND status='queued' ORDER BY id DESC LIMIT 1",
-            (client_id, folder, kind)).fetchone()
+            "SELECT id, params FROM jobs WHERE client_id=? AND folder=? AND kind=? AND status='queued' "
+            "ORDER BY id DESC LIMIT 1", (client_id, folder, kind)).fetchone()
         if row:
+            if params:
+                merged = {**job_params(row), **params}
+                con.execute("UPDATE jobs SET params=? WHERE id=?", (json.dumps(merged, ensure_ascii=False), row["id"]))
             return row["id"]
         cur = con.execute(
-            "INSERT INTO jobs(client_id, folder, kind, status, created_at) VALUES (?,?,?,?,?)",
-            (client_id, folder, kind, "queued", time.time()))
+            "INSERT INTO jobs(client_id, folder, kind, status, created_at, params) VALUES (?,?,?,?,?,?)",
+            (client_id, folder, kind, "queued", time.time(), json.dumps(params or {}, ensure_ascii=False)))
         return cur.lastrowid
+
+
+def job_params(job) -> dict:
+    try:
+        return json.loads(job["params"] or "{}")
+    except (KeyError, IndexError, TypeError, ValueError):
+        return {}
 
 
 def claim_next() -> sqlite3.Row | None:
@@ -114,10 +144,18 @@ def update_job(job_id: int, **fields) -> None:
         con.execute(f"UPDATE jobs SET {cols} WHERE id=?", (*fields.values(), job_id))
 
 
-def latest_job(client_id: str, folder: str) -> dict | None:
+def latest_job(client_id: str, folder: str, kinds: tuple[str, ...] = ("prepare",)) -> dict | None:
+    marks = ",".join("?" * len(kinds))
     with connect() as con:
-        row = con.execute("SELECT * FROM jobs WHERE client_id=? AND folder=? ORDER BY id DESC LIMIT 1",
-                          (client_id, folder)).fetchone()
+        row = con.execute(f"SELECT * FROM jobs WHERE client_id=? AND folder=? AND kind IN ({marks}) "
+                          "ORDER BY id DESC LIMIT 1", (client_id, folder, *kinds)).fetchone()
+        return dict(row) if row else None
+
+
+def active_job(client_id: str, folder: str, kind: str) -> dict | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM jobs WHERE client_id=? AND folder=? AND kind=? AND status IN ('queued','running') "
+                          "ORDER BY id DESC LIMIT 1", (client_id, folder, kind)).fetchone()
         return dict(row) if row else None
 
 
@@ -125,6 +163,22 @@ def recover_interrupted() -> int:
     """После перезапуска обработчика: задачи, оборванные на середине, — снова в очередь."""
     with connect() as con:
         return con.execute("UPDATE jobs SET status='queued' WHERE status='running'").rowcount
+
+
+# ---------- записи NocoDB ----------
+
+def noco_link(client_id: str, internal: str) -> dict | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM noco_links WHERE client_id=? AND internal=?", (client_id, internal)).fetchone()
+        return dict(row) if row else None
+
+
+def save_noco_link(client_id: str, internal: str, folder: str, record_id, created_by_site: bool,
+                   spec_table_id: str = "") -> None:
+    with connect() as con:
+        con.execute("""INSERT OR REPLACE INTO noco_links(client_id, internal, folder, record_id, created_by_site,
+                       spec_table_id, updated_at) VALUES (?,?,?,?,?,?,?)""",
+                    (client_id, internal, folder, record_id, int(bool(created_by_site)), spec_table_id, time.time()))
 
 
 # ---------- документы ----------

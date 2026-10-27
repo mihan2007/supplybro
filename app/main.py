@@ -2,14 +2,15 @@
 SupplyBro — локальный сайт.
 
 Страница «/» — выбор клиента → юр. лица → конкурса; по конкурсу показываются
-документы конкурса (папка в Dropbox), карточка из «Реестра конкурсов» NocoDB и его спецификация.
+документы конкурса (папка в Dropbox), анализ документов, карточка из «Реестра конкурсов» NocoDB и его спецификация.
 
-Данные страница берёт из JSON-адресов /api/... (ниже). Сайт только читает NocoDB.
-Документы обрабатывает отдельный процесс (app/worker.py) — сайт ставит задачу в очередь.
+Данные страница берёт из JSON-адресов /api/... (ниже). Сам сайт NocoDB только читает; записывает в NocoDB
+обработчик (app/worker.py) после анализа. Документы и анализ — задачи в очереди обработчика.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -21,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .config import Client, load_clients
+from .analysis.corpus import TEXT_STATUSES
+from .analysis.run import load_result
 from .docs.names import fix_path
 from .docs.pipeline import ARCHIVE_EXT, walk_docs
 from .nocodb import NocoClient, NocoError
@@ -306,6 +309,8 @@ async def api_spec(client_id: str, record_id: int, view: str | None = None, fres
 # ---------- документы конкурса (папка в Dropbox) ----------
 
 TENDERS_DISPLAY = os.environ.get("TENDERS_DISPLAY", "Dropbox\\Агент")
+# После загрузки документов через сайт сразу запускать анализ (ИИ, платно) и запись в NocoDB.
+AUTO_ANALYZE = os.environ.get("AUTO_ANALYZE", "1").strip() not in ("0", "false", "no", "")
 STATUS_LABELS = {
     "ok": "текст извлечён", "ocr": "распознан", "empty": "текста нет", "skipped": "пропущен",
     "error": "ошибка", "archive": "архив", "pending": "ждёт обработки",
@@ -378,8 +383,9 @@ async def api_upload(client_id: str, folder: str, target: str = DOC_SUBFOLDERS[0
             while chunk := await upload.read(1 << 20):
                 out.write(chunk)
         saved.append(fix_path(dest.relative_to(base).as_posix()))
-    job_id = db.enqueue(client.id, folder, "prepare")
-    return {"saved": saved, "job_id": job_id}
+    # Загрузка через сайт — полный автомат: подготовка документов, затем анализ и запись в NocoDB.
+    job_id = db.enqueue(client.id, folder, "prepare", {"analyze": True} if AUTO_ANALYZE else None)
+    return {"saved": saved, "job_id": job_id, "auto_analyze": AUTO_ANALYZE}
 
 
 @app.post("/api/clients/{client_id}/docs/process")
@@ -418,3 +424,59 @@ def api_create_folder(client_id: str, data: dict = Body(...)):
     client = get_client(client_id)
     name = create_folder(client, str(data.get("number", "")), str(data.get("title", "")))
     return {"folder": name}
+
+
+# ---------- анализ документов (ИИ) ----------
+
+def _docs_fingerprint(client_id: str, folder: str) -> tuple[str, int]:
+    """Отпечаток набора документов с текстом (как corpus_hash анализа, но без чтения файлов)."""
+    rows = [r for r in db.doc_rows(client_id, folder).values()
+            if r.get("status") in TEXT_STATUSES and r.get("text_path")]
+    h = hashlib.sha256()
+    for r in sorted(rows, key=lambda x: x["rel_path"]):
+        h.update(f"{r['rel_path']}\0{r.get('sha256') or ''}\n".encode("utf-8"))
+    return h.hexdigest(), len(rows)
+
+
+@app.get("/api/clients/{client_id}/analysis")
+def api_analysis(client_id: str, folder: str):
+    """Результат анализа (AIExtract/analysis.json) и последняя задача анализа / записи в NocoDB."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    result = load_result(base)
+    fingerprint, docs_with_text = _docs_fingerprint(client.id, folder)
+    job = db.latest_job(client.id, folder, ("analyze", "noco"))
+    if job:
+        job["age"] = round(time.time() - (job.get("created_at") or time.time()))
+        job.pop("params", None)
+    if result and result.get("usage"):
+        result["usage"].pop("calls", None)  # подробный журнал вызовов — только в файле
+    return {
+        "result": result,
+        "job": job,
+        "docs_with_text": docs_with_text,
+        "stale": bool(result) and result.get("corpus_hash") != fingerprint,
+        "prepare_active": bool(db.active_job(client.id, folder, "prepare")),
+        "auto_analyze": AUTO_ANALYZE,
+    }
+
+
+@app.post("/api/clients/{client_id}/analysis/run")
+def api_analysis_run(client_id: str, folder: str):
+    """Запустить анализ документов (ИИ) — после него результат записывается в NocoDB."""
+    client = get_client(client_id)
+    folder_path(client, folder)
+    if db.active_job(client.id, folder, "prepare"):
+        # Документы ещё готовятся — анализ встанет в очередь сразу после подготовки.
+        return {"job_id": db.enqueue(client.id, folder, "prepare", {"analyze": True}), "after_prepare": True}
+    return {"job_id": db.enqueue(client.id, folder, "analyze")}
+
+
+@app.post("/api/clients/{client_id}/analysis/save")
+def api_analysis_save(client_id: str, folder: str, force: bool = False):
+    """Записать готовый анализ в NocoDB (force — несмотря на найденную запись-двойник / чужую запись)."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    if not load_result(base):
+        raise HTTPException(400, "анализа этого конкурса ещё нет")
+    return {"job_id": db.enqueue(client.id, folder, "noco", {"force": bool(force)})}
