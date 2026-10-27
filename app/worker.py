@@ -7,12 +7,16 @@
 Виды задач:
   prepare — подготовка документов без ИИ (этап 1); с параметром analyze=true после неё ставится анализ;
   analyze — анализ документов ИИ (этап 3) и запись в NocoDB (если NOCODB_WRITE=1);
-  noco    — только запись готового анализа в NocoDB (например, «Записать всё равно» при конфликте).
+  noco    — только запись готового анализа в NocoDB (например, «Записать всё равно» при конфликте);
+  prices  — поиск цен по позициям анализа (app/prices): Яндекс (Россия) + Claude (зарубеж), запись в xlsx и NocoDB.
+            Идёт отдельной очередью (своим потоком): отложенный поиск Яндекса ждёт ответов до получаса
+            и не должен задерживать подготовку и анализ других конкурсов.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 import time
 import traceback
 
@@ -67,13 +71,13 @@ def run_job(job) -> str:
     if job["kind"] == "prepare":
         summary = prepare(client.id, job["folder"], folder, progress)
         if params.get("analyze"):
-            db.enqueue(client.id, job["folder"], "analyze")
+            db.enqueue(client.id, job["folder"], "analyze", {"model": params["model"]} if params.get("model") else None)
             summary += ". Анализ поставлен в очередь"
         return summary
 
     if job["kind"] == "analyze":
         from .analysis.run import analyze
-        summary, result = analyze(client.id, job["folder"], folder, progress)
+        summary, result = analyze(client.id, job["folder"], folder, progress, params.get("model"))
         if NOCODB_WRITE:
             noco = _save_noco(client, job["folder"], folder, result, False, progress)
             summary += ". " + _noco_text(noco)
@@ -89,15 +93,27 @@ def run_job(job) -> str:
             raise RuntimeError(noco["text"])
         return _noco_text(noco)
 
+    if job["kind"] == "prices":
+        from .prices.run import find_prices
+        summary, _report = find_prices(client, job["folder"], folder, progress, urgent=bool(params.get("urgent")),
+                                       abroad=params.get("abroad", True) is not False)
+        return summary
+
     raise RuntimeError(f"неизвестный вид задачи: {job['kind']}")
 
 
-def main() -> None:
-    db.init()
-    restored = db.recover_interrupted()
-    print(f"Обработчик запущен. Возвращено в очередь прерванных задач: {restored}", flush=True)
+PRICE_KINDS = ("prices",)
+
+
+def lane(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> None:
+    """Очередь задач: берёт задачи своих видов по одной и выполняет их."""
     while True:
-        job = db.claim_next()
+        try:
+            job = db.claim_next(only=only, skip=skip)
+        except Exception:
+            traceback.print_exc()
+            time.sleep(5)
+            continue
         if job is None:
             time.sleep(POLL_SECONDS)
             continue
@@ -110,6 +126,14 @@ def main() -> None:
         except Exception as exc:
             traceback.print_exc()
             db.update_job(job["id"], status="error", message=f"{exc}"[:500], finished_at=time.time())
+
+
+def main() -> None:
+    db.init()
+    restored = db.recover_interrupted()
+    print(f"Обработчик запущен. Возвращено в очередь прерванных задач: {restored}", flush=True)
+    threading.Thread(target=lane, kwargs={"only": PRICE_KINDS}, name="prices", daemon=True).start()
+    lane(skip=PRICE_KINDS)
 
 
 if __name__ == "__main__":

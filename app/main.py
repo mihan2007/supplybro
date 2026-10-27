@@ -17,13 +17,13 @@ import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db
+from . import chat, db
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
-from .analysis.run import load_result
+from .analysis.run import ANALYSIS_MODELS, CLAUDE_MODEL, load_result
 from .docs.names import fix_path
 from .docs.pipeline import ARCHIVE_EXT, walk_docs
 from .nocodb import NocoClient, NocoError
@@ -458,18 +458,23 @@ def api_analysis(client_id: str, folder: str):
         "stale": bool(result) and result.get("corpus_hash") != fingerprint,
         "prepare_active": bool(db.active_job(client.id, folder, "prepare")),
         "auto_analyze": AUTO_ANALYZE,
+        "models": ANALYSIS_MODELS,
+        "default_model": CLAUDE_MODEL,
     }
 
 
 @app.post("/api/clients/{client_id}/analysis/run")
-def api_analysis_run(client_id: str, folder: str):
+def api_analysis_run(client_id: str, folder: str, model: str | None = None):
     """Запустить анализ документов (ИИ) — после него результат записывается в NocoDB."""
     client = get_client(client_id)
     folder_path(client, folder)
+    if db.active_job(client.id, folder, "prices"):
+        raise HTTPException(409, "идёт поиск цен по этому конкурсу — дождитесь его окончания")
+    params = {"model": model} if model in ANALYSIS_MODELS else {}
     if db.active_job(client.id, folder, "prepare"):
         # Документы ещё готовятся — анализ встанет в очередь сразу после подготовки.
-        return {"job_id": db.enqueue(client.id, folder, "prepare", {"analyze": True}), "after_prepare": True}
-    return {"job_id": db.enqueue(client.id, folder, "analyze")}
+        return {"job_id": db.enqueue(client.id, folder, "prepare", {"analyze": True, **params}), "after_prepare": True}
+    return {"job_id": db.enqueue(client.id, folder, "analyze", params)}
 
 
 @app.post("/api/clients/{client_id}/analysis/save")
@@ -480,3 +485,75 @@ def api_analysis_save(client_id: str, folder: str, force: bool = False):
     if not load_result(base):
         raise HTTPException(400, "анализа этого конкурса ещё нет")
     return {"job_id": db.enqueue(client.id, folder, "noco", {"force": bool(force)})}
+
+
+# ---------- поиск цен ----------
+
+@app.get("/api/clients/{client_id}/prices")
+def api_prices(client_id: str, folder: str):
+    """Отчёт поиска цен (AIExtract/prices.json), последняя задача поиска, оценка стоимости следующего поиска."""
+    from .prices import run as prices
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    result = load_result(base)
+    report = prices.load_report(base)
+    job = db.latest_job(client.id, folder, ("prices",))
+    if job:
+        job["age"] = round(time.time() - (job.get("created_at") or time.time()))
+        job.pop("params", None)
+    if report:
+        for g in report.get("groups") or []:
+            cands = g.pop("candidates", []) or []
+            g["checked"] = sum(1 for c in cands if c.get("opened"))
+            g["found"] = len(cands)
+    return {
+        "report": report,
+        "job": job,
+        "has_analysis": bool(result and result.get("positions")),
+        "positions": [{k: r.get(k) for k in ("№", "Наименование позиции", "Марка/модель", "Кол-во", "Ед. изм.",
+                                              "Стоимость НМЦ")} for r in (result or {}).get("positions") or []],
+        "stale": bool(report and result and (result.get("analyzed_at") or 0) > (report.get("at") or 0)),
+        "analysis_active": bool(db.active_job(client.id, folder, "analyze") or db.active_job(client.id, folder, "prepare")),
+        "estimate": prices.estimate(result) if result else None,
+        "settings": prices.settings(),
+    }
+
+
+@app.post("/api/clients/{client_id}/prices/run")
+def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bool = True):
+    """Запустить поиск цен по позициям анализа (Яндекс — Россия, Claude — зарубеж)."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    result = load_result(base)
+    if not (result and result.get("positions")):
+        raise HTTPException(400, "сначала нужен анализ документов — цены ищутся по его позициям")
+    if db.active_job(client.id, folder, "analyze") or db.active_job(client.id, folder, "prepare"):
+        raise HTTPException(409, "идёт подготовка или анализ документов — поиск цен можно запустить после них")
+    return {"job_id": db.enqueue(client.id, folder, "prices", {"urgent": bool(urgent), "abroad": bool(abroad)})}
+
+
+# ---------- чат по документации ----------
+
+@app.get("/api/clients/{client_id}/chat")
+def api_chat_history(client_id: str, folder: str):
+    """История чата конкурса и настройки (модели на выбор)."""
+    client = get_client(client_id)
+    folder_path(client, folder)
+    return {"messages": db.chat_history(client.id, folder), "models": chat.CHAT_MODELS, "default_model": chat.CHAT_MODEL,
+            "cache_ttl": chat.CHAT_CACHE_TTL}
+
+
+@app.post("/api/clients/{client_id}/chat")
+def api_chat_ask(client_id: str, folder: str, data: dict = Body(...)):
+    """Вопрос по документации. Ответ идёт по мере готовности: строки JSON ({"t":"text"…}, в конце {"t":"done"…})."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    gen = chat.ask(client.id, folder, base, str(data.get("question", "")), data.get("model"))
+    return StreamingResponse(gen, media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/clients/{client_id}/chat/clear")
+def api_chat_clear(client_id: str, folder: str):
+    client = get_client(client_id)
+    folder_path(client, folder)
+    return {"deleted": db.chat_clear(client.id, folder)}

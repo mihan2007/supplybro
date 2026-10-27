@@ -28,7 +28,8 @@ from .. import db
 from . import prompts
 from .corpus import QuoteIndex, build_documents_block, corpus_hash, load_docs
 from .fields import COMPUTED, CRITICAL, DISPLAY_ORDER, GROUPS, NOT_SPECIFIED, label_of
-from .llm import Claude, DeepSeek, LLMError, Usage
+from .llm import Claude, DeepSeek, LLMError, TruncatedError, Usage
+from .pricing import money
 from .spec_xlsx import write_spec_xlsx
 
 from tools import deepseek_extract, save_tender  # копии скриптов старого проекта, используются как библиотека
@@ -44,12 +45,23 @@ RESULT_FILE = OUT_DIR / "analysis.json"
 SPEC_FILE = "Позиции_и_цены.xlsx"
 SPEC_FILE_ALT = "Позиции_и_цены (SupplyBro).xlsx"   # если файл агента уже есть — его не трогаем
 
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5")
+# Модели анализа на выбор на странице (рядом с кнопкой «Запустить анализ»).
+ANALYSIS_MODELS = [m.strip() for m in os.environ.get("ANALYSIS_MODELS", "claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5")
+                   .split(",") if m.strip()]
+if CLAUDE_MODEL not in ANALYSIS_MODELS:
+    ANALYSIS_MODELS.insert(0, CLAUDE_MODEL)
 CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT", "medium")
+# Haiku при «medium» думает очень долго (ответы не помещались даже в 40 тыс. токенов) — для неё своя глубина.
+HAIKU_EFFORT = os.environ.get("HAIKU_EFFORT", "low")
+
+
+def effort_for(model: str) -> str:
+    return HAIKU_EFFORT if "haiku" in model else CLAUDE_EFFORT
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 CORPUS_LIMIT = int(os.environ.get("ANALYSIS_MAX_CHARS", "900000"))
 DEEPSEEK_LIMIT = int(os.environ.get("DEEPSEEK_MAX_CHARS", "900000"))
-CHUNK = int(os.environ.get("ANALYSIS_POSITIONS_PER_CALL", "10"))
+CHUNK = int(os.environ.get("ANALYSIS_POSITIONS_PER_CALL", "8"))
 PARALLEL = int(os.environ.get("ANALYSIS_PARALLEL_CALLS", "6"))
 DEEPSEEK_MAX_PRIORITY = 6   # формы заявки и анкеты (приоритет 7) DeepSeek не отправляются — там нет критичных полей
 
@@ -127,24 +139,40 @@ def _deepseek(documents_text: str, usage: Usage) -> dict:
 
 
 def _group(claude: Claude, docs_block: str, today: str, group) -> dict:
-    """Поля одной группы блоков 1–7."""
+    """Поля одной группы блоков 1–7. Если ответ не поместился — группа делится пополам."""
     title, keys = group
-    ans = claude.json_call(system=prompts.SYSTEM, documents=docs_block, prompt=prompts.group_prompt(keys, today),
-                           schema=prompts.group_schema(keys), label=f"Поля: {title}", max_tokens=16000)
+    try:
+        ans = claude.json_call(system=prompts.SYSTEM, documents=docs_block, prompt=prompts.group_prompt(keys, today),
+                               schema=prompts.group_schema(keys), label=f"Поля: {title}", max_tokens=32000)
+    except TruncatedError:
+        if len(keys) < 2:
+            raise
+        half = len(keys) // 2
+        return {**_group(claude, docs_block, today, (title + " (½)", keys[:half])),
+                **_group(claude, docs_block, today, (title + " (½)", keys[half:]))}
     return {k: ans.get(k) or {"value": NOT_SPECIFIED, "quote": "", "file": ""} for k in keys}
 
 
 def _inventory(claude: Claude, docs_block: str, today: str) -> dict:
     return claude.json_call(system=prompts.SYSTEM, documents=docs_block,
                             prompt=prompts.INVENTORY_PROMPT.format(today=today),
-                            schema=prompts.INVENTORY_SCHEMA, label="Позиции: перечень", max_tokens=48000)
+                            schema=prompts.INVENTORY_SCHEMA, label="Позиции: перечень", max_tokens=64000)
 
 
 def _details(claude: Claude, docs_block: str, today: str, main_source: str, part: list[dict], label: str) -> list[dict]:
+    """Подробности позиций одной части. Если ответ не поместился (модель много думала или ТЗ длинные) —
+    часть делится пополам и запрашивается заново."""
     items = "\n".join(f"{p['n']}. {p['name']} — {p['qty']} {p['unit']}" for p in part)
-    ans = claude.json_call(system=prompts.SYSTEM, documents=docs_block,
-                           prompt=prompts.DETAIL_PROMPT.format(today=today, main_source=main_source, items=items),
-                           schema=prompts.DETAIL_SCHEMA, label=label, max_tokens=40000)
+    try:
+        ans = claude.json_call(system=prompts.SYSTEM, documents=docs_block,
+                               prompt=prompts.DETAIL_PROMPT.format(today=today, main_source=main_source, items=items),
+                               schema=prompts.DETAIL_SCHEMA, label=label, max_tokens=64000)
+    except TruncatedError:
+        if len(part) == 1:
+            raise
+        half = len(part) // 2
+        return (_details(claude, docs_block, today, main_source, part[:half], f"{label} (½)")
+                + _details(claude, docs_block, today, main_source, part[half:], f"{label} (½)"))
     return ans.get("positions") or []
 
 
@@ -157,7 +185,7 @@ def _compare(claude: Claude, docs_block: str, today: str, ours: dict, theirs: di
     return claude.json_call(system=prompts.SYSTEM, documents=docs_block,
                             prompt=prompts.COMPARE_PROMPT.format(today=today, items="\n\n".join(items)),
                             schema=prompts.compare_schema(keys), label="Перепроверка критичных полей",
-                            max_tokens=16000)
+                            max_tokens=32000)
 
 
 # ---------- проверки кодом ----------
@@ -309,8 +337,9 @@ def _apply_markers(values: dict, verdicts: dict) -> dict[str, dict]:
 
 # ---------- главная функция ----------
 
-def analyze(client_id: str, folder_name: str, folder: Path, progress) -> tuple[str, dict]:
-    """Анализ документов конкурса. Возвращает (итог одной строкой, результат)."""
+def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str | None = None) -> tuple[str, dict]:
+    """Анализ документов конкурса. Возвращает (итог одной строкой, результат). model — модель Claude (иначе CLAUDE_MODEL)."""
+    model = model if model in ANALYSIS_MODELS else CLAUDE_MODEL
     started = time.time()
     today = datetime.now(MSK).strftime("%d.%m.%Y")
     docs = load_docs(client_id, folder_name, folder)
@@ -318,7 +347,7 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress) -> tuple[s
         raise AnalysisError("нет документов с извлечённым текстом — сначала загрузите и обработайте документы")
     docs_block, used, skipped = build_documents_block(docs, CORPUS_LIMIT)
     usage = Usage()
-    claude = Claude(CLAUDE_MODEL, usage, CLAUDE_EFFORT)
+    claude = Claude(model, usage, effort_for(model))
     checks: list[str] = []
     if skipped:
         checks.append("⚠ Не поместились в анализ (слишком большой объём): " + ", ".join(d.base for d in skipped))
@@ -388,6 +417,11 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress) -> tuple[s
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
+    if claude.fallback:
+        checks.insert(0, f"⚠ {claude.fallback_reason[:1].upper() + claude.fallback_reason[1:]}. "
+                         f"Анализ продолжен на DeepSeek ({claude.fallback}) — точность может быть ниже; "
+                         "перепроверка DeepSeek в этом случае не независимая.")
+
     # 4. Проверка цитат кодом.
     progress("Проверка цитат", 0.8)
     qi = QuoteIndex(used)
@@ -422,6 +456,11 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress) -> tuple[s
     flat["source_file"] = " + ".join(d.base for d in used)
     flat["extracted_date"] = datetime.now(MSK).strftime("%Y-%m-%d")
     previous = load_result(folder) or {}
+    if previous.get("positions"):
+        from ..prices.run import carry_over       # цены, найденные поиском цен до повторного анализа
+        kept = carry_over(previous["positions"], rows)
+        if kept:
+            checks.append(f"Цены рынков перенесены из прошлого поиска цен: {kept} поз. (позиции не изменились).")
     outputs = _save_files(folder, flat, rows, previous.get("outputs") or {})
 
     result = {
@@ -429,7 +468,8 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress) -> tuple[s
         "analyzed_at": time.time(),
         "analyzed_at_text": datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
         "seconds": round(time.time() - started),
-        "models": {"claude": CLAUDE_MODEL, "effort": CLAUDE_EFFORT, "deepseek": DEEPSEEK_MODEL},
+        "models": {"claude": model, "effort": effort_for(model), "deepseek": DEEPSEEK_MODEL,
+                   "fallback": claude.fallback or ""},
         "corpus_hash": corpus_hash(docs),
         "documents": [{"name": d.name, "chars": len(d.text), "used": d in used} for d in docs],
         "internal_number": internal,
@@ -440,13 +480,14 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress) -> tuple[s
                       "other_sources": [s.get("source") for s in inv.get("other_sources") or []],
                       "tz_general": inv.get("tz_general") or "", "notes": inv.get("notes") or ""},
         "checks": checks,
-        "usage": {"totals": usage.totals(), "calls": usage.calls},
+        "usage": {"totals": usage.totals(), "usd": usage.total_usd(), "calls": usage.calls},
         "outputs": outputs,
         "noco": previous.get("noco") if previous.get("internal_number") == internal else None,
     }
     save_result(folder, result)
     summary = (f"Поля: {sum(1 for r in field_rows if not r['value'].startswith(NOT_SPECIFIED))} из {len(field_rows)} заполнено; "
-               f"позиций: {len(rows)}; замечаний: {sum(1 for c in checks if not c.startswith('✅'))}")
+               f"позиций: {len(rows)}; замечаний: {sum(1 for c in checks if not c.startswith('✅'))}; "
+               f"стоимость ≈ {money(usage.total_usd())}" + (f"; ⚠ вместо Claude — {claude.fallback}" if claude.fallback else ""))
     return summary, result
 
 

@@ -57,6 +57,17 @@ for pair in "CLAUDE_KEY_FILE:Claude" "DEEPSEEK_KEY_FILE:DeepSeek"; do
   fi
 done
 
+# 3а-2. Ключ Яндекса — для поиска цен по России. Без него сайт работает, кнопка «Искать цены» выключена:
+#       создаём пустой файл, чтобы контейнер запустился (ключ — потом, в этот же файл).
+if [ -z "${YANDEX_KEY_FILE:-}" ]; then
+  echo "В .env не указан YANDEX_KEY_FILE" >&2
+  exit 1
+fi
+if [ ! -s "$YANDEX_KEY_FILE" ]; then
+  echo "Нет ключа Яндекса ($YANDEX_KEY_FILE) — поиск цен по России будет выключен."
+  [ -e "$YANDEX_KEY_FILE" ] || : > "$YANDEX_KEY_FILE"
+fi
+
 # 3б. Папка конкурсов (Dropbox\Агент) должна быть видна из Ubuntu.
 if [ ! -d "${TENDERS_DIR:?Укажите TENDERS_DIR в .env}" ]; then
   echo "Не найдена папка конкурсов: $TENDERS_DIR — проверьте TENDERS_DIR в .env" >&2

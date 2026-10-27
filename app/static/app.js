@@ -23,11 +23,13 @@ const state = {
   nextNumber: "",
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, pr: 0 };
 let docsTimer = null;
 let anTimer = null;
 let anLastJob = null;   // последняя увиденная задача анализа — чтобы заметить её окончание
 let anTab = "fields";
+let prTimer = null;
+let prLastJob = null;   // последняя увиденная задача поиска цен
 
 // ---------- общее ----------
 
@@ -309,6 +311,8 @@ function currentTender() {
 function showTender(t) {
   $("head").hidden = $("docs").hidden = !t;
   $("analysis").hidden = !(t && t.folder);
+  $("prices").hidden = !(t && t.folder);
+  $("chat").hidden = !(t && t.folder);
   $("card").hidden = $("spec").hidden = !(t && t.source === "nocodb");
   $("empty").hidden = Boolean(t);
 }
@@ -320,12 +324,14 @@ async function loadTender() {
   if (!t) return;
   stopDocsPolling();
   stopAnalysisPolling();
+  stopPricesPolling();
   anLastJob = null;
+  prLastJob = null;
   if (t.source === "nocodb") {
-    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis()]);
+    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadChat()]);
   } else {
     renderFolderHead(t);
-    await Promise.all([loadDocs(), loadAnalysis()]);
+    await Promise.all([loadDocs(), loadAnalysis(), loadPrices(), loadChat()]);
   }
   state.fresh = false;
 }
@@ -610,6 +616,7 @@ async function loadAnalysis() {
   const finished = anLastJob && d.job && anLastJob.id === d.job.id &&
     ["queued", "running"].includes(anLastJob.status) && !["queued", "running"].includes(d.job.status);
   anLastJob = d.job ? { id: d.job.id, status: d.job.status } : null;
+  if (finished) loadPrices();
   if (finished) {
     const noco = d.result && d.result.noco;
     if (noco && noco.status === "saved") {
@@ -650,8 +657,19 @@ function renderAnalysisJob(job) {
   return false;
 }
 
+const AN_MODEL_KEY = "supplybro.analysisModel";
+
+function usd(x) {
+  if (x === null || x === undefined) return "";
+  return x < 0.01 ? "$" + x.toFixed(4) : "$" + x.toFixed(2);
+}
+
 function renderAnalysis(d, busy) {
   const r = d.result;
+  if (d.models) {
+    const saved = storageGet(AN_MODEL_KEY);
+    fillSelect($("an-model"), d.models.map((x) => ({ value: x, label: x })), d.models.includes(saved) ? saved : d.default_model);
+  }
   const run = $("an-run");
   run.textContent = r ? "Повторить анализ" : "Запустить анализ";
   run.disabled = busy || !d.docs_with_text;
@@ -659,7 +677,9 @@ function renderAnalysis(d, busy) {
     : "Сначала загрузите документы — анализировать пока нечего";
   $("an-stale").hidden = !(d.stale && !busy);
   $("an-info").textContent = r
-    ? `· ${r.analyzed_at_text} · ${r.models.claude}` + (r.seconds ? ` · ${Math.max(1, Math.round(r.seconds / 60))} мин` : "")
+    ? `· ${r.analyzed_at_text} · ${r.models.claude}` + (r.models.fallback ? ` → ${r.models.fallback}` : "") +
+      (r.seconds ? ` · ${Math.max(1, Math.round(r.seconds / 60))} мин` : "") +
+      (r.usage && r.usage.usd !== undefined ? ` · ≈ ${usd(r.usage.usd)}` : "")
     : "";
   if (!r) {
     $("an-body").hidden = true;
@@ -812,7 +832,39 @@ function renderAnalysisPositions(rows) {
 
 function showAnalysisTab(tab) {
   anTab = tab;
-  for (const b of document.querySelectorAll("#analysis .tab")) b.classList.toggle("active", b.dataset.tab === tab);
+  $("pr-run").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  $("pr-run").disabled = true;
+  try {
+    await api(clientPath("/prices/run"), { folder: t.folder, urgent: $("pr-urgent").checked ? "1" : "",
+      abroad: $("pr-abroad").checked ? "1" : "0" }, { method: "POST" });
+    $("pr-urgent").checked = false;
+  } catch (err) {
+    setStatus("pr-status", "Не удалось запустить поиск цен: " + err.message, true);
+  }
+  loadPrices();
+});
+$("pr-abroad").addEventListener("change", (e) => storageSet(PR_ABROAD_KEY, e.target.checked ? "1" : "0"));
+$("chat-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = $("chat-input").value;
+  if (!q.trim() || chatBusy) return;
+  $("chat-input").value = "";
+  askChat(q.trim());
+});
+$("chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("chat-form").requestSubmit(); }
+});
+$("chat-model").addEventListener("change", (e) => storageSet(CHAT_MODEL_KEY, e.target.value));
+$("chat-clear").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t || !t.folder || chatBusy) return;
+  try { await api(clientPath("/chat/clear"), { folder: t.folder }, { method: "POST" }); } catch (_) { /* покажем как есть */ }
+  loadChat();
+});
+$("an-model").addEventListener("change", (e) => storageSet(AN_MODEL_KEY, e.target.value));
+for (const b of document.querySelectorAll("#analysis .tab")) b.classList.toggle("active", b.dataset.tab === tab);
   $("an-fields").hidden = tab !== "fields";
   $("an-positions").hidden = tab !== "positions";
   if (tab === "positions") {
@@ -827,8 +879,367 @@ function usageText(totals) {
   const n = (x) => fmtInt.format(x || 0);
   const parts = Object.entries(totals).map(([model, u]) =>
     `${model}: вызовов ${u.calls}, вход ${n(u.input)}` + (u.cache_write ? `, в кэш ${n(u.cache_write)}` : "") +
-    (u.cache_read ? `, из кэша ${n(u.cache_read)}` : "") + `, ответ ${n(u.output)}`);
-  return parts.length ? "Токены — " + parts.join("; ") : "";
+    (u.cache_read ? `, из кэша ${n(u.cache_read)}` : "") + `, ответ ${n(u.output)}` +
+    (u.usd !== undefined ? ` ≈ ${usd(u.usd)}` : ""));
+  return parts.length ? "Токены — " + parts.join("; ") + ". Стоимость — оценка по ценам API; точная сумма — в консоли Anthropic." : "";
+}
+
+// ---------- поиск цен ----------
+
+const PR_ABROAD_KEY = "supplybro.pricesAbroad";
+const fmtRub = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+
+function stopPricesPolling() {
+  if (prTimer) { clearTimeout(prTimer); prTimer = null; }
+}
+
+async function loadPrices() {
+  const t = currentTender();
+  const my = ++seq.pr;
+  stopPricesPolling();
+  if (!t || !t.folder) { $("prices").hidden = true; return; }
+  $("prices").hidden = false;
+  let d;
+  try {
+    d = await api(clientPath("/prices"), { folder: t.folder });
+  } catch (err) {
+    if (my === seq.pr) setStatus("pr-status", "Не удалось загрузить поиск цен: " + err.message, true);
+    return;
+  }
+  if (my !== seq.pr) return;
+  setStatus("pr-status", "");
+  const busy = renderPricesJob(d.job);
+  renderPrices(d, busy);
+  const finished = prLastJob && d.job && prLastJob.id === d.job.id &&
+    ["queued", "running"].includes(prLastJob.status) && !["queued", "running"].includes(d.job.status);
+  prLastJob = d.job ? { id: d.job.id, status: d.job.status } : null;
+  if (finished) {
+    loadAnalysis();                         // в позициях анализа появились цены рынков
+    if (t.source === "nocodb") loadSpec();  // и, возможно, в спецификации NocoDB
+  }
+  if (busy) prTimer = setTimeout(loadPrices, 3000);
+}
+
+function renderPricesJob(job) {
+  const box = $("pr-job");
+  if (!job) { box.hidden = true; return false; }
+  box.hidden = false;
+  box.classList.remove("error", "done");
+  if (job.status === "queued") {
+    $("pr-bar").style.width = "0%";
+    $("pr-job-text").textContent = "Поиск цен: в очереди…" + (job.age > 30 ? " (обработчик занят другим поиском или не запущен)" : "");
+    return true;
+  }
+  if (job.status === "running") {
+    $("pr-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
+    $("pr-job-text").textContent = "Поиск цен: " + (job.step || "…");
+    return true;
+  }
+  $("pr-bar").style.width = "100%";
+  const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
+  if (job.status === "error") {
+    box.classList.add("error");
+    $("pr-job-text").textContent = `Поиск цен — ошибка (${when}): ${job.message}`;
+  } else {
+    box.classList.add("done");
+    $("pr-job-text").textContent = `Поиск цен — готово (${when}). ${job.message}`;
+  }
+  return false;
+}
+
+function rub(x) {
+  return x === null || x === undefined || x === "" ? "" : fmtRub.format(x) + " ₽";
+}
+
+function toNum(v) {
+  if (typeof v === "number") return v;
+  const n = parseFloat(String(v || "").replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+
+function renderPrices(d, busy) {
+  const r = d.report;
+  const s = d.settings || {};
+  const abroadBox = $("pr-abroad");
+  const saved = storageGet(PR_ABROAD_KEY);
+  abroadBox.checked = saved === null ? s.abroad !== false : saved === "1";
+  abroadBox.disabled = s.abroad === false;
+  const run = $("pr-run");
+  run.textContent = r ? "Искать заново" : "Искать цены";
+  run.disabled = busy || !d.has_analysis || d.analysis_active || !s.yandex_key;
+  const e = d.estimate;
+  run.title = !d.has_analysis ? "Сначала нужен анализ документов — цены ищутся по его позициям"
+    : d.analysis_active ? "Идёт подготовка или анализ документов — поиск цен после них"
+    : !s.yandex_key ? "Нет ключа Яндекса (secrets/API_key_Yandex.txt)"
+    : e ? `Артикулов: ${e.groups}, запросов к Яндексу: ${e.queries} (≈ ${e.yandex_async_rub} ₽, срочно ≈ ${e.yandex_sync_rub} ₽)` +
+          `; зарубеж ≈ $${e.abroad_usd}` : "";
+  $("pr-stale").hidden = !(d.stale && !busy);
+  $("pr-info").textContent = r
+    ? `· ${r.at_text} · ${Math.max(1, Math.round((r.seconds || 0) / 60))} мин · ≈ ${usd(r.cost.claude_usd)} + ${fmtRub.format(r.cost.yandex_rub)} ₽`
+    : "";
+  if (!s.yandex_key) {
+    setStatus("pr-status", "Поиск по России выключен: нет ключа Яндекса. Положите ключ в файл secrets\\API_key_Yandex.txt и перезапустите сайт.", true);
+  } else if (!r && !busy) {
+    setStatus("pr-status", d.has_analysis
+      ? "Цен ещё нет. «Искать цены» — программа найдёт товар в Яндексе (Россия)" + (abroadBox.checked ? " и через Claude за рубежом" : "") +
+        ", откроет страницы магазинов, проверит артикул и цену и выберет по 3 самые низкие цены со ссылками." +
+        (e ? ` Оценка: ${e.groups} артикулов, ≈ ${e.yandex_async_rub} ₽ Яндекс` + (abroadBox.checked ? ` + ≈ $${e.abroad_usd} Claude.` : ".") : "")
+      : "Поиск цен станет доступен после анализа документов.");
+  }
+  if (!r) {
+    $("pr-wrap").hidden = true;
+    $("pr-noco").replaceChildren();
+    $("pr-checks").replaceChildren();
+    $("pr-usage").textContent = "";
+    return;
+  }
+  const n = r.noco || {};
+  $("pr-noco").replaceChildren(el("div", {
+    class: "notice " + (n.status === "saved" ? "ok" : n.status === "error" ? "bad" : ""),
+    text: n.status === "saved" ? `✅ NocoDB: цены записаны в спецификацию (строк: ${n.rows}).`
+      : n.status === "error" ? "Запись цен в NocoDB не удалась: " + (n.text || "") : "NocoDB: " + (n.text || "не записано"),
+  }));
+  const sm = r.summary || {};
+  const checks = [`Артикулов: ${sm.groups}; Россия — цены у ${sm.rf_found} (все три — у ${sm.rf_full}); ` +
+    (r.abroad === false ? "зарубеж не искали." : `зарубеж — у ${sm.abroad_found} (все три — у ${sm.abroad_full}).`),
+    ...(r.checks || []), ...(r.errors || []).slice(0, 8).map((x) => "⚠ " + x)];
+  $("pr-checks").replaceChildren(...checks.map((c) => el("li", { class: c.startsWith("⚠") || /замечаний — [1-9]/.test(c) ? "warn" : "", text: c })));
+  renderPricesTable(r, d.positions || []);
+  const c = r.cost || {};
+  $("pr-usage").textContent = `Яндекс: отложенных запросов ${c.yandex_async || 0}, мгновенных ${c.yandex_sync || 0}` +
+    (c.yandex_cached ? `, из сохранённых за сутки ${c.yandex_cached}` : "") + ` ≈ ${fmtRub.format(c.yandex_rub || 0)} ₽. ` +
+    (c.searches ? `Поисков Claude за рубежом: ${c.searches}. ` : "") + usageText(c.claude);
+}
+
+function offerList(items, abroad) {
+  const box = el("div", { class: "offers" });
+  for (const a of items || []) {
+    const line = el("div");
+    line.append(el("a", { href: a.url, target: "_blank", rel: "noopener", text: rub(a.price_rub), title: a.note || a.url }));
+    line.append(el("span", { class: "muted", text: " " + a.domain + (abroad && a.currency && a.currency !== "RUB" ? ` · ${a.price} ${a.currency}` : "") }));
+    box.append(line);
+  }
+  return box;
+}
+
+function renderPricesTable(r, positions) {
+  const byN = new Map(positions.map((p) => [String(p["№"]), p]));
+  const cols = ["№", "Позиция", "НМЦ за ед.", "Россия (3 лучшие)", "Зарубеж (3 лучшие, в рублях по курсу ЦБ)", "Мин. к НМЦ", "Своя база", "Как искали"];
+  const head = el("tr", {}, ...cols.map((h, i) => el("th", { class: i === 0 ? "stick0" : (i === 1 ? "stick1" : null), text: h })));
+  const body = el("tbody");
+  for (const g of r.groups || []) {
+    const p = byN.get(String((g.positions || [])[0])) || {};
+    const nmc = toNum(p["Стоимость НМЦ"]);
+    const rf = (g.chosen && g.chosen.rf) || [];
+    const ab = (g.chosen && g.chosen.abroad) || [];
+    const all = [...rf, ...ab].map((a) => a.price_rub).filter((x) => x);
+    const min = all.length ? Math.min(...all) : null;
+    const pos = el("td", { class: "stick1" });
+    pos.append(el("div", { text: g.name }));
+    if (g.brand_model) pos.append(el("div", { class: "muted", text: g.brand_model }));
+    const ratio = el("td", { class: "num" });
+    if (min && nmc) {
+      const pct = Math.round((min / nmc - 1) * 100);
+      ratio.append(el("span", { class: "badge " + (pct <= -15 ? "ok" : pct < 0 ? "warn" : "bad"), text: (pct > 0 ? "+" : "") + pct + " %",
+        title: `Самая низкая найденная цена ${rub(min)} к НМЦ за единицу ${rub(nmc)}` }));
+    }
+    const hist = el("td");
+    for (const h of (g.history || []).slice(0, 3)) {
+      const line = el("div", { class: "src-file" });
+      line.append(`${h.tender} № ${h.n}: `);
+      (h.prices || []).slice(0, 3).forEach((x, i) => {
+        if (i) line.append(", ");
+        const label = `${x.kind} ${rub(toNum(x.price))}`;
+        line.append(x.url ? el("a", { href: x.url, target: "_blank", rel: "noopener", text: label }) : el("span", { text: label, title: x.who || "" }));
+      });
+      hist.append(line);
+    }
+    const how = el("td");
+    const qs = [`Яндекс: ${(g.rf_queries || []).map((q) => "«" + q + "»").join(", ")}`];
+    if ((g.abroad_queries || []).length) qs.push(`Claude: ${g.abroad_queries.map((q) => "«" + q + "»").join(", ")}`);
+    qs.push(`Найдено страниц: ${g.found || 0}, открыто и проверено: ${g.checked || 0}`);
+    if ((g.unopened || []).length) qs.push("Не открылись: " + [...new Set(g.unopened)].join(", "));
+    how.append(longText(qs.join("\n")));
+    body.append(el("tr", {},
+      el("td", { class: "stick0", text: (g.positions || []).join(", ") }), pos,
+      el("td", { class: "num", text: nmc ? rub(nmc) : "" }),
+      el("td", {}, rf.length ? offerList(rf, false) : el("span", { class: "empty-val", text: "не найдено" })),
+      el("td", {}, ab.length ? offerList(ab, true) : el("span", { class: "empty-val", text: r.abroad === false ? "не искали" : "не найдено" })),
+      ratio, hist, how));
+  }
+  const table = $("pr-table");
+  table.replaceChildren(el("thead", {}, head), body);
+  $("pr-wrap").hidden = false;
+  const first = table.querySelector("th.stick0");
+  if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
+}
+
+// ---------- чат по документации ----------
+
+const CHAT_MODEL_KEY = "supplybro.chatModel";
+let chatBusy = false;
+
+function storageGet(key) { try { return localStorage.getItem(key); } catch (_) { return null; } }
+function storageSet(key, v) { try { localStorage.setItem(key, v); } catch (_) { /* браузер не даёт хранить */ } }
+
+// Простое оформление ответа: абзацы, списки «- », **жирный**. Текст вставляется только как текст.
+function inlineMd(text) {
+  const frag = document.createDocumentFragment();
+  text.split(/(\*\*[^*]+\*\*)/g).forEach((part) => {
+    if (/^\*\*[^*]+\*\*$/.test(part)) frag.append(el("b", { text: part.slice(2, -2) }));
+    else if (part) frag.append(linkify(part));
+  });
+  return frag;
+}
+
+function renderMd(text) {
+  const box = document.createDocumentFragment();
+  let list = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trimEnd();
+    const item = line.match(/^\s*[-•*]\s+(.*)$/) || line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (item) {
+      if (!list) { list = el("ul"); box.append(list); }
+      list.append(el("li", {}, inlineMd(item[1])));
+      continue;
+    }
+    list = null;
+    if (!line.trim()) continue;
+    const head = line.match(/^#{1,4}\s+(.*)$/);
+    box.append(el("p", {}, head ? el("b", { text: head[1] }) : inlineMd(line)));
+  }
+  return box;
+}
+
+// Ответ делится на текст и раздел «Источники:» (его программа проверяет по документам).
+function splitSources(text) {
+  const m = text.match(/(^|\n)\s*\**\s*Источники\s*:?\s*\**\s*(\n|$)/i);
+  return m ? [text.slice(0, m.index), text.slice(m.index + m[0].length)] : [text, ""];
+}
+
+const SRC_BADGE = { ok: ["✓", "ok"], other_file: ["✓", "ok"], partial: ["≈", "warn"], not_found: ["✗ цитата не найдена", "bad"] };
+
+function chatMeta(meta) {
+  if (!meta) return "";
+  const u = meta.usage || {};
+  const n = (x) => fmtInt.format(x || 0);
+  const parts = [meta.fallback ? `${meta.fallback} (вместо ${meta.model}: на счёте Anthropic нет денег)` : meta.model];
+  if (meta.mode === "fragments") parts.push("по найденным фрагментам");
+  if (u.input !== undefined) {
+    parts.push(`вход ${n(u.input)}` + (u.cache_read ? `, из кэша ${n(u.cache_read)}` : "") +
+      (u.cache_write ? `, в кэш ${n(u.cache_write)}` : "") + `, ответ ${n(u.output)} токенов`);
+  }
+  if (u.usd !== undefined && u.usd !== null) parts.push(`≈ ${usd(u.usd)}`);
+  if (meta.seconds) parts.push(`${meta.seconds} с`);
+  return parts.filter(Boolean).join(" · ");
+}
+
+function renderChatMessage(m) {
+  if (m.role === "user") return el("div", { class: "msg user", text: m.content });
+  if (m.role === "error") return el("div", { class: "msg error", text: "Ошибка: " + (m.meta && m.meta.error ? m.meta.error : m.content) });
+  const box = el("div", { class: "msg assistant" });
+  const [body, src] = splitSources(m.content);
+  box.append(renderMd(body));
+  const checked = (m.meta && m.meta.sources) || [];
+  if (src.trim() || checked.length) {
+    const ul = el("ul");
+    const lines = checked.length ? checked : src.split("\n").filter((l) => l.trim()).map((l) => ({ text: l.replace(/^\s*[-•*]\s*/, "") }));
+    for (const s of lines) {
+      const li = el("li", {}, linkify(s.text));
+      const b = SRC_BADGE[s.quote_status];
+      if (b) li.append(" ", el("span", { class: "badge " + b[1], text: b[0] }));
+      ul.append(li);
+    }
+    box.append(el("div", { class: "sources" }, el("b", { text: "Источники:" }), ul));
+  }
+  const meta = chatMeta(m.meta);
+  if (meta) box.append(el("div", { class: "meta", text: meta }));
+  return box;
+}
+
+async function loadChat() {
+  const t = currentTender();
+  const my = ++seq.chat;
+  if (!t || !t.folder) return;
+  let d;
+  try {
+    d = await api(clientPath("/chat"), { folder: t.folder });
+  } catch (err) {
+    if (my === seq.chat) $("chat-hint").textContent = "Не удалось загрузить чат: " + err.message;
+    return;
+  }
+  if (my !== seq.chat) return;
+  const saved = storageGet(CHAT_MODEL_KEY);
+  fillSelect($("chat-model"), d.models.map((x) => ({ value: x, label: x })), d.models.includes(saved) ? saved : d.default_model);
+  $("chat-log").replaceChildren(...d.messages.map(renderChatMessage));
+  $("chat-hint").textContent = "Ответы — только по документам этого конкурса, с источниками; цитаты программа сверяет с текстом. " +
+    `Документы передаются модели один раз и дальше берутся из кэша (${d.cache_ttl === "1h" ? "час" : "5 минут"} после последнего вопроса) — около 10 % цены.`;
+  scrollChat();
+}
+
+function scrollChat() {
+  const log = $("chat-log");
+  log.scrollTop = log.scrollHeight;
+}
+
+async function askChat(question) {
+  const t = currentTender();
+  if (!t || !t.folder || chatBusy || !question.trim()) return;
+  chatBusy = true;
+  $("chat-send").disabled = true;
+  const log = $("chat-log");
+  log.append(el("div", { class: "msg user", text: question }));
+  const answer = el("div", { class: "msg assistant" }, el("span", { class: "typing", text: "Думаю…" }));
+  log.append(answer);
+  scrollChat();
+  let text = "";
+  let finished = false;
+  try {
+    const u = new URL(clientPath("/chat"), location.origin);
+    u.searchParams.set("folder", t.folder);
+    const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, model: $("chat-model").value }) });
+    if (!r.ok || !r.body) {
+      let detail = "";
+      try { detail = (await r.json()).detail; } catch (_) { /* не JSON */ }
+      throw new Error(detail || `ошибка ${r.status}`);
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        const ev = JSON.parse(line);
+        if (ev.t === "text") {
+          text += ev.text;
+          answer.replaceChildren(renderMd(splitSources(text)[0]));
+          scrollChat();
+        } else if (ev.t === "notice") {
+          answer.replaceChildren(el("span", { class: "typing", text: ev.text }));
+        } else if (ev.t === "done") {
+          answer.replaceWith(renderChatMessage({ role: "assistant", content: text, meta: ev.meta }));
+          finished = true;
+        } else if (ev.t === "error") {
+          answer.replaceWith(renderChatMessage({ role: "error", content: ev.text, meta: { error: ev.text } }));
+          finished = true;
+        }
+      }
+    }
+    if (!finished) throw new Error("ответ оборвался — проверьте, что сайт запущен");
+  } catch (err) {
+    answer.replaceWith(renderChatMessage({ role: "error", content: err.message, meta: { error: err.message } }));
+  } finally {
+    chatBusy = false;
+    $("chat-send").disabled = false;
+    scrollChat();
+  }
 }
 
 // ---------- спецификация ----------
@@ -962,12 +1373,30 @@ $("an-run").addEventListener("click", async () => {
   if (!t || !t.folder) return;
   $("an-run").disabled = true;
   try {
-    await api(clientPath("/analysis/run"), { folder: t.folder }, { method: "POST" });
+    await api(clientPath("/analysis/run"), { folder: t.folder, model: $("an-model").value }, { method: "POST" });
   } catch (err) {
     setStatus("an-status", "Не удалось запустить анализ: " + err.message, true);
   }
   loadAnalysis();
 });
+$("chat-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = $("chat-input").value;
+  if (!q.trim() || chatBusy) return;
+  $("chat-input").value = "";
+  askChat(q.trim());
+});
+$("chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("chat-form").requestSubmit(); }
+});
+$("chat-model").addEventListener("change", (e) => storageSet(CHAT_MODEL_KEY, e.target.value));
+$("chat-clear").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t || !t.folder || chatBusy) return;
+  try { await api(clientPath("/chat/clear"), { folder: t.folder }, { method: "POST" }); } catch (_) { /* покажем как есть */ }
+  loadChat();
+});
+$("an-model").addEventListener("change", (e) => storageSet(AN_MODEL_KEY, e.target.value));
 for (const b of document.querySelectorAll("#analysis .tab")) b.addEventListener("click", () => showAnalysisTab(b.dataset.tab));
 $("reg-view").addEventListener("change", (e) => { state.regView = e.target.value; loadCard(); });
 $("spec-view").addEventListener("change", (e) => { state.specView = e.target.value; loadSpec(); });

@@ -238,3 +238,34 @@ td.block-row { background: var(--chip) !important; font-weight: 600; }
 .src-file { font-size: 12px; color: var(--muted); word-break: break-word; }
 .quote { font-size: 12px; color: var(--muted); font-style: italic; margin-top: 4px; }
 .usage { font-size: 12px; color: var(--muted); margin-top: 10px; }
+
+/* ---------- Чат по документации ---------- */
+.chat-log { display: grid; gap: 10px; max-height: 65vh; overflow: auto; padding: 2px; margin-bottom: 10px; }
+.chat-log:empty { display: none; }
+.msg { padding: 10px 12px; border-radius: 10px; font-size: 14px; line-height: 1.5; max-width: 100%; min-width: 0; word-break: break-word; }
+.msg.user { background: var(--accent-soft); justify-self: end; max-width: 85%; white-space: pre-wrap; }
+.msg.assistant { background: var(--chip); }
+.msg.error { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); white-space: pre-wrap; }
+.msg p { margin: 0 0 6px; }
+.msg p:last-child { margin-bottom: 0; }
+.msg ul { margin: 2px 0 6px; padding-left: 20px; }
+.msg .sources { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.msg .sources li { margin-bottom: 3px; }
+.msg .meta { margin-top: 6px; font-size: 11px; color: var(--muted); }
+.msg .typing { color: var(--muted); }
+.chat-form { display: flex; gap: 8px; align-items: flex-end; }
+.chat-form textarea {
+  flex: 1; min-width: 0; resize: vertical; padding: 8px 10px; font: inherit; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px;
+}
+.chat-form .btn { padding: 9px 16px; font-size: 14px; }
+.chat-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+/* Поиск цен */
+#pr-table td { vertical-align: top; }
+#pr-table .offers div { white-space: nowrap; line-height: 1.5; }
+#pr-table .offers a { font-variant-numeric: tabular-nums; font-weight: 600; }
+#pr-table .offers .muted { font-size: 12px; }
+#pr-table .clamp { white-space: pre-line; font-size: 12px; color: var(--muted); max-width: 360px; }
+#pr-table td.stick1 { min-width: 220px; }
+.empty-val { color: var(--muted); }

@@ -25,6 +25,13 @@ RUN if [ -n "$APT_MIRROR" ]; then sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/a
  && (apt-get install -y --no-install-recommends unrar || apt-get install -y --no-install-recommends unar) \
  && rm -rf /var/lib/apt/lists/*
 
+# Встроенный браузер без окна (Chromium) — для поиска цен: открывает страницы магазинов, где цену рисует JavaScript.
+# Отдельным шагом и не обязательно: если пакет не скачался, сайт работает, просто такие страницы не открываются.
+RUN apt-get update \
+ && (apt-get install -y --no-install-recommends chromium fonts-liberation \
+     || echo "ВНИМАНИЕ: Chromium не установлен — страницы, где цену рисует JavaScript, открываться не будут") \
+ && rm -rf /var/lib/apt/lists/*
+
 # Обычный пользователь вместо root. UID 1000 совпадает с пользователем Ubuntu (user_1),
 # поэтому файлы в папке данных будут принадлежать вам, а не root.
 RUN useradd --create-home --uid 1000 app

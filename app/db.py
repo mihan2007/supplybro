@@ -62,6 +62,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunks USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
+-- Чат по документации конкурса: вопросы, ответы (с моделью, токенами, проверкой источников) и ошибки.
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id   TEXT NOT NULL,
+    folder      TEXT NOT NULL,
+    role        TEXT NOT NULL,              -- user / assistant / error
+    content     TEXT NOT NULL,
+    meta        TEXT NOT NULL DEFAULT '{}',
+    created_at  REAL
+);
+CREATE INDEX IF NOT EXISTS chat_folder ON chat_messages(client_id, folder, id);
+
 -- Какая запись NocoDB относится к конкурсу и создал ли её сайт (чужие записи без подтверждения не меняются).
 CREATE TABLE IF NOT EXISTS noco_links (
     client_id       TEXT NOT NULL,
@@ -121,12 +133,20 @@ def job_params(job) -> dict:
         return {}
 
 
-def claim_next() -> sqlite3.Row | None:
-    """Берёт самую старую ждущую задачу и помечает её «выполняется» (одним действием)."""
+def claim_next(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> sqlite3.Row | None:
+    """Берёт самую старую ждущую задачу и помечает её «выполняется» (одним действием).
+    only — только задачи этих видов; skip — кроме этих видов (поиск цен идёт отдельной очередью)."""
+    where, args = "status='queued'", []
+    if only:
+        where += f" AND kind IN ({','.join('?' * len(only))})"
+        args += list(only)
+    if skip:
+        where += f" AND kind NOT IN ({','.join('?' * len(skip))})"
+        args += list(skip)
     con = connect()
     try:
         con.execute("BEGIN IMMEDIATE")
-        row = con.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+        row = con.execute(f"SELECT * FROM jobs WHERE {where} ORDER BY id LIMIT 1", args).fetchone()
         if row:
             con.execute("UPDATE jobs SET status='running', started_at=?, step='', progress=0 WHERE id=?",
                         (time.time(), row["id"]))
@@ -163,6 +183,36 @@ def recover_interrupted() -> int:
     """После перезапуска обработчика: задачи, оборванные на середине, — снова в очередь."""
     with connect() as con:
         return con.execute("UPDATE jobs SET status='queued' WHERE status='running'").rowcount
+
+
+# ---------- чат по документации ----------
+
+def chat_add(client_id: str, folder: str, role: str, content: str, meta: dict | None = None) -> int:
+    with connect() as con:
+        cur = con.execute("INSERT INTO chat_messages(client_id, folder, role, content, meta, created_at) VALUES (?,?,?,?,?,?)",
+                          (client_id, folder, role, content, json.dumps(meta or {}, ensure_ascii=False), time.time()))
+        return cur.lastrowid
+
+
+def chat_history(client_id: str, folder: str, limit: int = 200) -> list[dict]:
+    """Последние сообщения чата конкурса, по порядку."""
+    with connect() as con:
+        rows = con.execute("SELECT * FROM chat_messages WHERE client_id=? AND folder=? ORDER BY id DESC LIMIT ?",
+                           (client_id, folder, limit)).fetchall()
+    out = []
+    for r in reversed(rows):
+        d = dict(r)
+        try:
+            d["meta"] = json.loads(d.get("meta") or "{}")
+        except ValueError:
+            d["meta"] = {}
+        out.append(d)
+    return out
+
+
+def chat_clear(client_id: str, folder: str) -> int:
+    with connect() as con:
+        return con.execute("DELETE FROM chat_messages WHERE client_id=? AND folder=?", (client_id, folder)).rowcount
 
 
 # ---------- записи NocoDB ----------

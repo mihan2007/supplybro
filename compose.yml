@@ -27,11 +27,28 @@ services:
       # Анализ документов (ИИ) — см. .env.
       AUTO_ANALYZE: ${AUTO_ANALYZE:-1}
       NOCODB_WRITE: ${NOCODB_WRITE:-1}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5-5}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
+      ANALYSIS_MODELS: ${ANALYSIS_MODELS:-claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5}
       CLAUDE_EFFORT: ${CLAUDE_EFFORT:-medium}
+      HAIKU_EFFORT: ${HAIKU_EFFORT:-low}
+      FALLBACK_TO_DEEPSEEK: ${FALLBACK_TO_DEEPSEEK:-1}
+      FALLBACK_DEEPSEEK_MODEL: ${FALLBACK_DEEPSEEK_MODEL:-deepseek-flash}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
       CLAUDE_KEY_FILE_IN_CONTAINER: /run/secrets/claude
       DEEPSEEK_KEY_FILE_IN_CONTAINER: /run/secrets/deepseek
+      # Чат по документации — см. .env.
+      CHAT_MODEL: ${CHAT_MODEL:-claude-haiku-5-5}
+      CHAT_MODELS: ${CHAT_MODELS:-claude-haiku-5-5,claude-sonnet-5-5,deepseek-flash}
+      CHAT_CACHE_TTL: ${CHAT_CACHE_TTL:-1h}
+      # Поиск цен — см. .env.
+      YANDEX_KEY_FILE_IN_CONTAINER: /run/secrets/yandex
+      PRICES_MODEL: ${PRICES_MODEL:-claude-haiku-5-5}
+      PRICES_ABROAD: ${PRICES_ABROAD:-1}
+      PRICES_ABROAD_SEARCHES: ${PRICES_ABROAD_SEARCHES:-5}
+      PRICES_ASYNC_TIMEOUT_MIN: ${PRICES_ASYNC_TIMEOUT_MIN:-30}
+      PRICES_MAX_PAGES: ${PRICES_MAX_PAGES:-12}
+      PRICES_HISTORY_HOURS: ${PRICES_HISTORY_HOURS:-12}
+      YANDEX_RESULTS_PER_QUERY: ${YANDEX_RESULTS_PER_QUERY:-20}
     volumes:
       # Папка данных (база сайта, очередь задач) — внутри Ubuntu, из DATA_DIR в .env.
       - "${DATA_DIR:?Укажите DATA_DIR в файле .env}:/data"
@@ -43,17 +60,38 @@ services:
         target: /tenders
         bind:
           create_host_path: false
-      # Ключ NocoDB — только для чтения; сам файл остаётся в папке secrets проекта.
+      # Ключи — только для чтения; сами файлы остаются в папке secrets проекта.
+      # Claude и DeepSeek нужны сайту для чата по документации.
       - type: bind
         source: "${NOCODB_TOKEN_FILE:?Укажите NOCODB_TOKEN_FILE в файле .env}"
         target: /run/secrets/nocodb_main
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: "${CLAUDE_KEY_FILE:?Укажите CLAUDE_KEY_FILE в файле .env}"
+        target: /run/secrets/claude
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${DEEPSEEK_KEY_FILE:?Укажите DEEPSEEK_KEY_FILE в файле .env}"
+        target: /run/secrets/deepseek
+        read_only: true
+        bind:
+          create_host_path: false
+      # Яндекс — поиск цен по России (сайту — чтобы показать, есть ли ключ).
+      - type: bind
+        source: "${YANDEX_KEY_FILE:?Укажите YANDEX_KEY_FILE в файле .env}"
+        target: /run/secrets/yandex
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
 
   # Обработчик задач: подготовка документов (распаковка, конвертация, текст, распознавание),
-  # анализ документов ИИ (Claude + перепроверка DeepSeek) и запись результата в NocoDB.
+  # анализ документов ИИ (Claude + перепроверка DeepSeek) и запись результата в NocoDB,
+  # поиск цен (Яндекс + Claude, отдельной очередью).
   worker:
     image: supplybro-web:dev
     command: ["python", "-m", "app.worker"]
@@ -82,6 +120,13 @@ services:
       - type: bind
         source: "${DEEPSEEK_KEY_FILE:?Укажите DEEPSEEK_KEY_FILE в файле .env}"
         target: /run/secrets/deepseek
+        read_only: true
+        bind:
+          create_host_path: false
+      # Яндекс — поиск цен по России (сайту — чтобы показать, есть ли ключ).
+      - type: bind
+        source: "${YANDEX_KEY_FILE:?Укажите YANDEX_KEY_FILE в файле .env}"
+        target: /run/secrets/yandex
         read_only: true
         bind:
           create_host_path: false
