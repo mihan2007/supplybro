@@ -95,8 +95,27 @@ def safe_name(text: str, limit: int = 120) -> str:
     return name[:limit].rstrip(". ")
 
 
-def create_folder(client: Client, number: str, title: str) -> str:
-    """Создаёт папку «<номер> <название>» по шаблону «К---». Возвращает имя папки."""
+def _template_ignore(skipped: list[str]):
+    """Что не копировать из шаблона «К---»: результаты ИИ (AIExtract), временные файлы и папки, внутри которых есть
+    AIExtract, — это материалы какого-то конкурса, попавшие в шаблон по ошибке (так 28.10.2026 в каждый новый конкурс
+    копировалась папка Documents_32616424721 чужого конкурса и анализировалась вместо пустой документации)."""
+    def ignore(dirpath, names):
+        out = set()
+        for n in names:
+            p = Path(dirpath) / n
+            if n == "AIExtract" or n.startswith("~$") or n.lower() in ("thumbs.db", "desktop.ini"):
+                out.add(n)
+            elif p.is_dir() and (p / "AIExtract").is_dir():
+                out.add(n)
+                skipped.append(n)
+        return out
+    return ignore
+
+
+def create_folder(client: Client, number: str, title: str, skipped: list[str] | None = None) -> str:
+    """Создаёт папку «<номер> <название>» по шаблону «К---». Возвращает имя папки. skipped — сюда дописываются
+    папки шаблона, которые не скопированы (материалы чужого конкурса)."""
+    skipped = skipped if skipped is not None else []
     num = norm_number(number)
     if not num:
         raise FolderError("номер конкурса должен быть вида К940")
@@ -110,10 +129,13 @@ def create_folder(client: Client, number: str, title: str) -> str:
         raise FolderError(f"папка уже существует: {name}")
     template = root / TEMPLATE_FOLDER
     if template.is_dir():
-        shutil.copytree(template, dest)
-    else:
-        for sub in DEFAULT_SUBFOLDERS:
-            (dest / sub).mkdir(parents=True, exist_ok=True)
+        shutil.copytree(template, dest, ignore=_template_ignore(skipped))
+    # Подпапки документов — всегда: обрабатываются только они. Без них обработка берёт всю папку конкурса
+    # (так устроены старые папки) — и в новом конкурсе без документов взяла бы всё, что лежало в шаблоне.
+    # Шаблона нет или в нём нет ни одной папки — стандартный набор подпапок.
+    has_dirs = dest.is_dir() and any(x.is_dir() for x in dest.iterdir())
+    for sub in (DOC_SUBFOLDERS if has_dirs else DEFAULT_SUBFOLDERS):
+        (dest / sub).mkdir(parents=True, exist_ok=True)
     return name
 
 

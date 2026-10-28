@@ -56,6 +56,14 @@
             — файлы лягут в «Конкурсная документация» и сразу пойдут в обработку</div>
           <div class="nt-files" id="nt-file-list"></div>
         </div>
+        <div class="notice warn nt-nofiles" id="nt-nofiles" hidden>
+          Документы не выбраны. Будет создана пустая папка конкурса — обработка и анализ не начнутся, документы можно
+          добавить потом в блоке «Документы».
+          <div class="nt-nofiles-actions">
+            <button class="btn small" type="button" id="nt-empty-ok">Создать без документов</button>
+            <label class="btn small primary">Выбрать документы<input type="file" id="nt-files2" multiple hidden></label>
+          </div>
+        </div>
         <div class="nt-actions">
           <button class="btn primary" type="submit">Создать конкурс</button>
           <button class="btn" type="button" id="nt-cancel">Отмена</button>

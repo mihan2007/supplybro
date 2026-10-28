@@ -270,6 +270,7 @@ async function loadTenders() {
 
 // Файлы документации, выбранные в форме нового конкурса (загрузятся сразу после создания папки).
 let newTenderFiles = [];
+let ntEmptyOk = false;     // «Создать без документов» подтверждено
 
 function showNewTenderForm(on) {
   $("new-tender").hidden = !on;
@@ -278,6 +279,8 @@ function showNewTenderForm(on) {
     $("nt-number").value = state.nextNumber;
     $("nt-title").value = "";
     setNewTenderFiles([]);
+    ntEmptyOk = false;
+    $("nt-nofiles").hidden = true;
     setStatus("nt-status", "");
     $("nt-title").focus();
   }
@@ -285,6 +288,7 @@ function showNewTenderForm(on) {
 
 function setNewTenderFiles(files) {
   newTenderFiles = [...files];
+  if (newTenderFiles.length) $("nt-nofiles").hidden = true;
   const box = $("nt-file-list");
   box.replaceChildren();
   if (newTenderFiles.length) {
@@ -299,6 +303,10 @@ async function createFolder(number, title) {
   const data = await api(clientPath("/folders"), {}, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ number, title }),
   });
+  if (data.template_skipped && data.template_skipped.length) {
+    toast(`Из шаблона «К---» не скопировано: ${data.template_skipped.join(", ")} — там результаты анализа, похоже, ` +
+      "это материалы другого конкурса. Уберите их из шаблона.", true);
+  }
   return data.folder;
 }
 
@@ -1675,8 +1683,14 @@ $("tender").addEventListener("change", (e) => {
 });
 $("new-tender").addEventListener("submit", async (e) => {
   e.preventDefault();
-  setStatus("nt-status", "Создаю папку…");
   const files = newTenderFiles;
+  // Документы не выбраны — сначала спросить (28.10.2026 так по ошибке создали конкурс без документации).
+  if (!files.length && !ntEmptyOk) {
+    $("nt-nofiles").hidden = false;
+    return;
+  }
+  $("nt-nofiles").hidden = true;
+  setStatus("nt-status", "Создаю папку…");
   try {
     const folder = await createFolder($("nt-number").value.trim(), $("nt-title").value.trim());
     showNewTenderForm(false);
@@ -1689,6 +1703,8 @@ $("new-tender").addEventListener("submit", async (e) => {
 });
 $("new-tender-btn").addEventListener("click", () => showNewTenderForm(true));
 $("nt-files").addEventListener("change", (e) => { setNewTenderFiles(e.target.files); e.target.value = ""; });
+$("nt-files2").addEventListener("change", (e) => { setNewTenderFiles(e.target.files); e.target.value = ""; });
+$("nt-empty-ok").addEventListener("click", () => { ntEmptyOk = true; $("new-tender").requestSubmit(); });
 const ntDrop = $("nt-drop");
 for (const ev of ["dragenter", "dragover"]) {
   ntDrop.addEventListener(ev, (e) => { e.preventDefault(); ntDrop.classList.add("over"); });

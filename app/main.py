@@ -456,8 +456,9 @@ def api_doc_file(client_id: str, folder: str, path: str):
 def api_create_folder(client_id: str, data: dict = Body(...)):
     """Новый конкурс: папка «<номер> <заказчик и предмет>» по шаблону «К---»."""
     client = get_client(client_id)
-    name = create_folder(client, str(data.get("number", "")), str(data.get("title", "")))
-    return {"folder": name}
+    skipped: list[str] = []
+    name = create_folder(client, str(data.get("number", "")), str(data.get("title", "")), skipped)
+    return {"folder": name, "template_skipped": skipped}
 
 
 # ---------- анализ документов (ИИ) ----------
