@@ -27,6 +27,12 @@ HEADERS = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,applicat
 MAX_BYTES = 4_000_000
 PER_DOMAIN = int(os.environ.get("FETCH_PER_DOMAIN", "2"))
 PROXY = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+CONNECT_TIMEOUT = float(os.environ.get("FETCH_CONNECT_TIMEOUT", "6"))
+READ_TIMEOUT = float(os.environ.get("FETCH_READ_TIMEOUT", "15"))
+BROWSER_TIMEOUT = int(os.environ.get("FETCH_BROWSER_TIMEOUT", "25"))
+# Ошибки «сайт не отвечает по этому пути» — пробуем другой путь (напрямую ↔ через прокси); «сайт отвечает медленно» —
+# второй раз не ждём.
+ROUTE_ERRORS = ("ConnectTimeout", "ConnectError", "ProxyError", "PoolTimeout")
 CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
 
 _domain_locks: dict[str, threading.Semaphore] = {}
@@ -51,7 +57,7 @@ def _sem(domain: str) -> threading.Semaphore:
 def _get(url: str, use_proxy: bool) -> Page:
     page = Page(url=url, via="proxy" if use_proxy else "direct")
     try:
-        with httpx.Client(timeout=httpx.Timeout(25, connect=10), follow_redirects=True, headers=HEADERS,
+        with httpx.Client(timeout=httpx.Timeout(READ_TIMEOUT, connect=CONNECT_TIMEOUT), follow_redirects=True, headers=HEADERS,
                           proxy=PROXY if (use_proxy and PROXY) else None, trust_env=False) as http:
             with http.stream("GET", url) as r:
                 page.status, page.final_url = r.status_code, str(r.url)
@@ -90,10 +96,12 @@ def fetch(url: str, *, foreign: bool = False) -> Page:
                 return page
             if page.status in (403, 404, 410, 451):
                 break           # сайт ответил отказом — через прокси не лучше
+            if page.error and page.error not in ROUTE_ERRORS:
+                break           # сайт отвечает, но медленно или не страницей — второй раз не ждём
         return page
 
 
-def browser_html(url: str, *, foreign: bool = False, timeout: int = 40) -> Page:
+def browser_html(url: str, *, foreign: bool = False, timeout: int = BROWSER_TIMEOUT) -> Page:
     """Страница, нарисованная браузером (для цен, которые подставляет JavaScript)."""
     page = Page(url=url, via="browser")
     if not CHROMIUM:
@@ -101,7 +109,7 @@ def browser_html(url: str, *, foreign: bool = False, timeout: int = 40) -> Page:
         return page
     args = [CHROMIUM, "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
             "--blink-settings=imagesEnabled=false", f"--user-agent={UA}", "--lang=ru-RU",
-            "--virtual-time-budget=12000", "--dump-dom", url]
+            "--virtual-time-budget=8000", "--dump-dom", url]
     # Российские магазины — напрямую (через зарубежный прокси часть из них не открывается), зарубежные — через прокси.
     args.insert(1, f"--proxy-server={PROXY}" if foreign and PROXY else "--no-proxy-server")
     domain = urlparse(url).hostname or ""

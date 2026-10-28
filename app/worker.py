@@ -6,8 +6,10 @@
 
 Виды задач:
   prepare — подготовка документов без ИИ (этап 1); с параметром analyze=true после неё ставится анализ;
-  analyze — анализ документов ИИ (этап 3) и запись в NocoDB (если NOCODB_WRITE=1);
-  noco    — только запись готового анализа в NocoDB (например, «Записать всё равно» при конфликте);
+  analyze — анализ документов ИИ (этап 3); после него в очереди ставятся запись в NocoDB (NOCODB_WRITE=1) и поиск
+            цен (AUTO_PRICES=1);
+  noco    — запись анализа в NocoDB (после анализа — сама, или «Записать всё равно» при конфликте); своя очередь;
+  noco_prices — дописать найденные цены в спецификацию NocoDB после записи анализа (та же очередь, следом);
   prices  — поиск цен по позициям анализа (app/prices): DeepSeek (Россия и зарубеж; Яндекс — на выбор), запись
             в xlsx и NocoDB.
             Идёт отдельной очередью (своим потоком): отложенный поиск Яндекса ждёт ответов до получаса
@@ -28,13 +30,17 @@ from .tenders import folder_path
 
 POLL_SECONDS = 1.5
 NOCODB_WRITE = os.environ.get("NOCODB_WRITE", "1").strip() not in ("0", "false", "no", "")
+# После анализа сразу искать цены (решение пользователя 28.10.2026): 1 — да, 0 — только по кнопке.
+AUTO_PRICES = os.environ.get("AUTO_PRICES", "1").strip() not in ("0", "false", "no", "")
 
 
 def _noco_text(noco: dict) -> str:
     if not noco:
         return ""
     if noco.get("status") == "saved":
-        return f"NocoDB: запись {noco['record_id']} {'создана' if noco['action'] == 'created' else 'обновлена'}"
+        return (f"NocoDB: запись {noco['record_id']} {'создана' if noco['action'] == 'created' else 'обновлена'}"
+                + (f" (отдельно от двойника {noco['conflict'].get('internal') or noco['conflict'].get('record_id')})"
+                   if noco.get("separate") and noco.get("conflict") else ""))
     if noco.get("status") == "conflict":
         return "NocoDB: не записано — нужно подтверждение (см. блок «Анализ»)"
     if noco.get("status") == "error":
@@ -44,12 +50,17 @@ def _noco_text(noco: dict) -> str:
 
 def _save_noco(client, job_folder: str, folder, result: dict, force: bool, progress) -> dict:
     from .analysis import noco_write
-    from .analysis.run import save_result
+    from .analysis.run import load_result, save_result
     try:
         noco = noco_write.save(client, job_folder, result, force=force, progress=progress)
     except Exception as exc:  # запись в NocoDB не должна терять сам анализ
         traceback.print_exc()
         noco = {"status": "error", "text": f"{exc}"[:500], "at": time.time()}
+    # Пока шла запись (у нового конкурса — минуты), поиск цен мог уже дописать цены в analysis.json —
+    # сохраняем только сведения о записи в NocoDB в свежую версию файла, не затирая цены.
+    fresh = load_result(folder)
+    if fresh and fresh.get("analyzed_at") == result.get("analyzed_at"):
+        result = fresh
     result["noco"] = noco
     save_result(folder, result)
     return noco
@@ -77,11 +88,24 @@ def run_job(job) -> str:
         return summary
 
     if job["kind"] == "analyze":
-        from .analysis.run import analyze
-        summary, result = analyze(client.id, job["folder"], folder, progress, params.get("model"))
+        from .analysis.run import analyze, load_result
+        prev = load_result(folder)
+        if prev and prev.get("positions") and not prev.get("noco") \
+                and float(prev.get("analyzed_at") or 0) > float(job["created_at"] or 0):
+            # Анализ этой задачи уже был сделан, обработчик перезапустили на записи в NocoDB — не платим за
+            # анализ второй раз и продолжаем с записи (те же позиции — сайт узнает свою таблицу спецификации).
+            result = prev
+            summary = "Анализ был готов до перезапуска обработчика — продолжено с записи в NocoDB"
+        else:
+            summary, result = analyze(client.id, job["folder"], folder, progress, params.get("model"))
+        # Запись в NocoDB и поиск цен — в своих очередях (у нового конкурса запись идёт 10–20 минут: программа
+        # агента настраивает представления спецификации по колонке на запрос), анализ следующих конкурсов не ждёт.
         if NOCODB_WRITE:
-            noco = _save_noco(client, job["folder"], folder, result, False, progress)
-            summary += ". " + _noco_text(noco)
+            db.enqueue(client.id, job["folder"], "noco")
+            summary += ". Запись в NocoDB поставлена в очередь"
+        if AUTO_PRICES and result.get("positions"):
+            db.enqueue(client.id, job["folder"], "prices")
+            summary += ". Поиск цен запущен"
         return summary
 
     if job["kind"] == "noco":
@@ -92,7 +116,19 @@ def run_job(job) -> str:
         noco = _save_noco(client, job["folder"], folder, result, bool(params.get("force")), progress)
         if noco.get("status") == "error":
             raise RuntimeError(noco["text"])
-        return _noco_text(noco)
+        summary = _noco_text(noco)
+        fresh = load_result(folder) or result
+        if AUTO_PRICES and noco.get("status") == "saved" and fresh.get("positions") and not fresh.get("prices_at") \
+                and not db.active_job(client.id, job["folder"], "prices"):
+            db.enqueue(client.id, job["folder"], "prices")      # цен ещё не искали — ищем и пишем в спецификацию
+            summary += ". Поиск цен поставлен в очередь"
+        return summary
+
+    if job["kind"] == "noco_prices":
+        # Цены нашлись, пока анализ ещё записывался в NocoDB: эта задача стоит в той же очереди после записи
+        # и дописывает цены в готовую спецификацию.
+        from .prices.run import write_prices_noco
+        return write_prices_noco(client, job["folder"], folder)
 
     if job["kind"] == "prices":
         from .prices.run import find_prices
@@ -104,10 +140,28 @@ def run_job(job) -> str:
 
 
 PRICE_KINDS = ("prices",)
+NOCO_KINDS = ("noco", "noco_prices")
 
 
-def lane(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> None:
+_current: dict[str, int | None] = {}     # очередь → выполняемая задача (для сигнала «обработчик жив»)
+HEARTBEAT_SECONDS = 10
+
+
+def heartbeats() -> None:
+    """Раз в 10 с каждая очередь отмечается в базе: страница видит, что обработчик жив, даже когда задача
+    долго не меняет шаг (например, NocoDB ограничивает частоту запросов)."""
+    while True:
+        for name, job_id in list(_current.items()):
+            try:
+                db.heartbeat(name, job_id)
+            except Exception:
+                traceback.print_exc()
+        time.sleep(HEARTBEAT_SECONDS)
+
+
+def lane(name: str, only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> None:
     """Очередь задач: берёт задачи своих видов по одной и выполняет их."""
+    _current[name] = None
     while True:
         try:
             job = db.claim_next(only=only, skip=skip)
@@ -118,6 +172,8 @@ def lane(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> None:
         if job is None:
             time.sleep(POLL_SECONDS)
             continue
+        _current[name] = job["id"]
+        db.heartbeat(name, job["id"])
         print(f"Задача {job['id']}: {job['kind']} — {job['folder']}", flush=True)
         try:
             summary = run_job(job)
@@ -127,14 +183,22 @@ def lane(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> None:
         except Exception as exc:
             traceback.print_exc()
             db.update_job(job["id"], status="error", message=f"{exc}"[:500], finished_at=time.time())
+        _current[name] = None
+        db.heartbeat(name, None)
 
 
 def main() -> None:
     db.init()
     restored = db.recover_interrupted()
     print(f"Обработчик запущен. Возвращено в очередь прерванных задач: {restored}", flush=True)
-    threading.Thread(target=lane, kwargs={"only": PRICE_KINDS}, name="prices", daemon=True).start()
-    lane(skip=PRICE_KINDS)
+    # Три очереди: подготовка и анализ; запись в NocoDB (долгая у новых конкурсов); поиск цен (ждёт ответов поиска).
+    for name in ("docs", "nocodb", "prices"):
+        _current[name] = None
+        db.heartbeat(name, None)
+    threading.Thread(target=heartbeats, name="heartbeat", daemon=True).start()
+    threading.Thread(target=lane, args=("prices",), kwargs={"only": PRICE_KINDS}, name="prices", daemon=True).start()
+    threading.Thread(target=lane, args=("nocodb",), kwargs={"only": NOCO_KINDS}, name="nocodb", daemon=True).start()
+    lane("docs", skip=PRICE_KINDS + NOCO_KINDS)
 
 
 if __name__ == "__main__":

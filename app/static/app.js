@@ -509,6 +509,42 @@ function renderDocs(files) {
 }
 
 // Возвращает true, если задача ещё идёт (нужно обновлять).
+// ---------- ход задач: ждёт / идёт / жив ли обработчик ----------
+
+function fmtDur(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  if (sec < 60) return `${sec} с`;
+  if (sec < 3600) return `${Math.round(sec / 60)} мин`;
+  return `${Math.floor(sec / 3600)} ч ${Math.round((sec % 3600) / 60)} мин`;
+}
+
+// «В очереди» — за кем стоит задача или что обработчик не запущен.
+function queuedText(job) {
+  if (job.worker_alive === false && job.age > 20) {
+    return "в очереди — обработчик не отвечает" + (job.worker_seen ? ` (последний отклик ${fmtDur(job.worker_seen)} назад)` : "") +
+      ". Запустите сайт заново: «Запустить SupplyBro.bat».";
+  }
+  if (job.waiting_for) {
+    const w = job.waiting_for;
+    return `в очереди «${job.lane_title}» — ждёт, пока закончится: ${w.folder} — ${w.kind_title} (идёт ${fmtDur(w.elapsed)})` +
+      (job.ahead ? `; перед ней ещё ${job.ahead}` : "");
+  }
+  return "в очереди…" + (job.ahead ? ` (перед ней ${job.ahead})` : "");
+}
+
+// «Идёт» — сколько идёт, когда было последнее действие; предупреждение, если давно нет движения.
+function runningTail(job) {
+  if (job.elapsed === undefined) return "";
+  let t = ` · идёт ${fmtDur(job.elapsed)} · последнее действие ${fmtDur(job.quiet)} назад`;
+  if (job.worker_alive === false) {
+    t += ". ⚠ Обработчик не отвечает — запустите сайт заново («Запустить SupplyBro.bat»), задача продолжится";
+  } else if (job.quiet_warn) {
+    t += ". ⚠ Давно нет движения, но обработчик жив — скорее всего, сервис (NocoDB, поиск) просит подождать;" +
+      " если так больше 15 минут — перезапустите сайт, задача продолжится";
+  }
+  return t;
+}
+
 function renderJob(job) {
   const box = $("job");
   if (!job) { box.hidden = true; return false; }
@@ -517,14 +553,12 @@ function renderJob(job) {
   const bar = $("job-bar");
   if (job.status === "queued") {
     bar.style.width = "0%";
-    $("job-text").textContent = job.age > 20
-      ? "В очереди… Обработчик не отвечает — проверьте, что сайт запущен через «Запустить SupplyBro.bat»."
-      : "В очереди…";
+    $("job-text").textContent = "Обработка документов: " + queuedText(job);
     return true;
   }
   if (job.status === "running") {
     bar.style.width = Math.round((job.progress || 0) * 100) + "%";
-    $("job-text").textContent = "Обработка: " + (job.step || "…");
+    $("job-text").textContent = "Обработка: " + (job.step || "…") + runningTail(job);
     return true;
   }
   bar.style.width = "100%";
@@ -637,12 +671,13 @@ function renderAnalysisJob(job) {
   const what = job.kind === "noco" ? "Запись в NocoDB" : "Анализ";
   if (job.status === "queued") {
     $("an-bar").style.width = "0%";
-    $("an-job-text").textContent = `${what}: в очереди…` + (job.age > 30 ? " (обработчик занят другой задачей или не запущен)" : "");
+    $("an-job-text").textContent = `${what}: ` + queuedText(job);
     return true;
   }
   if (job.status === "running") {
     $("an-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
-    $("an-job-text").textContent = `${what}: ${job.step || "…"}`;
+    $("an-job-text").textContent = `${what}: ${job.step || "…"}` + runningTail(job) + (job.kind === "noco"
+      ? ". У нового конкурса запись идёт 10–20 минут (настраиваются представления спецификации); подготовка и анализ других конкурсов её не ждут" : "");
     return true;
   }
   $("an-bar").style.width = "100%";
@@ -687,8 +722,10 @@ function renderAnalysis(d, busy) {
     $("an-checks").replaceChildren();
     if (!busy) {
       setStatus("an-status", d.docs_with_text
-        ? "Анализа ещё нет. «Запустить анализ» — ИИ извлечёт поля конкурса и позиции, перепроверит важные поля и запишет результат в NocoDB."
-        : "Анализ появится после загрузки документов.");
+        ? "Анализа ещё нет. «Запустить анализ» — ИИ извлечёт поля конкурса и позиции, перепроверит важные поля и запишет результат в NocoDB" +
+          (d.auto_prices ? ", затем сам найдёт цены и допишет их в спецификацию." : ".")
+        : "Анализ появится после загрузки документов" + (d.auto_analyze ? " — дальше всё само: анализ, запись в NocoDB" +
+          (d.auto_prices ? ", поиск цен." : ".") : "."));
     }
     return;
   }
@@ -722,6 +759,7 @@ function renderNoco(r, busy) {
     }
     const issues = [...((n.verification && n.verification.issues) || []),
                     ...((n.spec && n.spec.verification && n.spec.verification.issues) || [])];
+    if (n.separate && n.conflict) b.append(el("div", { text: n.conflict.text }));
     if (n.spec && n.spec.status === "kept") b.append(el("div", { text: n.spec.text }));
     if (issues.length) {
       const ul = el("ul");
@@ -885,7 +923,10 @@ async function loadPrices() {
     loadAnalysis();                         // в позициях анализа появились цены рынков
     if (t.source === "nocodb") loadSpec();  // и, возможно, в спецификации NocoDB
   }
+  // Пока идёт поиск — каждые 3 с; пока идёт подготовка / анализ / запись в NocoDB — каждые 5 с
+  // (иначе блок так и показывал бы состояние «до анализа» и не заметил бы поставленный сам поиск цен).
   if (busy) prTimer = setTimeout(loadPrices, 3000);
+  else if (d.analysis_active || d.noco_active) prTimer = setTimeout(loadPrices, 5000);
 }
 
 function renderPricesJob(job) {
@@ -893,24 +934,25 @@ function renderPricesJob(job) {
   if (!job) { box.hidden = true; return false; }
   box.hidden = false;
   box.classList.remove("error", "done");
+  const what = job.kind === "noco_prices" ? "Запись цен в NocoDB" : "Поиск цен";
   if (job.status === "queued") {
     $("pr-bar").style.width = "0%";
-    $("pr-job-text").textContent = "Поиск цен: в очереди…" + (job.age > 30 ? " (обработчик занят другим поиском или не запущен)" : "");
+    $("pr-job-text").textContent = `${what}: ` + queuedText(job);
     return true;
   }
   if (job.status === "running") {
     $("pr-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
-    $("pr-job-text").textContent = "Поиск цен: " + (job.step || "…");
+    $("pr-job-text").textContent = `${what}: ` + (job.step || "…") + runningTail(job);
     return true;
   }
   $("pr-bar").style.width = "100%";
   const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
   if (job.status === "error") {
     box.classList.add("error");
-    $("pr-job-text").textContent = `Поиск цен — ошибка (${when}): ${job.message}`;
+    $("pr-job-text").textContent = `${what} — ошибка (${when}): ${job.message}`;
   } else {
     box.classList.add("done");
-    $("pr-job-text").textContent = `Поиск цен — готово (${when}). ${job.message}`;
+    $("pr-job-text").textContent = `${what} — готово (${when}). ${job.message}`;
   }
   return false;
 }
@@ -968,7 +1010,7 @@ function renderPrices(d, busy) {
   const run = $("pr-run");
   run.textContent = r ? "Искать заново" : "Искать цены";
   const blocker = !d.has_analysis ? "Сначала нужен анализ документов — цены ищутся по его позициям"
-    : d.analysis_active ? "Идёт подготовка или анализ документов — поиск цен после них"
+    : d.analysis_active ? "Идёт подготовка, анализ или запись в NocoDB — поиск цен после них"
     : needYandex && !s.yandex_key ? "Нет ключа Яндекса (secrets/API_key_Yandex.txt) — выберите поиск DeepSeek"
     : needDeepseek && !s.deepseek_key ? "Нет ключа DeepSeek (secrets/API_key_DeepSeek.txt)" : "";
   run.disabled = busy || Boolean(blocker);
@@ -985,6 +1027,12 @@ function renderPrices(d, busy) {
   }
   if (blocker && d.has_analysis && !d.analysis_active) {
     setStatus("pr-status", blocker + ".", true);
+  } else if (!busy && d.analysis_active) {
+    setStatus("pr-status", (d.has_analysis
+      ? "Анализ готов, идёт запись в NocoDB."
+      : "Идёт подготовка и анализ документов.") +
+      (d.auto_prices ? " Поиск цен запустится сам сразу после этого; найденные цены попадут в спецификацию NocoDB."
+        : " После этого можно будет искать цены."));
   } else if (!r && !busy) {
     setStatus("pr-status", d.has_analysis
       ? "Цен ещё нет. «Искать цены» — программа найдёт товар поиском " + (engine === "deepseek" ? "DeepSeek" : engine === "yandex" ? "Яндекса" : "DeepSeek и Яндекса") +
@@ -1032,6 +1080,9 @@ function renderPrices(d, busy) {
   }
   if (c.claude_searches || c.searches) parts.push(`Поисков Claude за рубежом: ${c.claude_searches || c.searches}.`);
   parts.push(usageText(c.models || c.claude));
+  if (r.timing && Object.keys(r.timing).length) {
+    parts.push("Время: " + Object.entries(r.timing).filter(([, v]) => v >= 1).map(([k, v]) => `${k} ${fmtDur(v)}`).join(" · ") + ".");
+  }
   $("pr-usage").textContent = parts.join(" ");
 }
 
@@ -1324,6 +1375,104 @@ function renderSpec(columns, rows) {
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
 }
 
+// ---------- обработчик: что выполняется сейчас (шапка) ----------
+
+let actTimer = null;
+let actSignature = null;   // задачи текущего конкурса при прошлой проверке — заметить запуск из другой вкладки
+
+function jobLine(j, withFolder = true) {
+  const head = (withFolder ? j.folder + " — " : "") + j.kind_title;
+  if (j.status === "running") return `${head}: ${j.step || "…"}` + runningTail(j);
+  if (j.status === "queued") return `${head}: ` + queuedText(j);
+  const ago = j.finished_at ? fmtDur(Date.now() / 1000 - j.finished_at) + " назад" : "";
+  return `${head}: ${j.status === "error" ? "ошибка" : "готово"} ${ago}` + (j.status === "error" ? ` — ${j.message}` : "");
+}
+
+async function pollActivity() {
+  clearTimeout(actTimer);
+  actTimer = setTimeout(pollActivity, 5000);
+  if (!state.client) return;
+  let d;
+  try {
+    d = await api(clientPath("/jobs"));
+  } catch (_) {
+    renderActivity(null);
+    return;
+  }
+  renderActivity(d);
+  // Задачу текущего конкурса запустили / закончили в другой вкладке (или сама поставилась) — обновить блоки.
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  const sig = [...d.active, ...d.recent].filter((j) => j.folder === t.folder).map((j) => `${j.id}:${j.status}`).sort().join(",");
+  if (actSignature !== null && sig !== actSignature) {
+    if (!docsTimer) loadDocs();
+    if (!anTimer) loadAnalysis();
+    if (!prTimer) loadPrices();
+  }
+  actSignature = sig;
+}
+
+function renderActivity(d) {
+  const btn = $("activity");
+  const panel = $("activity-panel");
+  btn.hidden = false;
+  btn.className = "activity";
+  if (!d) {
+    btn.textContent = "Сайт не отвечает";
+    btn.classList.add("bad");
+    panel.replaceChildren(el("div", { text: "Не удалось узнать состояние обработчика — сайт не отвечает. Запустите «Запустить SupplyBro.bat»." }));
+    return;
+  }
+  const known = d.lanes.filter((l) => l.seen !== null);
+  const dead = known.length ? d.lanes.filter((l) => !l.alive) : [];
+  const running = d.lanes.filter((l) => l.job);
+  const queued = d.active.filter((j) => j.status === "queued");
+  if (dead.length) {
+    btn.textContent = "⚠ Обработчик не отвечает";
+    btn.classList.add("bad");
+  } else if (running.length || queued.length) {
+    btn.textContent = `● В работе: ${running.length}` + (queued.length ? ` · в очереди: ${queued.length}` : "");
+    btn.classList.add("busy");
+  } else {
+    btn.textContent = "● Обработчик свободен";
+    btn.classList.add("idle");
+  }
+  const rows = [];
+  for (const l of d.lanes) {
+    const box = el("div", { class: "act-lane" });
+    const laneState = l.seen === null ? "ещё не запускалась" : l.alive ? `работает (отклик ${fmtDur(l.seen)} назад)` : `не отвечает ${fmtDur(l.seen)}`;
+    box.append(el("div", { class: "act-title", text: `Очередь «${l.title}» — ${laneState}` }));
+    if (l.job) box.append(jobItem(l.job));
+    for (const j of queued.filter((q) => q.lane === l.lane)) box.append(jobItem(j));
+    if (!l.job && !queued.some((q) => q.lane === l.lane)) box.append(el("div", { class: "muted", text: "задач нет" }));
+    rows.push(box);
+  }
+  if (d.recent.length) {
+    const box = el("div", { class: "act-lane" }, el("div", { class: "act-title", text: "Закончились за последние 10 минут" }));
+    for (const j of d.recent) box.append(jobItem(j));
+    rows.push(box);
+  }
+  if (dead.length) {
+    rows.unshift(el("div", { class: "notice bad", text: "Обработчик не отвечает больше минуты. Запустите «Запустить SupplyBro.bat» — " +
+      "прерванные задачи продолжатся сами (анализ, который уже был готов, повторно не оплачивается)." }));
+  }
+  panel.replaceChildren(...rows);
+}
+
+function jobItem(j) {
+  const item = el("div", { class: "act-job " + j.status, title: "Открыть этот конкурс" });
+  item.textContent = jobLine(j);
+  item.addEventListener("click", () => {
+    const t = [...state.tenders.values()].find((x) => x.folder === j.folder);
+    if (!t) return;
+    state.tender = t.id;
+    $("tender").value = t.id;
+    $("activity-panel").hidden = true;
+    loadTender();
+  });
+  return item;
+}
+
 // ---------- события ----------
 
 $("client").addEventListener("change", (e) => {
@@ -1402,7 +1551,8 @@ $("an-run").addEventListener("click", async () => {
   if (!t || !t.folder) return;
   $("an-run").disabled = true;
   try {
-    await api(clientPath("/analysis/run"), { folder: t.folder, model: $("an-model").value }, { method: "POST" });
+    const r = await api(clientPath("/analysis/run"), { folder: t.folder, model: $("an-model").value }, { method: "POST" });
+    if (r.already) setStatus("an-status", "Анализ уже идёт (запущен раньше или в другой вкладке) — показываю его ход.");
   } catch (err) {
     setStatus("an-status", "Не удалось запустить анализ: " + err.message, true);
   }
@@ -1414,8 +1564,9 @@ $("pr-run").addEventListener("click", async () => {
   $("pr-run").disabled = true;
   try {
     const engine = $("pr-engine").value || "deepseek";
-    await api(clientPath("/prices/run"), { folder: t.folder, engine, urgent: engine !== "deepseek" && $("pr-urgent").checked ? "1" : "",
+    const r = await api(clientPath("/prices/run"), { folder: t.folder, engine, urgent: engine !== "deepseek" && $("pr-urgent").checked ? "1" : "",
       abroad: $("pr-abroad").checked ? "1" : "0" }, { method: "POST" });
+    if (r.already) setStatus("pr-status", "Поиск цен уже идёт (запущен сам после анализа или в другой вкладке) — показываю его ход.");
     $("pr-urgent").checked = false;
   } catch (err) {
     setStatus("pr-status", "Не удалось запустить поиск цен: " + err.message, true);
@@ -1449,4 +1600,9 @@ $("spec-view").addEventListener("change", (e) => { state.specView = e.target.val
 $("hide-empty").addEventListener("change", () => { const f = $("fields")._fields; if (f) renderFields(f); });
 $("refresh").addEventListener("click", () => { state.fresh = true; loadTenders(); });
 
-loadClients();
+$("activity").addEventListener("click", () => { $("activity-panel").hidden = !$("activity-panel").hidden; });
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#activity, #activity-panel")) $("activity-panel").hidden = true;
+});
+
+loadClients().then(pollActivity);

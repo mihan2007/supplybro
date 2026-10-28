@@ -5,18 +5,23 @@
 та же таблица спецификации с представлениями «Сбор цен», «Закупки», «Цены агента», та же проверка
 записанного). Запись ищется по ВНУТРЕННЕМУ номеру (номер папки конкурса), а не по номеру закупки.
 
-Защита чужих данных — без подтверждения пользователя («Записать всё равно» на странице) сайт НЕ меняет:
-  * запись, где тот же номер закупки уже стоит у другого внутреннего номера («duplicate» — например,
-    документы К934 загружены в папку К992);
-  * запись с этим внутренним номером, которую создал не сайт и в которой уже есть данные («existing» —
-    например, конкурс, обработанный агентом в приложении).
+Защита чужих данных — сайт НЕ меняет записи, которые создал не он:
+  * тот же номер закупки уже стоит у другого внутреннего номера («duplicate» — например, документы К934
+    загружены в папку К993): по решению пользователя 28.10.2026 конкурс сразу записывается ОТДЕЛЬНОЙ записью
+    со своим внутренним номером и своей спецификацией, запись-двойник не меняется (NOCODB_DUPLICATES=separate;
+    =ask — как раньше, ждать кнопку «Записать всё равно»);
+  * запись с этим же внутренним номером, которую создал не сайт и в которой уже есть данные («existing» —
+    например, конкурс, обработанный агентом в приложении): отдельная запись дала бы два конкурса с одним
+    внутренним номером, поэтому — только по кнопке «Записать всё равно» (обновить эту запись).
 Даже при подтверждении у такой «чужой» записи таблица спецификации, в которой уже есть строки,
 не перезаписывается (в ней цены отдела закупок, рынков, агента).
 """
 
 from __future__ import annotations
 
+import os
 import re
+import threading
 import time
 import urllib.parse
 
@@ -28,6 +33,25 @@ from tools import nocodb_client as nc
 
 INTERNAL_COLUMN = "Внутренний номер"
 NO_WRITE_KEYS = {"product_title"}
+# Двойник по номеру закупки: separate — сразу отдельной записью (по умолчанию), ask — ждать подтверждения.
+DUPLICATES = os.environ.get("NOCODB_DUPLICATES", "separate").strip().lower()
+
+# Счётчик запросов к NocoDB для хода записи на странице: у нового конкурса программа агента минутами настраивает
+# представления спецификации, не сообщая о шагах, — по счётчику видно, что запись идёт, а не висит.
+# Учитываются только запросы потока, который сейчас записывает (поиск цен в другом потоке не считается).
+_tls = threading.local()
+_original_request = nc._request
+
+
+def _request_with_counter(method, url, token, body=None, _retries=8):
+    hook = getattr(_tls, "hook", None)
+    if hook:
+        hook()
+    return _original_request(method, url, token, body, _retries)
+
+
+if nc._request is not _request_with_counter and getattr(nc._request, "__name__", "") != "_request_with_counter":
+    nc._request = _request_with_counter
 
 
 def _configure(client: Client) -> str:
@@ -74,6 +98,17 @@ def _clean_marker(text: str) -> str:
     return re.sub(r"^(✅|🔺)\s*", "", str(text or "")).strip()
 
 
+def _same_positions(token: str, table_id: str, rows: list[dict]) -> bool:
+    """Таблица спецификации с теми же позициями (№ и наименование), что в анализе, — осталась от прерванной записи
+    этого же конкурса сайтом."""
+    try:
+        have = nc.list_all_records(token, table_id)
+    except Exception:
+        return False
+    key = lambda r: (str(r.get("№") or "").strip(), " ".join(str(r.get("Наименование позиции") or "").split())[:60])
+    return bool(rows) and sorted(map(key, have)) == sorted(map(key, rows))
+
+
 def check_conflicts(client: Client, internal: str, purchase_number: str) -> dict:
     """Что уже есть в NocoDB по этому конкурсу. Только чтение."""
     token = _configure(client)
@@ -104,7 +139,25 @@ def check_conflicts(client: Client, internal: str, purchase_number: str) -> dict
 
 def save(client: Client, folder_name: str, result: dict, force: bool = False, progress=None) -> dict:
     """Записывает результат анализа в NocoDB. Возвращает сведения для analysis.json["noco"]."""
-    progress = progress or (lambda *_: None)
+    outer = progress or (lambda *_: None)
+    state_ = {"n": 0, "text": "NocoDB", "frac": 0.0}
+
+    def progress(text: str, frac: float) -> None:
+        state_["text"], state_["frac"] = text, frac
+        outer(text if not state_["n"] else f"{text} · запросов к NocoDB: {state_['n']}", frac)
+
+    def on_request() -> None:
+        state_["n"] += 1
+        outer(f"{state_['text']} · запросов к NocoDB: {state_['n']}", state_["frac"])
+
+    _tls.hook = on_request
+    try:
+        return _save(client, folder_name, result, force, progress)
+    finally:
+        _tls.hook = None
+
+
+def _save(client: Client, folder_name: str, result: dict, force: bool, progress) -> dict:
     internal = result["internal_number"]
     flat = dict(result["flat"])
     progress("NocoDB: поиск записи конкурса", 0.88)
@@ -124,8 +177,14 @@ def save(client: Client, folder_name: str, result: dict, force: bool = False, pr
         conflict = {"kind": "existing", "record_id": target["Id"], "internal": internal,
                     "text": (f"Запись {internal} в NocoDB уже заполнена (её создал не сайт — например, агент в приложении). "
                              "Сайт её не менял.")}
-    if conflict and not force:
+    auto_separate = bool(conflict and conflict["kind"] == "duplicate" and DUPLICATES != "ask")
+    if conflict and not force and not auto_separate:
         return {"status": "conflict", "conflict": conflict, "at": time.time()}
+    if auto_separate:
+        conflict["text"] = (f"Номер закупки «{_clean_marker(flat.get('purchase_number'))}» уже есть в NocoDB у конкурса "
+                            f"{conflict['internal'] or 'без внутреннего номера'} (запись {conflict['record_id']}). "
+                            f"Этот конкурс записан отдельной записью {internal}; запись "
+                            f"{conflict['internal'] or conflict['record_id']} сайт не менял.")
 
     # При подтверждённом «duplicate» создаётся отдельная запись с этим внутренним номером
     # (target ищется только по внутреннему номеру, запись-двойник не меняется).
@@ -149,26 +208,11 @@ def save(client: Client, folder_name: str, result: dict, force: bool = False, pr
             continue
         row[col] = value
 
-    # Спецификация. Перезаполняется только таблица, которую создал сайт для этой записи, или новая.
-    # Таблица со строками, которую создал не сайт (по ссылке в записи или с таким же названием), не трогается.
-    progress("NocoDB: таблица спецификации", 0.91)
-    spec = {"status": "skipped"}
+    # Сначала — сама запись конкурса (несколько секунд): она сразу видна в реестре. Таблица спецификации с
+    # представлениями «Сбор цен», «Закупки», «Цены агента» у нового конкурса настраивается несколько минут
+    # (по одной колонке на запрос) — ссылка на неё дописывается в запись после.
+    progress("NocoDB: запись конкурса", 0.89)
     linked_id = nc._table_id_from_link((target or {}).get(nc.SPEC_LINK_COLUMN))
-    by_title = nc.find_table_by_title(token, nc._spec_table_title(internal))
-    candidate = linked_id or (by_title or {}).get("id")
-    ours = bool(state["created_by_site"] and linked_id and candidate == linked_id)
-    spec_rows = result.get("positions") or []
-    if candidate and not ours and nc.list_all_records(token, candidate):
-        spec = {"status": "kept",
-                "text": "Таблица спецификации уже заполнена — не перезаписана (в ней могут быть цены и данные агента)."}
-    elif spec_rows:
-        url, table_id, safe_rows = nc.sync_specification(token, internal, spec_rows, existing_table_id=linked_id)
-        row[nc.SPEC_LINK_COLUMN] = url
-        progress("NocoDB: проверка спецификации", 0.96)
-        spec = {"status": "written", "url": url, "table_id": table_id,
-                "verification": nc.verify_spec_table(token, table_id, safe_rows)}
-
-    progress("NocoDB: запись конкурса", 0.97)
     if target:
         status, body = nc._request("PATCH", nc.RECORDS_URL, token, {"Id": target["Id"], **row})
         if status != 200:
@@ -180,12 +224,47 @@ def save(client: Client, folder_name: str, result: dict, force: bool = False, pr
             raise RuntimeError(f"NocoDB: создать запись не удалось: HTTP {status} {body}")
         record_id, action = body.get("Id"), "created"
     created_by_site = action == "created" or state["created_by_site"]
+    link_before = db.noco_link(client.id, internal) or {}
     db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site,
-                      spec.get("table_id") or linked_id or "")
+                      linked_id or link_before.get("spec_table_id") or "")
+
+    # Спецификация. Перезаполняется только таблица, которую создал сайт для этой записи, или новая.
+    # Таблица со строками, которую создал не сайт (по ссылке в записи или с таким же названием), не трогается.
+    progress("NocoDB: таблица спецификации (у нового конкурса — несколько минут)", 0.91)
+    spec = {"status": "skipped"}
+    by_title = nc.find_table_by_title(token, nc._spec_table_title(internal))
+    candidate = linked_id or (by_title or {}).get("id")
+    # «Своя» таблица: запись создал сайт, и таблица — та, что сайт уже записывал (noco_links), или по ссылке в
+    # записи, которую сайт создал раньше, или оставшаяся от прерванной записи (пометка «pending:<название>» либо
+    # те же позиции, что в анализе). Чужая таблица с таким же названием и другими строками не трогается.
+    title = nc._spec_table_title(internal)
+    spec_rows = result.get("positions") or []
+    known = link_before.get("spec_table_id") or ""
+    ours = bool(created_by_site and candidate and (
+        candidate == known or (state["created_by_site"] and candidate == linked_id)
+        or (by_title and candidate == by_title.get("id") and (known == f"pending:{title}"
+                                                               or _same_positions(token, candidate, spec_rows)))))
+    if candidate and not ours and nc.list_all_records(token, candidate):
+        spec = {"status": "kept",
+                "text": "Таблица спецификации уже заполнена — не перезаписана (в ней могут быть цены и данные агента)."}
+    elif spec_rows:
+        if not candidate:       # таблицы ещё нет — её создаст сайт; пометка на случай перезапуска посередине
+            db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site, f"pending:{title}")
+        url, table_id, safe_rows = nc.sync_specification(token, internal, spec_rows,
+                                                          existing_table_id=linked_id or (candidate if ours else None))
+        row[nc.SPEC_LINK_COLUMN] = url
+        status, body = nc._request("PATCH", nc.RECORDS_URL, token, {"Id": record_id, nc.SPEC_LINK_COLUMN: url})
+        if status != 200:
+            raise RuntimeError(f"NocoDB: ссылку на спецификацию записать не удалось: HTTP {status} {body}")
+        db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site, table_id)
+        progress("NocoDB: проверка спецификации", 0.96)
+        spec = {"status": "written", "url": url, "table_id": table_id,
+                "verification": nc.verify_spec_table(token, table_id, safe_rows)}
+
     verification = nc.verify_main_record(token, record_id, row)
     return {
         "status": "saved", "action": action, "record_id": record_id, "at": time.time(),
-        "forced": bool(conflict), "conflict": conflict,
+        "forced": bool(conflict) and not auto_separate, "separate": auto_separate, "conflict": conflict,
         "link": f"{client.nocodb.url.rstrip('/')}/{client.nocodb.workspace_id}/{client.nocodb.base_id}/"
                 f"{client.nocodb.registry_table_id}?rowId={record_id}",
         "verification": verification, "spec": spec,

@@ -71,6 +71,40 @@ async def folder_error_handler(_, exc: FolderError):
 
 # ---------- вспомогательное ----------
 
+ALIVE_SECONDS = 60          # очередь обработчика молчит дольше — считаем, что обработчик не запущен
+QUIET_WARN_SECONDS = 180    # задача столько не меняет шаг — показываем предупреждение (но она может быть жива)
+
+
+def job_view(job: dict | None, lanes: dict | None = None, active: list[dict] | None = None) -> dict | None:
+    """Задача для страницы: сколько ждёт / идёт, когда было последнее действие, в какой очереди и кого ждёт,
+    жив ли обработчик."""
+    if not job:
+        return None
+    now = time.time()
+    j = {k: v for k, v in dict(job).items() if k != "params"}
+    lanes = db.lanes_state() if lanes is None else lanes
+    lane = db.LANES.get(j["kind"], "docs")
+    beat = lanes.get(lane) or {}
+    j.update(kind_title=db.KIND_TITLES.get(j["kind"], j["kind"]), lane=lane, lane_title=db.LANE_TITLES.get(lane, lane),
+             age=round(now - (j.get("created_at") or now)),
+             worker_alive=(now - beat["at"] < ALIVE_SECONDS) if beat.get("at") else None,   # None — неизвестно
+             worker_seen=round(now - beat["at"]) if beat.get("at") else None)
+    if j["status"] == "running":
+        last = j.get("updated_at") or j.get("started_at") or now
+        j.update(elapsed=round(now - (j.get("started_at") or now)), quiet=round(now - last),
+                 quiet_warn=now - last > QUIET_WARN_SECONDS)
+    elif j["status"] == "queued":
+        active = db.active_jobs() if active is None else active
+        same = [a for a in active if db.LANES.get(a["kind"], "docs") == lane]
+        running = next((a for a in same if a["status"] == "running"), None)
+        ahead = [a for a in same if a["status"] == "queued" and a["id"] < j["id"]]
+        j["ahead"] = len(ahead)
+        if running and running["id"] != j["id"]:
+            j["waiting_for"] = {"folder": running["folder"], "kind_title": db.KIND_TITLES.get(running["kind"], running["kind"]),
+                                "step": running.get("step") or "", "elapsed": round(now - (running.get("started_at") or now))}
+    return j
+
+
 def get_client(client_id: str) -> Client:
     try:
         clients = load_clients()
@@ -311,6 +345,8 @@ async def api_spec(client_id: str, record_id: int, view: str | None = None, fres
 TENDERS_DISPLAY = os.environ.get("TENDERS_DISPLAY", "Dropbox\\Агент")
 # После загрузки документов через сайт сразу запускать анализ (ИИ, платно) и запись в NocoDB.
 AUTO_ANALYZE = os.environ.get("AUTO_ANALYZE", "1").strip() not in ("0", "false", "no", "")
+AUTO_PRICES = os.environ.get("AUTO_PRICES", "1").strip() not in ("0", "false", "no", "")
+NOCODB_WRITE = os.environ.get("NOCODB_WRITE", "1").strip() not in ("0", "false", "no", "")
 STATUS_LABELS = {
     "ok": "текст извлечён", "ocr": "распознан", "empty": "текста нет", "skipped": "пропущен",
     "error": "ошибка", "archive": "архив", "pending": "ждёт обработки",
@@ -343,9 +379,7 @@ def api_docs(client_id: str, folder: str):
             "error": (r or {}).get("error") or "",
             "has_text": bool((r or {}).get("text_path")),
         })
-    job = db.latest_job(client.id, folder)
-    if job:
-        job["age"] = round(time.time() - (job.get("created_at") or time.time()))
+    job = job_view(db.latest_job(client.id, folder))
     return {
         "folder": folder,
         "display_path": f"{TENDERS_DISPLAY}\\{client.tenders_folder}\\{folder}",
@@ -445,10 +479,7 @@ def api_analysis(client_id: str, folder: str):
     base = folder_path(client, folder)
     result = load_result(base)
     fingerprint, docs_with_text = _docs_fingerprint(client.id, folder)
-    job = db.latest_job(client.id, folder, ("analyze", "noco"))
-    if job:
-        job["age"] = round(time.time() - (job.get("created_at") or time.time()))
-        job.pop("params", None)
+    job = job_view(db.latest_job(client.id, folder, ("analyze", "noco")))
     if result and result.get("usage"):
         result["usage"].pop("calls", None)  # подробный журнал вызовов — только в файле
     return {
@@ -458,6 +489,8 @@ def api_analysis(client_id: str, folder: str):
         "stale": bool(result) and result.get("corpus_hash") != fingerprint,
         "prepare_active": bool(db.active_job(client.id, folder, "prepare")),
         "auto_analyze": AUTO_ANALYZE,
+        "auto_prices": AUTO_PRICES,
+        "nocodb_write": NOCODB_WRITE,
         "models": ANALYSIS_MODELS,
         "default_model": CLAUDE_MODEL,
     }
@@ -470,6 +503,9 @@ def api_analysis_run(client_id: str, folder: str, model: str | None = None):
     folder_path(client, folder)
     if db.active_job(client.id, folder, "prices"):
         raise HTTPException(409, "идёт поиск цен по этому конкурсу — дождитесь его окончания")
+    running = db.active_job(client.id, folder, "analyze")
+    if running:       # уже идёт (запущен из другой вкладки или раньше) — второй анализ не ставим
+        return {"job_id": running["id"], "already": True}
     params = {"model": model} if model in ANALYSIS_MODELS else {}
     if db.active_job(client.id, folder, "prepare"):
         # Документы ещё готовятся — анализ встанет в очередь сразу после подготовки.
@@ -484,7 +520,33 @@ def api_analysis_save(client_id: str, folder: str, force: bool = False):
     base = folder_path(client, folder)
     if not load_result(base):
         raise HTTPException(400, "анализа этого конкурса ещё нет")
+    running = db.active_job(client.id, folder, "noco")
+    if running and running["status"] == "running":
+        return {"job_id": running["id"], "already": True}
     return {"job_id": db.enqueue(client.id, folder, "noco", {"force": bool(force)})}
+
+
+# ---------- обработчик: что выполняется и что ждёт ----------
+
+@app.get("/api/clients/{client_id}/jobs")
+def api_jobs(client_id: str):
+    """Состояние обработчика: жива ли каждая очередь, что она выполняет, что ждёт; недавно законченные задачи."""
+    client = get_client(client_id)
+    now = time.time()
+    lanes = db.lanes_state()
+    active = db.active_jobs()
+    out_lanes = []
+    for lane in ("docs", "nocodb", "prices"):
+        beat = lanes.get(lane) or {}
+        running = next((a for a in active if a["status"] == "running" and db.LANES.get(a["kind"], "docs") == lane), None)
+        out_lanes.append({"lane": lane, "title": db.LANE_TITLES[lane],
+                          "alive": bool(beat.get("at") and now - beat["at"] < ALIVE_SECONDS),
+                          "seen": round(now - beat["at"]) if beat.get("at") else None,
+                          "job": job_view(running, lanes, active)})
+    mine = [a for a in active if a["client_id"] == client.id]
+    return {"now": now, "lanes": out_lanes,
+            "active": [job_view(a, lanes, active) for a in mine],
+            "recent": [job_view(r, lanes, active) for r in db.recent_jobs(client.id)]}
 
 
 # ---------- поиск цен ----------
@@ -497,10 +559,7 @@ def api_prices(client_id: str, folder: str):
     base = folder_path(client, folder)
     result = load_result(base)
     report = prices.load_report(base)
-    job = db.latest_job(client.id, folder, ("prices",))
-    if job:
-        job["age"] = round(time.time() - (job.get("created_at") or time.time()))
-        job.pop("params", None)
+    job = job_view(db.latest_job(client.id, folder, ("prices", "noco_prices")))
     if report:
         for g in report.get("groups") or []:
             cands = g.pop("candidates", []) or []
@@ -514,7 +573,9 @@ def api_prices(client_id: str, folder: str):
                                               "Стоимость НМЦ")} for r in (result or {}).get("positions") or []],
         "stale": bool(report and result and (result.get("analyzed_at") or 0) > (report.get("at") or 0)),
         "analysis_active": bool(db.active_job(client.id, folder, "analyze") or db.active_job(client.id, folder, "prepare")),
+        "noco_active": bool(db.active_job(client.id, folder, "noco") or db.active_job(client.id, folder, "noco_prices")),
         "estimate": prices.estimate(result) if result else None,
+        "auto_prices": AUTO_PRICES,
         "settings": prices.settings(),
     }
 
@@ -529,6 +590,9 @@ def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bo
         raise HTTPException(400, "сначала нужен анализ документов — цены ищутся по его позициям")
     if db.active_job(client.id, folder, "analyze") or db.active_job(client.id, folder, "prepare"):
         raise HTTPException(409, "идёт подготовка или анализ документов — поиск цен можно запустить после них")
+    running = db.active_job(client.id, folder, "prices")
+    if running:       # уже идёт (из другой вкладки или сам после анализа) — второй поиск не ставим
+        return {"job_id": running["id"], "already": True}
     from .prices import run as prices
     params = {"urgent": bool(urgent), "abroad": bool(abroad)}
     if engine in prices.ENGINES:

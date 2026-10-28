@@ -64,12 +64,33 @@ _BRANDS = re.compile(r"\b(konica(?:\s+minolta)?|kyocera|ricoh|canon|kip|xerox|hp
                      r"rexroth|bosch|agilent|mettler(?:-toledo)?|thermo|катюша)\b", re.IGNORECASE)
 
 
+_BRAND_STOP = {"type", "typ", "tip", "model", "series", "serie", "art", "part", "no", "nr", "original", "oem", "for",
+               "kit", "set", "new", "the", "and", "with"}
+
+
 def brand_of(*texts: str) -> str:
+    """Марка: из списка известных; иначе — первое латинское слово без цифр в «Марка/модель» (Samson 3962,
+    «AT701U / SO3000 (Leusch, тип LTR43)» → Leusch)."""
     for text in texts:
         m = _BRANDS.search(str(text or ""))
         if m:
             return m.group(1)
+    for w in re.findall(r"(?<![\w\-])([A-Za-z]{3,}(?:-[A-Za-z]{2,})*)(?![\w\-])", str(texts[0] if texts else "")):
+        if w.lower() not in _BRAND_STOP and not _looks_like_article(w):
+            return w
     return ""
+
+
+def clean_brand_model(value: str) -> str:
+    """«Не указано в документах», «Не удалось определить», «—» — это не марка: искать по ним нельзя."""
+    v = " ".join(str(value or "").split())
+    return "" if not v or v in ("—", "-") or v.lower().startswith(("не указано", "не удалось", "нет данных")) else v
+
+
+def weak(article: str) -> bool:
+    """Короткий числовой артикул (3962): такое число встречается где угодно — искать только вместе с маркой."""
+    t = norm(article)
+    return t.isdigit() and len(t) < 6
 
 
 def _name_without_codes(name: str, arts: list[str]) -> str:
@@ -81,11 +102,17 @@ def _name_without_codes(name: str, arts: list[str]) -> str:
 
 def queries_rf(name: str, brand_model: str) -> tuple[list[str], list[str]]:
     """(артикулы, запросы для российского рынка). Без артикула — запрос по наименованию."""
+    brand_model = clean_brand_model(brand_model)
     arts = articles(brand_model, name)
     brand = brand_of(brand_model, name)
     plain_name = _name_without_codes(name, arts)
     qs: list[str] = []
-    if arts:
+    if arts and weak(arts[0]) and brand:
+        main = f"{brand} {arts[0]}"                              # «3962» без марки — это что угодно
+        qs += [main, f"{brand} {plain_name} {arts[0]}".strip(), f"{main} купить цена"]
+        for alt in arts[1:4]:
+            qs.append(f"{brand} {alt.translate(LOOKALIKE)}")
+    elif arts:
         main = arts[0]
         qs += _variants(main)                                   # голый артикул и варианты написания
         if brand:
@@ -104,6 +131,8 @@ def queries_rf(name: str, brand_model: str) -> tuple[list[str], list[str]]:
             qs.append(f"{plain_name} {brand_model}")
     # Шаг 5.1g: при < 3 цен в пометке должно быть ≥ 5 разных запросов — добираем до пяти.
     main = arts[0].translate(LOOKALIKE) if arts else (brand_model or plain_name)
+    if arts and weak(arts[0]) and brand:
+        main = f"{brand} {main}"
     for extra in (f"{main} цена", f"{main} в наличии", f"{brand} {plain_name} {main}".strip() if brand else "",
                   f"{plain_name} {main} интернет-магазин" if plain_name and main != plain_name else f"{main} интернет-магазин",
                   f"{main} оптом"):
@@ -119,6 +148,7 @@ def queries_abroad(name: str, brand_model: str, arts: list[str], en: str = "") -
     бренд + артикул (en — перевод наименования), eBay / Amazon, AliExpress, «Preis» (Германия), «price» (США),
     каждый альтернативный артикул. Фильтр языка (lang:) не ставится: на редких артикулах он отсекает и нужные
     страницы (проверено 27.10.2026)."""
+    brand_model = clean_brand_model(brand_model)
     brand = brand_of(brand_model, name)
     en = " ".join(str(en or "").split())[:60]
     if not arts:
@@ -130,8 +160,10 @@ def queries_abroad(name: str, brand_model: str, arts: list[str], en: str = "") -
               f"{base} site:ebay.com OR site:ebay.de OR site:amazon.com", f"aliexpress {base}"]
     else:
         main = arts[0].translate(LOOKALIKE)
-        qs = [main, f"{brand} {main}" if brand else f"{main} buy",
-              f"{en} {brand} {main}".strip() if en else f"{main} spare part",
+        if weak(main) and brand:
+            main = f"{brand} {main}"                       # короткий числовой артикул — только с маркой
+        qs = [main, f"{brand} {main}" if brand and not main.startswith(brand) else f"{main} buy",
+              (f"{en} {main}" if main.startswith(brand) else f"{en} {brand} {main}").strip() if en else f"{main} spare part",
               f"{main} price", f"{main} Preis",
               f"{main} site:ebay.com OR site:ebay.de OR site:amazon.com", f"aliexpress {main}"]
         qs += [alt.translate(LOOKALIKE) for alt in arts[1:3]]
@@ -140,13 +172,18 @@ def queries_abroad(name: str, brand_model: str, arts: list[str], en: str = "") -
 
 def recheck_queries(name: str, brand_model: str, arts: list[str], en: str = "") -> tuple[list[str], list[str]]:
     """Шаг 5.1i — второй проход по артикулам без трёх цен: другие запросы (Россия, зарубеж)."""
+    brand_model = clean_brand_model(brand_model)
     brand = brand_of(brand_model, name)
     plain_name = _name_without_codes(name, arts)
     en = " ".join(str(en or "").split())[:60]
     if arts:
         main = arts[0].translate(LOOKALIKE)
+        if weak(main) and brand:
+            main = f"{brand} {main}"
         named = plain_name if not brand or brand.lower() in plain_name.lower() else f"{plain_name} {brand}"
-        rf = [f"{main} lang:ru", f"{brand} {main} купить".strip(), f"{named} {main} цена".strip(), f"{main} в наличии"]
+        rf = [f"{main} lang:ru", f"{main} купить" if main.startswith(brand) else f"{brand} {main} купить".strip(),
+              f"{named} {main} цена".strip() if not main.startswith(brand) or not brand else f"{plain_name} {main} цена".strip(),
+              f"{main} в наличии"]
         rf += [f"{alt.translate(LOOKALIKE)} купить" for alt in arts[1:3]]
         ab = [f"{main} kaufen", f"{main} 价格", f"{en} {main} price".strip() if en else f"{main} buy",
               f"{main} site:alibaba.com OR site:made-in-china.com", f"{main} Preis lang:de", f"{main} price lang:en"]

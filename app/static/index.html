@@ -9,7 +9,13 @@
 <body>
   <header class="topbar">
     <div class="brand">SupplyBro <span class="ver" id="version"></span></div>
-    <button class="btn ghost" id="refresh" type="button" title="Заново загрузить данные из NocoDB">Обновить из NocoDB</button>
+    <div class="topbar-tools">
+      <div class="activity-wrap">
+        <button class="activity" id="activity" type="button" hidden title="Что сейчас делает обработчик: подготовка, анализ, запись в NocoDB, поиск цен">Обработчик…</button>
+        <div class="activity-panel" id="activity-panel" hidden></div>
+      </div>
+      <button class="btn ghost" id="refresh" type="button" title="Заново загрузить данные из NocoDB">Обновить из NocoDB</button>
+    </div>
   </header>
 
   <main>

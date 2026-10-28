@@ -269,3 +269,27 @@ td.block-row { background: var(--chip) !important; font-weight: 600; }
 #pr-table .clamp { white-space: pre-line; font-size: 12px; color: var(--muted); max-width: 360px; }
 #pr-table td.stick1 { min-width: 220px; }
 .empty-val { color: var(--muted); }
+
+/* Обработчик: что выполняется сейчас (шапка) */
+.topbar-tools { display: flex; align-items: center; gap: 10px; }
+.activity-wrap { position: relative; }
+.activity {
+  font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--chip); color: var(--text, inherit); white-space: nowrap;
+}
+.activity.busy { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.activity.idle { color: var(--muted); }
+.activity.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+.activity-panel {
+  position: absolute; right: 0; top: calc(100% + 6px); width: min(640px, 92vw); max-height: 70vh; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+  padding: 12px; display: grid; gap: 10px; z-index: 20; font-size: 13px;
+}
+.act-title { font-weight: 600; margin-bottom: 4px; }
+.act-job { padding: 4px 8px; border-radius: 6px; cursor: pointer; line-height: 1.4; }
+.act-job:hover { background: var(--chip); }
+.act-job.running { border-left: 3px solid var(--accent); }
+.act-job.queued { border-left: 3px solid var(--line); color: var(--muted); }
+.act-job.error { border-left: 3px solid var(--bad); }
+.act-job.done { border-left: 3px solid var(--ok); color: var(--muted); }
+@media (max-width: 700px) { .activity { max-width: 52vw; overflow: hidden; text-overflow: ellipsis; } }

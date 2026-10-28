@@ -41,7 +41,7 @@ from ..analysis.pricing import money
 from ..analysis.run import DEEPSEEK_MODEL, MSK, OUT_DIR, load_result, save_result
 from ..analysis.spec_xlsx import write_spec_xlsx
 from . import abroad as abroad_search, dsearch, fetch, history, yandex
-from .articles import mentions, norm, queries_abroad, queries_rf, recheck_queries
+from .articles import brand_of, clean_brand_model, mentions, norm, queries_abroad, queries_rf, recheck_queries, weak
 from .extract import analyze_page
 from .fx import rates, to_rub
 from .judge import judge
@@ -58,10 +58,15 @@ CLAUDE_ABROAD = os.environ.get("PRICES_CLAUDE_ABROAD", "0").strip() not in ("0",
 ASYNC_TIMEOUT_MIN = float(os.environ.get("PRICES_ASYNC_TIMEOUT_MIN", "30"))
 MAX_PAGES = int(os.environ.get("PRICES_MAX_PAGES", "12"))                  # страниц на артикул: Россия
 MAX_ABROAD_PAGES = int(os.environ.get("PRICES_MAX_ABROAD_PAGES", "10"))    # и зарубеж / прочие сайты
-FETCH_PARALLEL = int(os.environ.get("FETCH_PARALLEL", "8"))
+FETCH_PARALLEL = int(os.environ.get("FETCH_PARALLEL", "12"))
 DS_FETCH_PER_ITEM = int(os.environ.get("PRICES_DS_FETCH_PER_ITEM", "4"))   # DeepSeek Fetch: страниц на артикул
 DS_FETCH_LIMIT = int(os.environ.get("PRICES_DS_FETCH_PAGES", "150"))       # и всего за поиск (≈ $0,11)
-BROWSER_LIMIT = int(os.environ.get("PRICES_BROWSER_PAGES", "30"))
+# Встроенный браузер — медленно (до 25 с на страницу): только страницы, где цену явно рисует скрипт (почти нет текста
+# или магазин из списка JS_SHOPS), не больше 2 на артикул и BROWSER_LIMIT за проход, по BROWSER_PARALLEL сразу.
+BROWSER_LIMIT = int(os.environ.get("PRICES_BROWSER_PAGES", "8"))
+BROWSER_PARALLEL = int(os.environ.get("PRICES_BROWSER_PARALLEL", "3"))
+JS_SHOPS = ("ozon.", "wildberries.", "market.yandex.", "megamarket.", "citilink.", "dns-shop.", "mvideo.", "eldorado.",
+            "vseinstrumenti.", "lemanapro.", "aliexpress.", "amazon.", "ebay.", "kazanexpress.", "detmir.")
 ABROAD_ON = os.environ.get("PRICES_ABROAD", "1").strip() not in ("0", "false", "no", "")
 # Защита от явно чужих цен: дороже НМЦ за единицу больше чем в MAX_RATIO раз (упаковка, лот, другой товар)
 # или дешевле в 1/MIN_RATIO раз (деталь, аксессуар) — в цены не идёт, отмечается в отчёте.
@@ -81,7 +86,11 @@ SKIP_DOMAINS = ("avito.ru", "youtube.", "vk.com", "wikipedia.", "dzen.ru", "pint
                 # площадки и агрегаторы закупок: там цены чужих конкурсов, а не предложения магазинов
                 "zakupki.gov.ru", "etpgpb.ru", "rts-tender.ru", "roseltorg.ru", "sberbank-ast.ru", "b2b-center.ru",
                 "tektorg.ru", "fabrikant.ru", "zakazrf.ru", "lot-online.ru", "tenderpro.ru", "rostender.info",
-                "tenderguru.ru", "bicotender.ru", "zakupki.mos.ru", "tender.mos.ru", "asue.am")
+                "tenderguru.ru", "bicotender.ru", "zakupki.mos.ru", "tender.mos.ru", "asue.am",
+                # инструкции и каталоги документации — цен там нет
+                "manualslib.", "manualmachine.", "manymanuals.", "manualzz.", "all-guidesbox.", "datasheet")
+# Площадки закупок узнаются и по имени сайта: komtender.ru, etp.acron.ru, zakupki.* …
+SKIP_PATTERNS = re.compile(r"(?:^|\.)(?:etp\.|[a-z0-9-]*tender[a-z0-9-]*\.|zakupk)", re.IGNORECASE)
 SOURCE_LABEL = {"deepseek": "DeepSeek", "yandex": "Яндекс", "claude": "Claude"}
 # Пометки поиска цен в «Примечании» — при новом поиске заменяются, при повторном анализе переносятся.
 MARK_RE = re.compile(r"(?:РФ|Зарубеж|Avito)\s*:\s*(?:найдено\s*\d\s*из\s*3|не\s+найдено)\s*\[[^\]]*\]"
@@ -110,6 +119,7 @@ class Group:
     notes: list[str] = field(default_factory=list)
     found_by: dict = field(default_factory=dict)       # {источник: {рынок: подтверждённых цен}}
     en: str = ""                                        # английское название детали (для зарубежных запросов)
+    brand: str = ""
     rechecked: bool = False
 
 
@@ -161,7 +171,7 @@ def _groups(rows: list[dict]) -> list[Group]:
     for r in rows:
         name, bm = str(r.get("Наименование позиции") or ""), str(r.get("Марка/модель") or "")
         arts, qs = queries_rf(name, bm)
-        if bm and bm not in qs and len(bm) <= 60 and arts:
+        if bm and clean_brand_model(bm) and bm not in qs and len(bm) <= 60 and arts and not weak(arts[0]):
             qs.insert(1, bm)                       # «Марка/модель» целиком (Siemens 6ES7 315-2AH14-0AB0)
         key = norm(arts[0]) if arts else norm(name)[:60]
         if not key:
@@ -170,7 +180,8 @@ def _groups(rows: list[dict]) -> list[Group]:
             groups[key].rows.append(r)
         else:
             groups[key] = Group(key=key, rows=[r], name=name, brand_model=bm, arts=arts, rf_queries=qs[:8],
-                                abroad_queries=queries_abroad(name, bm, arts))
+                                abroad_queries=queries_abroad(name, bm, arts),
+                                brand=brand_of(clean_brand_model(bm), name))
     return list(groups.values())
 
 
@@ -220,9 +231,13 @@ def _candidates(g: Group, hit_lists: list[tuple[str, dict]], queries: list[str],
         for q in queries:
             for h in hits_by_q.get(q, []):
                 dom = _domain(h.url)
-                if h.url in seen or any(s in dom for s in SKIP_DOMAINS):
+                if h.url in seen or any(s in dom for s in SKIP_DOMAINS) or SKIP_PATTERNS.search(dom):
                     continue
-                if g.arts and not mentions(f"{h.url} {h.title} {h.snippet}", g.arts):
+                text = f"{h.url} {h.title} {h.snippet}"
+                if g.arts and not mentions(text, g.arts):
+                    continue
+                # Короткий числовой артикул (3962) или позиция без артикула — страница должна упоминать и марку.
+                if g.brand and (not g.arts or weak(g.arts[0])) and g.brand.lower() not in text.lower():
                     continue
                 c = by_url.get(h.url)
                 if c:
@@ -262,6 +277,8 @@ def _candidates(g: Group, hit_lists: list[tuple[str, dict]], queries: list[str],
 
 def _apply_page(c: dict, page_html: str, arts: list[str], via: str) -> bool:
     info = analyze_page(page_html, arts)
+    if via == "direct":
+        c["text_len"] = len(info.text or "")
     if via == "direct" or info.offers or not c.get("context"):
         c.update(title=info.title or c.get("title", ""), has_article=bool(info.has_article or c.get("has_article")),
                  context=info.context or c.get("context", ""))
@@ -272,7 +289,8 @@ def _apply_page(c: dict, page_html: str, arts: list[str], via: str) -> bool:
 
 
 def _open(c: dict, arts: list[str]) -> dict:
-    page = fetch.fetch(c["url"], foreign=c["hint"] == "abroad")
+    # Сайты не в зоне .ru / .рф — сначала через прокси (напрямую из WSL многие зарубежные не открываются и ждут тайм-аута).
+    page = fetch.fetch(c["url"], foreign=c["hint"] != "rf")
     c["fetch"] = {"status": page.status, "via": page.via, "error": page.error}
     if page.final_url.startswith("https://") and _domain(page.final_url) == c["domain"]:
         c["final_url"] = page.final_url             # http → https после переадресации (ссылка нужна https://)
@@ -402,8 +420,9 @@ def _search(groups: list[Group], rf_q: dict[str, list[str]], ab_q: dict[str, lis
 
 
 def _pages(pool, pairs: list[tuple[Group, dict]], dstats: dsearch.Stats, errors: list[str], step, f0: float, f1: float,
-           ds_budget: list[int]) -> None:
+           ds_budget: list[int], timing: dict) -> None:
     """Открыть страницы: сами → DeepSeek Fetch (не открылась или нет цены) → встроенный браузер (цена из JavaScript)."""
+    t = time.monotonic()
     step(f"Открываю страницы: 0 из {len(pairs)}", f0)
     futs = [pool.submit(_open, c, g.arts) for g, c in pairs]
     for i, f in enumerate(futs):
@@ -413,6 +432,8 @@ def _pages(pool, pairs: list[tuple[Group, dict]], dstats: dsearch.Stats, errors:
             errors.append(f"страница: {exc}")
         if i % 5 == 0:
             step(f"Открываю страницы: {i + 1} из {len(pairs)}", f0 + (f1 - f0) * 0.6 * (i + 1) / max(len(pairs), 1))
+    timing["страницы"] = timing.get("страницы", 0) + time.monotonic() - t
+    t = time.monotonic()
     need, by_group = [], {}
     for g, c in pairs:
         if not c.get("offers"):
@@ -429,14 +450,29 @@ def _pages(pool, pairs: list[tuple[Group, dict]], dstats: dsearch.Stats, errors:
                 f.result()
             except Exception as exc:
                 errors.append(f"страница (DeepSeek): {exc}")
-    if fetch.CHROMIUM:
-        todo_b = [(g, c) for g, c in pairs if not c.get("offers") and c.get("has_article")][:BROWSER_LIMIT]
-        for i, (g, c) in enumerate(todo_b):
-            step(f"Встроенный браузер: {i + 1} из {len(todo_b)}", f0 + (f1 - f0) * (0.8 + 0.2 * (i + 1) / len(todo_b)))
-            try:
-                _reopen_in_browser(c, g.arts)
-            except Exception as exc:
-                errors.append(f"встроенный браузер: {exc}")
+    timing["страницы через DeepSeek"] = timing.get("страницы через DeepSeek", 0) + time.monotonic() - t
+    if not fetch.CHROMIUM:
+        return
+    t = time.monotonic()
+    todo_b, per_group = [], {}
+    for g, c in pairs:
+        if c.get("offers") or not c.get("has_article"):
+            continue
+        js = any(m in c["domain"] for m in JS_SHOPS) or c.get("text_len", 0) < 2500
+        if not js or per_group.get(g.key, 0) >= 2:
+            continue
+        per_group[g.key] = per_group.get(g.key, 0) + 1
+        todo_b.append((g, c))
+    todo_b = todo_b[:BROWSER_LIMIT]
+    if todo_b:
+        step(f"Встроенный браузер: {len(todo_b)} стр. (цена из скрипта страницы)", f0 + (f1 - f0) * 0.8)
+        with ThreadPoolExecutor(max_workers=BROWSER_PARALLEL) as bpool:
+            for f in [bpool.submit(_reopen_in_browser, c, g.arts) for g, c in todo_b]:
+                try:
+                    f.result()
+                except Exception as exc:
+                    errors.append(f"встроенный браузер: {exc}")
+    timing["встроенный браузер"] = timing.get("встроенный браузер", 0) + time.monotonic() - t
 
 
 def _check(pool, checker, work: list[tuple[Group, list[dict]]], errors: list[str]) -> None:
@@ -514,6 +550,9 @@ def _select(g: Group, fx: dict, abroad: bool) -> None:
         rub = to_rub(float(price), cur, fx)
         if rub is None:
             continue
+        if rub < 1:
+            c["excluded"] = f"цена {rub:g} руб. — не похожа на цену товара"
+            continue
         if nmc and not (nmc * MIN_RATIO <= rub <= nmc * MAX_RATIO):
             c["excluded"] = f"цена {_fmt(rub)} руб. — в {rub / nmc:.1f} раза от НМЦ за единицу {_fmt(nmc)} руб."
             continue
@@ -583,6 +622,13 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     errors: list[str] = []
     ystats, dstats = yandex.Stats(), dsearch.Stats()
     ds_budget = [DS_FETCH_LIMIT]
+    timing: dict[str, float] = {}         # сколько секунд шёл каждый этап — в отчёт и на страницу
+    mark = [time.monotonic()]
+
+    def lap(name: str) -> None:
+        now = time.monotonic()
+        timing[name] = timing.get(name, 0) + now - mark[0]
+        mark[0] = now
 
     def step(text: str, frac: float) -> None:
         progress(text, max(0.0, min(frac, 0.99)))
@@ -595,6 +641,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
             g.history = history.lookup(index, g.arts, exclude_tender=result.get("internal_number", ""))
     except Exception as exc:
         errors.append(f"своя база цен: {exc}")
+    lap("своя база цен")
     if abroad:
         step("Английские названия деталей (для зарубежного поиска)", 0.06)
         try:
@@ -603,6 +650,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
             errors.append(f"английские названия: {exc}")
         for g in groups:
             g.abroad_queries = queries_abroad(g.name, g.brand_model, g.arts, g.en)
+        lap("английские названия")
 
     fx = rates()
     if not fx:
@@ -620,6 +668,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
         hit_lists = _search(groups, {g.key: g.rf_queries for g in groups},
                             {g.key: g.abroad_queries for g in groups} if abroad else {},
                             engines, urgent, dstats, ystats, errors, step, 0.08, 0.3)
+        lap("поиск")
         claude_res = {}
         if claude_futs:
             step("Зарубеж: поиск Claude", 0.3)
@@ -632,9 +681,12 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
         for g in groups:
             g.candidates = _candidates(g, hit_lists, g.rf_queries + (g.abroad_queries if abroad else []),
                                        claude_res.get(g.key), abroad)
-        _pages(pool, [(g, c) for g in groups for c in g.candidates], dstats, errors, step, 0.32, 0.55, ds_budget)
+        mark[0] = time.monotonic()
+        _pages(pool, [(g, c) for g in groups for c in g.candidates], dstats, errors, step, 0.32, 0.55, ds_budget, timing)
+        mark[0] = time.monotonic()
         step("Проверка предложений моделью", 0.55)
         _check(pool, checker, [(g, g.candidates) for g in groups], errors)
+        lap("проверка моделью")
         for g in groups:
             _select(g, fx, abroad)
 
@@ -654,15 +706,19 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
                     g.abroad_queries = g.abroad_queries + ab2[g.key]
             step(f"Перепроверка (Шаг 5.1i): {len(need)} артикулов без трёх цен", 0.62)
             hits2 = _search(need, rf2, ab2, {"deepseek"}, urgent, dstats, ystats, errors, step, 0.62, 0.7)
+            lap("поиск")
             new_pairs = []
             for g in need:
                 seen = {c["url"] for c in g.candidates}
                 fresh = _candidates(g, hits2, rf2.get(g.key, []) + ab2.get(g.key, []), None, abroad, seen)
                 g.candidates += fresh
                 new_pairs += [(g, c) for c in fresh]
-            _pages(pool, new_pairs, dstats, errors, step, 0.7, 0.82, ds_budget)
+            mark[0] = time.monotonic()
+            _pages(pool, new_pairs, dstats, errors, step, 0.7, 0.82, ds_budget, timing)
+            mark[0] = time.monotonic()
             step("Перепроверка: проверка новых предложений моделью", 0.82)
             _check(pool, checker, [(g, [c for gg, c in new_pairs if gg is g]) for g in need], errors)
+            lap("проверка моделью")
             for g in need:
                 _select(g, fx, abroad)
             recheck["groups"] = len(need)
@@ -712,6 +768,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     current = load_result(folder) or {}
     if current.get("analyzed_at") != analyzed_at:
         raise RuntimeError("пока искались цены, анализ документов обновился — запустите поиск цен ещё раз")
+    result = current                              # свежая версия (с отметкой о записи в NocoDB) + найденные цены
     result["positions"] = rows
     result["prices_at"] = time.time()
     save_result(folder, result)
@@ -732,8 +789,15 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     except Exception as exc:
         checks.append(f"Проверка цен не выполнена: {exc}")
 
-    # 5. NocoDB — только колонки рынков и «Примечание», только в спецификации, созданной сайтом.
-    noco = _write_noco(client, result, rows)
+    lap("запись в файлы")
+    # 5. NocoDB — только колонки рынков и «Примечание», только в спецификации, созданной сайтом. Если анализ ещё
+    # записывается в NocoDB (у нового конкурса — минуты), цены допишет задача noco_prices в той же очереди следом.
+    if db.active_job(client.id, folder_name, "noco"):
+        db.enqueue(client.id, folder_name, "noco_prices")
+        noco = {"status": "pending", "text": "цены запишутся в спецификацию сразу после записи анализа в NocoDB"}
+    else:
+        noco = _write_noco(client, result, rows)
+    lap("запись в NocoDB")
 
     found_rf = sum(1 for g in groups if g.chosen.get("rf"))
     found_ab = sum(1 for g in groups if g.chosen.get("abroad"))
@@ -761,6 +825,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
                     "abroad_full": sum(1 for g in groups if len(g.chosen.get("abroad", [])) == 3),
                     "by_source": by_source, "recheck": recheck},
         "checks": checks, "errors": errors, "noco": noco,
+        "timing": {k: round(v) for k, v in timing.items()},
         "groups": [{
             "positions": [r.get("№") for r in g.rows], "name": g.name, "brand_model": g.brand_model, "arts": g.arts,
             "en": g.en, "rf_queries": g.rf_queries, "abroad_queries": g.abroad_queries if abroad else [],
@@ -784,6 +849,21 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     return summary, report
 
 
+def write_prices_noco(client, folder_name: str, folder: Path) -> str:
+    """Задача noco_prices: дописать уже найденные цены в спецификацию NocoDB (после записи анализа)."""
+    result = load_result(folder)
+    if not result or not result.get("prices_at"):
+        return "цены ещё не найдены — записывать нечего"
+    noco = _write_noco(client, result, result.get("positions") or [])
+    report = load_report(folder)
+    if report is not None:
+        report["noco"] = noco
+        report_path(folder).write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    if noco.get("status") == "error":
+        raise RuntimeError("цены в NocoDB не записаны: " + noco.get("text", ""))
+    return _noco_text(noco)
+
+
 def _num(v) -> float | None:
     from .extract import parse_price
     return parse_price(v) if v not in (None, "") else None
@@ -798,7 +878,8 @@ def _noco_text(noco: dict) -> str:
 def _write_noco(client, result: dict, rows: list[dict]) -> dict:
     internal = result.get("internal_number") or ""
     link = db.noco_link(client.id, internal)
-    if not link or not link.get("created_by_site") or not link.get("spec_table_id"):
+    if not link or not link.get("created_by_site") or not link.get("spec_table_id") \
+            or str(link.get("spec_table_id")).startswith("pending:"):
         return {"status": "skipped", "text": "не записано — спецификацию этого конкурса в NocoDB создал не сайт "
                                              "(или её ещё нет); цены — в Позиции_и_цены.xlsx"}
     s = client.nocodb

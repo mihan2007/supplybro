@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS chat_folder ON chat_messages(client_id, folder, id);
 
+-- Очереди обработчика: когда каждая последний раз подавала признаки жизни и какую задачу выполняет.
+CREATE TABLE IF NOT EXISTS worker_lanes (
+    lane    TEXT PRIMARY KEY,                   -- docs / nocodb / prices
+    pid     INTEGER,
+    job_id  INTEGER,
+    at      REAL
+);
+
 -- Какая запись NocoDB относится к конкурсу и создал ли её сайт (чужие записи без подтверждения не меняются).
 CREATE TABLE IF NOT EXISTS noco_links (
     client_id       TEXT NOT NULL,
@@ -99,11 +107,48 @@ def init() -> None:
     with connect() as con:
         con.executescript(SCHEMA)
         cols = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
-        if "params" not in cols:  # с 0.2.0: параметры задачи (JSON)
-            try:
-                con.execute("ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT ''")
-            except sqlite3.OperationalError:
-                pass  # колонку только что добавил другой процесс (сайт и обработчик стартуют одновременно)
+        for col, ddl in (("params", "TEXT NOT NULL DEFAULT ''"),   # с 0.2.0: параметры задачи (JSON)
+                         ("updated_at", "REAL")):                   # с 0.5.6: последнее действие задачи
+            if col not in cols:
+                try:
+                    con.execute(f"ALTER TABLE jobs ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass  # колонку только что добавил другой процесс (сайт и обработчик стартуют одновременно)
+
+
+# Какая очередь обработчика выполняет какую задачу (app/worker.py) и как это называть на странице.
+LANES = {"prepare": "docs", "analyze": "docs", "noco": "nocodb", "noco_prices": "nocodb", "prices": "prices"}
+LANE_TITLES = {"docs": "подготовка и анализ документов", "nocodb": "запись в NocoDB", "prices": "поиск цен"}
+KIND_TITLES = {"prepare": "подготовка документов", "analyze": "анализ документов", "noco": "запись в NocoDB",
+               "noco_prices": "запись цен в NocoDB", "prices": "поиск цен"}
+
+
+def heartbeat(lane: str, job_id: int | None = None) -> None:
+    with connect() as con:
+        con.execute("INSERT OR REPLACE INTO worker_lanes(lane, pid, job_id, at) VALUES (?,?,?,?)",
+                    (lane, os.getpid(), job_id, time.time()))
+
+
+def lanes_state() -> dict[str, dict]:
+    with connect() as con:
+        return {r["lane"]: dict(r) for r in con.execute("SELECT * FROM worker_lanes")}
+
+
+def active_jobs(client_id: str | None = None) -> list[dict]:
+    """Ждущие и выполняющиеся задачи (по порядку очереди)."""
+    q, args = "SELECT * FROM jobs WHERE status IN ('queued','running')", []
+    if client_id:
+        q += " AND client_id=?"
+        args.append(client_id)
+    with connect() as con:
+        return [dict(r) for r in con.execute(q + " ORDER BY id", args)]
+
+
+def recent_jobs(client_id: str, seconds: float = 600) -> list[dict]:
+    with connect() as con:
+        return [dict(r) for r in con.execute(
+            "SELECT * FROM jobs WHERE client_id=? AND status IN ('done','error') AND finished_at>? ORDER BY finished_at DESC "
+            "LIMIT 10", (client_id, time.time() - seconds))]
 
 
 # ---------- очередь задач ----------
@@ -148,8 +193,8 @@ def claim_next(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> sqlite
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(f"SELECT * FROM jobs WHERE {where} ORDER BY id LIMIT 1", args).fetchone()
         if row:
-            con.execute("UPDATE jobs SET status='running', started_at=?, step='', progress=0 WHERE id=?",
-                        (time.time(), row["id"]))
+            con.execute("UPDATE jobs SET status='running', started_at=?, updated_at=?, step='', progress=0 WHERE id=?",
+                        (time.time(), time.time(), row["id"]))
         con.execute("COMMIT")
         return row
     finally:
@@ -159,6 +204,7 @@ def claim_next(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> sqlite
 def update_job(job_id: int, **fields) -> None:
     if not fields:
         return
+    fields.setdefault("updated_at", time.time())
     cols = ", ".join(f"{k}=?" for k in fields)
     with connect() as con:
         con.execute(f"UPDATE jobs SET {cols} WHERE id=?", (*fields.values(), job_id))
