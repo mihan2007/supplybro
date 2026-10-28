@@ -311,6 +311,9 @@ class Claude:
         self.fallback: str = ""
         self.fallback_reason: str = ""
         self._lock = threading.Lock()
+        # Кэш ответов задачи (app/jobctl.py): после паузы, отмены, ошибки или перезапуска обработчика те же вопросы
+        # по тем же документам повторно не оплачиваются. None — без кэша.
+        self.cache = None
 
     def _switch(self, reason: str) -> bool:
         if not FALLBACK_TO_DEEPSEEK:
@@ -357,14 +360,25 @@ class Claude:
         """
         task = (prompt + "\n\nФормат ответа: только один JSON-объект — без пояснений до и после, без ```. "
                 "Схема (JSON Schema):\n" + json.dumps(schema, ensure_ascii=False))
+        key = None
+        if self.cache is not None:
+            key = self.cache.key("claude", self.model, self.effort, system, documents, task, max_tokens)
+            hit = self.cache.get(key)
+            if hit is not None:
+                self.usage.add(model=self.model, label=label + " (готовый ответ — не оплачен)", usd=0.0, cached=True)
+                return hit
         if self.fallback:
-            return self._deepseek_json(system, documents, task, schema, label, max_tokens, timeout)
-        try:
-            return self._claude_json(system, documents, task, schema, label, max_tokens, timeout)
-        except BillingError as exc:
-            if not self._switch(str(exc)):
-                raise
-            return self._deepseek_json(system, documents, task, schema, label, max_tokens, timeout)
+            answer = self._deepseek_json(system, documents, task, schema, label, max_tokens, timeout)
+        else:
+            try:
+                answer = self._claude_json(system, documents, task, schema, label, max_tokens, timeout)
+            except BillingError as exc:
+                if not self._switch(str(exc)):
+                    raise
+                answer = self._deepseek_json(system, documents, task, schema, label, max_tokens, timeout)
+        if key:
+            self.cache.put(key, answer)
+        return answer
 
     def _claude_json(self, system: str, documents: str | None, task: str, schema: dict, label: str,
                      max_tokens: int, timeout: float) -> dict:
@@ -408,8 +422,22 @@ class DeepSeek:
         self.model = model
         self.usage = usage
         self.key = read_key(DEEPSEEK_KEY_FILE, "DeepSeek")
+        self.cache = None          # кэш ответов задачи (см. Claude.cache)
 
     def json_call(self, *, system: str, user: str, label: str, timeout: float = 600) -> dict:
+        key = None
+        if self.cache is not None:
+            key = self.cache.key("deepseek", self.model, system, user)
+            hit = self.cache.get(key)
+            if hit is not None:
+                self.usage.add(model=self.model, label=label + " (готовый ответ — не оплачен)", usd=0.0, cached=True)
+                return hit
+        answer = self._json_call(system=system, user=user, label=label, timeout=timeout)
+        if key:
+            self.cache.put(key, answer)
+        return answer
+
+    def _json_call(self, *, system: str, user: str, label: str, timeout: float = 600) -> dict:
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],

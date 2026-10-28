@@ -454,7 +454,10 @@ async function loadDocs() {
   const active = renderJob(d.job);
   // Файлы положили в папку вручную (не через сайт) — запускаем обработку сами, один раз за показ.
   const pending = d.files.some((f) => f.status === "pending");
-  if (pending && !active && t._autoQueued !== d.folder) {
+  // Подготовку приостановили или недавно отменили — сами не запускаем (решение пользователя).
+  const userStopped = d.job && (d.job.status === "paused" ||
+    (d.job.status === "canceled" && Date.now() / 1000 - (d.job.finished_at || 0) < 3600));
+  if (pending && !active && !userStopped && t._autoQueued !== d.folder) {
     t._autoQueued = d.folder;
     try {
       await api(clientPath("/docs/process"), { folder: d.folder }, { method: "POST" });
@@ -545,11 +548,151 @@ function runningTail(job) {
   return t;
 }
 
+// ---------- отмена и пауза задач (меню «В работе» и блоки задач конкурса) ----------
+
+let ctlConfirm = null;          // у какой задачи открыт вопрос «Отменить?»
+const ctlBusy = new Set();      // по каким задачам запрос уже отправлен
+const lastJobs = {};            // последняя задача каждого блока — перерисовать кнопки без запроса к сайту
+
+// Что будет, если отменить задачу, которая ещё не начиналась / уже идёт.
+const CANCEL_NOT_STARTED = {
+  prepare: "Если после подготовки должен был идти анализ — он тоже не запустится.",
+  analyze: "Запись в NocoDB и поиск цен по этому анализу тоже не начнутся.",
+  noco: "Записать можно потом кнопкой «Записать в NocoDB» в блоке «Анализ».",
+  noco_prices: "Цены не попадут в NocoDB (на сайте и в xlsx они есть).",
+  prices: "Запустить поиск можно потом кнопкой «Искать цены».",
+};
+const CANCEL_STARTED = {
+  prepare: "Уже обработанные файлы останутся; анализ после подготовки не запустится.",
+  analyze: "Запись в NocoDB и поиск цен по нему не начнутся. Ответы модели, полученные до отмены, сохранены — " +
+    "при новом запуске анализа они второй раз не оплачиваются.",
+  noco: "Запись конкурса в реестре могла уже появиться, а спецификация — остаться недописанной: следующая " +
+    "«Записать в NocoDB» доделает её в ту же таблицу (лишних таблиц не будет).",
+  noco_prices: "Цены не попадут в NocoDB (на сайте и в xlsx они есть).",
+  prices: "Найденное до отмены не сохранится. Новый поиск в течение суток почти не платит: результаты поиска, " +
+    "открытые страницы и проверки моделью берутся из кэша.",
+};
+const PAUSE_TITLE_RUNNING = "Остановить на ближайшем шаге и отложить — очередь возьмёт следующую задачу. " +
+  "«Продолжить» вернёт её на прежнее место в очереди: она начнётся заново, но готовое не повторяется и второй раз не оплачивается.";
+const PAUSE_TITLE_QUEUED = "Отложить — очередь будет пропускать эту задачу, пока не нажмёте «Продолжить».";
+
+function lc1(s) { return s ? s[0].toLowerCase() + s.slice(1) : s; }
+
+function cancelEffect(j) {
+  if (j.status === "queued") return "Она ещё не начиналась. " + (CANCEL_NOT_STARTED[j.kind] || "");
+  return (j.status === "running" ? "Остановится на ближайшем шаге (обычно за несколько секунд). " : "") +
+    (CANCEL_STARTED[j.kind] || "");
+}
+
+let toastTimer = null;
+function toast(text, bad = false) {
+  const t = $("toast");
+  t.textContent = text;
+  t.className = "toast" + (bad ? " bad" : "");
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, bad ? 9000 : 5000);
+}
+
+// Блоки перерисовываются каждые несколько секунд: пока кнопка нажата (между нажатием и отпусканием),
+// содержимое не заменяем — иначе нажатие «проваливается».
+let ptrTarget = null;
+const held = new Map();
+document.addEventListener("pointerdown", (e) => { ptrTarget = e.target; }, true);
+document.addEventListener("pointerup", () => {
+  setTimeout(() => {
+    ptrTarget = null;
+    for (const [box, nodes] of held) box.replaceChildren(...nodes);
+    held.clear();
+  }, 0);
+}, true);
+function replaceSafe(box, ...nodes) {
+  if (ptrTarget && box.contains(ptrTarget)) { held.set(box, nodes); return; }
+  held.delete(box);
+  box.replaceChildren(...nodes);
+}
+
+function rerenderControls() {
+  if (actLast) renderActivity(actLast);
+  for (const [id, j] of Object.entries(lastJobs)) if (j) renderJobControls($(id), j);
+}
+
+function renderJobControls(box, j) {
+  replaceSafe(box, ...jobControls(j));
+}
+
+// Кнопки задачи: «Пауза» / «Продолжить» / «Отменить» (с вопросом), «Не останавливать».
+function jobControls(j) {
+  if (!j || !["running", "queued", "paused"].includes(j.status)) return [];
+  const busy = ctlBusy.has(j.id);
+  const btn = (text, title, fn, cls = "") => {
+    const b = el("button", { class: "btn small " + cls, type: "button", title, text });
+    b.disabled = busy;
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    return b;
+  };
+  if (ctlConfirm === j.id) {
+    return [
+      el("span", { class: "ctl-ask", text: `Отменить «${j.folder} — ${j.kind_title}»? ${cancelEffect(j)}` }),
+      btn("Да, отменить", "", () => jobAction(j, "cancel"), "danger"),
+      btn("Нет", "", () => { ctlConfirm = null; rerenderControls(); }),
+    ];
+  }
+  if (j.status === "running" && j.control) {
+    return [btn("Не останавливать", "Передумали — пусть задача работает дальше", () => jobAction(j, "resume"))];
+  }
+  const out = [];
+  if (j.status === "paused") {
+    out.push(btn("Продолжить", "Снова в очередь, на прежнее место. Готовое второй раз не делается и не оплачивается",
+      () => jobAction(j, "resume"), "primary"));
+  } else {
+    out.push(btn("Пауза", j.status === "running" ? PAUSE_TITLE_RUNNING : PAUSE_TITLE_QUEUED, () => jobAction(j, "pause")));
+  }
+  out.push(btn("Отменить", "Отменить задачу (спросит подтверждение)", () => { ctlConfirm = j.id; rerenderControls(); }, "danger"));
+  return out;
+}
+
+async function jobAction(j, action) {
+  ctlBusy.add(j.id);
+  ctlConfirm = null;
+  rerenderControls();
+  try {
+    const r = await api(clientPath(`/jobs/${j.id}/${action}`), {}, { method: "POST" });
+    toast(`${j.folder} — ${j.kind_title}: ${r.text}`);
+  } catch (e) {
+    toast(`Не получилось: ${e.message}`, true);
+  } finally {
+    ctlBusy.delete(j.id);
+  }
+  // Обновить меню и блоки конкурса (кнопки «Запустить», ход задачи).
+  pollActivity();
+  const t = currentTender();
+  if (t && t.folder === j.folder) {
+    clearTimeout(docsTimer); docsTimer = null; loadDocs();
+    clearTimeout(anTimer); anTimer = null; loadAnalysis();
+    clearTimeout(prTimer); prTimer = null; loadPrices();
+  }
+}
+
+// Задача на паузе / отменена / останавливается — текст для блоков конкурса.
+function stoppedText(job) {
+  if (job.status === "paused") {
+    return lc1(job.message || "Приостановлена") + ". «Продолжить» — снова в очередь; готовое второй раз не делается.";
+  }
+  const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
+  return `${lc1(job.message || "Отменена")} (${when}).`;
+}
+function stoppingText(job) {
+  return job.control ? ` — ${job.control === "pause" ? "приостанавливается" : "отменяется"} на ближайшем шаге…` : runningTail(job);
+}
+
 function renderJob(job) {
   const box = $("job");
+  lastJobs["job-ctl"] = job;
+  renderJobControls($("job-ctl"), job);
   if (!job) { box.hidden = true; return false; }
   box.hidden = false;
-  box.classList.remove("error", "done");
+  box.classList.remove("error", "done", "paused", "canceled");
   const bar = $("job-bar");
   if (job.status === "queued") {
     bar.style.width = "0%";
@@ -558,8 +701,14 @@ function renderJob(job) {
   }
   if (job.status === "running") {
     bar.style.width = Math.round((job.progress || 0) * 100) + "%";
-    $("job-text").textContent = "Обработка: " + (job.step || "…") + runningTail(job);
+    $("job-text").textContent = "Обработка: " + (job.step || "…") + stoppingText(job);
     return true;
+  }
+  if (job.status === "paused" || job.status === "canceled") {
+    box.classList.add(job.status);
+    bar.style.width = Math.round((job.progress || 0) * 100) + "%";
+    $("job-text").textContent = "Обработка документов: " + stoppedText(job);
+    return false;
   }
   bar.style.width = "100%";
   const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
@@ -665,9 +814,11 @@ async function loadAnalysis() {
 
 function renderAnalysisJob(job) {
   const box = $("an-job");
+  lastJobs["an-job-ctl"] = job;
+  renderJobControls($("an-job-ctl"), job);
   if (!job) { box.hidden = true; return false; }
   box.hidden = false;
-  box.classList.remove("error", "done");
+  box.classList.remove("error", "done", "paused", "canceled");
   const what = job.kind === "noco" ? "Запись в NocoDB" : "Анализ";
   if (job.status === "queued") {
     $("an-bar").style.width = "0%";
@@ -676,9 +827,15 @@ function renderAnalysisJob(job) {
   }
   if (job.status === "running") {
     $("an-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
-    $("an-job-text").textContent = `${what}: ${job.step || "…"}` + runningTail(job) + (job.kind === "noco"
+    $("an-job-text").textContent = `${what}: ${job.step || "…"}` + stoppingText(job) + (job.kind === "noco" && !job.control
       ? ". У нового конкурса запись идёт 10–20 минут (настраиваются представления спецификации); подготовка и анализ других конкурсов её не ждут" : "");
     return true;
+  }
+  if (job.status === "paused" || job.status === "canceled") {
+    box.classList.add(job.status);
+    $("an-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
+    $("an-job-text").textContent = `${what}: ` + stoppedText(job);
+    return false;
   }
   $("an-bar").style.width = "100%";
   const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
@@ -931,9 +1088,11 @@ async function loadPrices() {
 
 function renderPricesJob(job) {
   const box = $("pr-job");
+  lastJobs["pr-job-ctl"] = job;
+  renderJobControls($("pr-job-ctl"), job);
   if (!job) { box.hidden = true; return false; }
   box.hidden = false;
-  box.classList.remove("error", "done");
+  box.classList.remove("error", "done", "paused", "canceled");
   const what = job.kind === "noco_prices" ? "Запись цен в NocoDB" : "Поиск цен";
   if (job.status === "queued") {
     $("pr-bar").style.width = "0%";
@@ -942,8 +1101,14 @@ function renderPricesJob(job) {
   }
   if (job.status === "running") {
     $("pr-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
-    $("pr-job-text").textContent = `${what}: ` + (job.step || "…") + runningTail(job);
+    $("pr-job-text").textContent = `${what}: ` + (job.step || "…") + stoppingText(job);
     return true;
+  }
+  if (job.status === "paused" || job.status === "canceled") {
+    box.classList.add(job.status);
+    $("pr-bar").style.width = Math.round((job.progress || 0) * 100) + "%";
+    $("pr-job-text").textContent = `${what}: ` + stoppedText(job);
+    return false;
   }
   $("pr-bar").style.width = "100%";
   const when = job.finished_at ? new Date(job.finished_at * 1000).toLocaleString("ru-RU") : "";
@@ -1379,12 +1544,15 @@ function renderSpec(columns, rows) {
 
 let actTimer = null;
 let actSignature = null;   // задачи текущего конкурса при прошлой проверке — заметить запуск из другой вкладки
+let actLast = null;        // последний ответ /jobs — перерисовать меню без запроса (кнопки отмены)
 
 function jobLine(j, withFolder = true) {
   const head = (withFolder ? j.folder + " — " : "") + j.kind_title;
-  if (j.status === "running") return `${head}: ${j.step || "…"}` + runningTail(j);
+  if (j.status === "running") return `${head}: ${j.step || "…"}` + stoppingText(j);
   if (j.status === "queued") return `${head}: ` + queuedText(j);
+  if (j.status === "paused") return `${head}: ${lc1(j.message || "Приостановлена")}`;
   const ago = j.finished_at ? fmtDur(Date.now() / 1000 - j.finished_at) + " назад" : "";
+  if (j.status === "canceled") return `${head}: ${lc1(j.message || "Отменена")} ${ago}`;
   return `${head}: ${j.status === "error" ? "ошибка" : "готово"} ${ago}` + (j.status === "error" ? ` — ${j.message}` : "");
 }
 
@@ -1415,6 +1583,7 @@ async function pollActivity() {
 function renderActivity(d) {
   const btn = $("activity");
   const panel = $("activity-panel");
+  actLast = d;
   btn.hidden = false;
   btn.className = "activity";
   if (!d) {
@@ -1427,12 +1596,17 @@ function renderActivity(d) {
   const dead = known.length ? d.lanes.filter((l) => !l.alive) : [];
   const running = d.lanes.filter((l) => l.job);
   const queued = d.active.filter((j) => j.status === "queued");
+  const paused = d.active.filter((j) => j.status === "paused");
+  const pausedTail = paused.length ? ` · на паузе: ${paused.length}` : "";
   if (dead.length) {
     btn.textContent = "⚠ Обработчик не отвечает";
     btn.classList.add("bad");
   } else if (running.length || queued.length) {
-    btn.textContent = `● В работе: ${running.length}` + (queued.length ? ` · в очереди: ${queued.length}` : "");
+    btn.textContent = `● В работе: ${running.length}` + (queued.length ? ` · в очереди: ${queued.length}` : "") + pausedTail;
     btn.classList.add("busy");
+  } else if (paused.length) {
+    btn.textContent = `● На паузе: ${paused.length}`;
+    btn.classList.add("idle");
   } else {
     btn.textContent = "● Обработчик свободен";
     btn.classList.add("idle");
@@ -1442,9 +1616,11 @@ function renderActivity(d) {
     const box = el("div", { class: "act-lane" });
     const laneState = l.seen === null ? "ещё не запускалась" : l.alive ? `работает (отклик ${fmtDur(l.seen)} назад)` : `не отвечает ${fmtDur(l.seen)}`;
     box.append(el("div", { class: "act-title", text: `Очередь «${l.title}» — ${laneState}` }));
-    if (l.job) box.append(jobItem(l.job));
+    // Выполняемая задача другого клиента видна (очередь общая), но кнопок у неё нет.
+    if (l.job) box.append(jobItem(l.job, l.job.client_id === state.client));
     for (const j of queued.filter((q) => q.lane === l.lane)) box.append(jobItem(j));
-    if (!l.job && !queued.some((q) => q.lane === l.lane)) box.append(el("div", { class: "muted", text: "задач нет" }));
+    for (const j of paused.filter((q) => q.lane === l.lane)) box.append(jobItem(j));
+    if (!l.job && ![...queued, ...paused].some((q) => q.lane === l.lane)) box.append(el("div", { class: "muted", text: "задач нет" }));
     rows.push(box);
   }
   if (d.recent.length) {
@@ -1456,12 +1632,18 @@ function renderActivity(d) {
     rows.unshift(el("div", { class: "notice bad", text: "Обработчик не отвечает больше минуты. Запустите «Запустить SupplyBro.bat» — " +
       "прерванные задачи продолжатся сами (анализ, который уже был готов, повторно не оплачивается)." }));
   }
-  panel.replaceChildren(...rows);
+  replaceSafe(panel, ...rows);
 }
 
-function jobItem(j) {
-  const item = el("div", { class: "act-job " + j.status, title: "Открыть этот конкурс" });
-  item.textContent = jobLine(j);
+function jobItem(j, controls = true) {
+  const item = el("div", { class: "act-job " + j.status, title: "Открыть этот конкурс" },
+    el("span", { class: "act-text", text: jobLine(j) }));
+  const ctl = controls ? jobControls(j) : [];
+  if (ctl.length) {
+    const box = el("span", { class: "job-ctl" }, ...ctl);
+    box.addEventListener("click", (e) => e.stopPropagation());   // нажатие рядом с кнопкой — не переход к конкурсу
+    item.append(box);
+  }
   item.addEventListener("click", () => {
     const t = [...state.tenders.values()].find((x) => x.folder === j.folder);
     if (!t) return;

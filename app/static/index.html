@@ -104,6 +104,7 @@
         <div class="job" id="job" hidden>
           <div class="progress"><span id="job-bar"></span></div>
           <div class="job-text" id="job-text"></div>
+          <div class="job-ctl" id="job-ctl"></div>
         </div>
         <div class="table-wrap docs-wrap"><table id="docs-table"></table></div>
       </div>
@@ -122,6 +123,7 @@
       <div class="job" id="an-job" hidden>
         <div class="progress"><span id="an-bar"></span></div>
         <div class="job-text" id="an-job-text"></div>
+        <div class="job-ctl" id="an-job-ctl"></div>
       </div>
       <div class="notice warn" id="an-stale" hidden>Документы изменились после анализа — запустите анализ заново.</div>
       <div id="an-noco"></div>
@@ -152,6 +154,7 @@
       <div class="job" id="pr-job" hidden>
         <div class="progress"><span id="pr-bar"></span></div>
         <div class="job-text" id="pr-job-text"></div>
+        <div class="job-ctl" id="pr-job-ctl"></div>
       </div>
       <div class="notice warn" id="pr-stale" hidden>Анализ документов обновился после поиска цен — цены перенесены, где позиции не изменились; при сомнениях повторите поиск.</div>
       <div id="pr-noco"></div>
@@ -208,6 +211,7 @@
     </section>
   </main>
 
+  <div class="toast" id="toast" role="status" hidden></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

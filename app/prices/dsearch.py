@@ -129,12 +129,16 @@ def search_many(queries: dict[str, str | None], stats: Stats, progress=None) -> 
             return q, [], exc
 
     with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
-        for i, (q, hits, exc) in enumerate(pool.map(one, todo)):
-            out[q] = hits
-            if exc:
-                stats.errors.append(f"DeepSeek, «{q}»: {exc}")
-            if i % 10 == 0 or i == len(todo) - 1:
-                progress(f"DeepSeek, поиск: {i + 1} из {len(todo)}", len(out), len(queries))
+        try:
+            for i, (q, hits, exc) in enumerate(pool.map(one, todo)):
+                out[q] = hits
+                if exc:
+                    stats.errors.append(f"DeepSeek, «{q}»: {exc}")
+                if i % 10 == 0 or i == len(todo) - 1:
+                    progress(f"DeepSeek, поиск: {i + 1} из {len(todo)}", len(out), len(queries))
+        except BaseException:
+            stop.set()                  # задачу остановили — оставшиеся запросы не отправлять
+            raise
     return out
 
 

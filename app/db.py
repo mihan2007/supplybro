@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     client_id   TEXT NOT NULL,
     folder      TEXT NOT NULL,              -- папка конкурса внутри папки клиента
     kind        TEXT NOT NULL,              -- 'prepare' / 'analyze' / 'noco'
-    status      TEXT NOT NULL DEFAULT 'queued',  -- queued / running / done / error
+    status      TEXT NOT NULL DEFAULT 'queued',  -- queued / running / done / error / paused / canceled
     step        TEXT NOT NULL DEFAULT '',
     progress    REAL NOT NULL DEFAULT 0,    -- 0..1
     message     TEXT NOT NULL DEFAULT '',
@@ -108,7 +108,8 @@ def init() -> None:
         con.executescript(SCHEMA)
         cols = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
         for col, ddl in (("params", "TEXT NOT NULL DEFAULT ''"),   # с 0.2.0: параметры задачи (JSON)
-                         ("updated_at", "REAL")):                   # с 0.5.6: последнее действие задачи
+                         ("updated_at", "REAL"),                    # с 0.5.6: последнее действие задачи
+                         ("control", "TEXT NOT NULL DEFAULT ''")):  # с 0.5.8: просьба остановить: cancel / pause
             if col not in cols:
                 try:
                     con.execute(f"ALTER TABLE jobs ADD COLUMN {col} {ddl}")
@@ -135,8 +136,8 @@ def lanes_state() -> dict[str, dict]:
 
 
 def active_jobs(client_id: str | None = None) -> list[dict]:
-    """Ждущие и выполняющиеся задачи (по порядку очереди)."""
-    q, args = "SELECT * FROM jobs WHERE status IN ('queued','running')", []
+    """Ждущие, выполняющиеся и приостановленные задачи (по порядку очереди)."""
+    q, args = "SELECT * FROM jobs WHERE status IN ('queued','running','paused')", []
     if client_id:
         q += " AND client_id=?"
         args.append(client_id)
@@ -147,23 +148,30 @@ def active_jobs(client_id: str | None = None) -> list[dict]:
 def recent_jobs(client_id: str, seconds: float = 600) -> list[dict]:
     with connect() as con:
         return [dict(r) for r in con.execute(
-            "SELECT * FROM jobs WHERE client_id=? AND status IN ('done','error') AND finished_at>? ORDER BY finished_at DESC "
+            "SELECT * FROM jobs WHERE client_id=? AND status IN ('done','error','canceled') AND finished_at>? "
+            "ORDER BY finished_at DESC "
             "LIMIT 10", (client_id, time.time() - seconds))]
 
 
 # ---------- очередь задач ----------
 
-def enqueue(client_id: str, folder: str, kind: str = "prepare", params: dict | None = None) -> int:
+def enqueue(client_id: str, folder: str, kind: str = "prepare", params: dict | None = None, auto: bool = False) -> int:
     """Ставит задачу в очередь. Если такая же уже ждёт — возвращает её (не плодит дубли),
-    дополнив её параметры новыми (например, «после подготовки — анализ»)."""
+    дополнив её параметры новыми (например, «после подготовки — анализ»). Такая же приостановленная —
+    продолжается (снова в очереди) с новыми параметрами, если задачу ставит пользователь (кнопкой);
+    auto=True — задачу ставит сам обработчик по цепочке (после анализа — запись, поиск цен): приостановленную
+    пользователем он не трогает."""
     with connect() as con:
         row = con.execute(
-            "SELECT id, params FROM jobs WHERE client_id=? AND folder=? AND kind=? AND status='queued' "
+            "SELECT id, params, status FROM jobs WHERE client_id=? AND folder=? AND kind=? AND status IN ('queued','paused') "
             "ORDER BY id DESC LIMIT 1", (client_id, folder, kind)).fetchone()
+        if row and auto and row["status"] == "paused":
+            return row["id"]
         if row:
-            if params:
-                merged = {**job_params(row), **params}
-                con.execute("UPDATE jobs SET params=? WHERE id=?", (json.dumps(merged, ensure_ascii=False), row["id"]))
+            merged = {**job_params(row), **(params or {})}
+            con.execute("UPDATE jobs SET params=?, status='queued', control='', created_at=CASE WHEN status='paused' "
+                        "THEN ? ELSE created_at END WHERE id=?",
+                        (json.dumps(merged, ensure_ascii=False), time.time(), row["id"]))
             return row["id"]
         cur = con.execute(
             "INSERT INTO jobs(client_id, folder, kind, status, created_at, params) VALUES (?,?,?,?,?,?)",
@@ -193,7 +201,8 @@ def claim_next(only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> sqlite
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(f"SELECT * FROM jobs WHERE {where} ORDER BY id LIMIT 1", args).fetchone()
         if row:
-            con.execute("UPDATE jobs SET status='running', started_at=?, updated_at=?, step='', progress=0 WHERE id=?",
+            con.execute("UPDATE jobs SET status='running', started_at=?, updated_at=?, step='', progress=0, control='' "
+                        "WHERE id=?",
                         (time.time(), time.time(), row["id"]))
         con.execute("COMMIT")
         return row
@@ -226,9 +235,86 @@ def active_job(client_id: str, folder: str, kind: str) -> dict | None:
 
 
 def recover_interrupted() -> int:
-    """После перезапуска обработчика: задачи, оборванные на середине, — снова в очередь."""
+    """После перезапуска обработчика: задачи, оборванные на середине, — снова в очередь (кроме тех, что
+    пользователь просил отменить или приостановить: они — отменены / на паузе)."""
+    now = time.time()
     with connect() as con:
+        con.execute("UPDATE jobs SET status='canceled', finished_at=?, control='', message='Отменена пользователем' "
+                    "WHERE status='running' AND control='cancel'", (now,))
+        con.execute("UPDATE jobs SET status='paused', control='', message='Приостановлена пользователем' "
+                    "WHERE status='running' AND control='pause'")
         return con.execute("UPDATE jobs SET status='queued' WHERE status='running'").rowcount
+
+
+# ---------- отмена и пауза (меню «В работе») ----------
+
+def get_job(job_id: int) -> dict | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def job_control(job_id: int) -> str:
+    """Просит ли пользователь остановить выполняющуюся задачу: 'cancel' / 'pause' / ''."""
+    with connect() as con:
+        row = con.execute("SELECT control, status FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return "cancel"                 # задачу удалили из базы — дальше выполнять незачем
+    return row["control"] or ""
+
+
+def request_stop(job_id: int, action: str) -> str:
+    """action: 'cancel' / 'pause'. Ждущая задача отменяется / откладывается сразу; выполняющаяся — получает
+    пометку и останавливается обработчиком на ближайшем шаге. Возвращает, что сделано:
+    canceled / paused / stopping / finished (задача уже закончилась) / missing."""
+    assert action in ("cancel", "pause")
+    now = time.time()
+    con = connect()
+    try:
+        con.execute("BEGIN IMMEDIATE")       # чтобы обработчик не взял задачу в работу между чтением и записью
+        row = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            out = "missing"
+        elif row["status"] == "queued" or (row["status"] == "paused" and action == "cancel"):
+            if action == "cancel":
+                con.execute("UPDATE jobs SET status='canceled', finished_at=?, updated_at=?, control='', "
+                            "message=? WHERE id=?",
+                            (now, now, "Отменена до начала" if row["status"] == "queued" else "Отменена (была на паузе)",
+                             job_id))
+                out = "canceled"
+            else:
+                con.execute("UPDATE jobs SET status='paused', updated_at=?, message='Приостановлена до начала' "
+                            "WHERE id=?", (now, job_id))
+                out = "paused"
+        elif row["status"] == "paused":
+            out = "paused"
+        elif row["status"] == "running":
+            con.execute("UPDATE jobs SET control=? WHERE id=?", (action, job_id))
+            out = "stopping"
+        else:
+            out = "finished"
+        con.execute("COMMIT")
+        return out
+    finally:
+        con.close()
+
+
+def resume(job_id: int) -> str:
+    """Продолжить приостановленную задачу (снова в очередь) или передумать останавливать выполняющуюся.
+    Возвращает: queued / running / finished / missing."""
+    now = time.time()
+    with connect() as con:
+        row = con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return "missing"
+        if row["status"] == "paused":
+            con.execute("UPDATE jobs SET status='queued', control='', message='', step='', progress=0, created_at=?, "
+                        "updated_at=? WHERE id=? AND status='paused'", (now, now, job_id))
+            return "queued"
+        if row["status"] == "running":
+            con.execute("UPDATE jobs SET control='' WHERE id=? AND status='running'", (job_id,))
+            return "running"
+        return "queued" if row["status"] == "queued" else "finished"
 
 
 # ---------- чат по документации ----------

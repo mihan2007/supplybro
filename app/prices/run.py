@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .. import db
+from .. import db, jobctl
 from ..analysis.llm import Claude, DeepSeek, LLMError, Usage
 from ..analysis.pricing import money
 from ..analysis.run import DEEPSEEK_MODEL, MSK, OUT_DIR, load_result, save_result
@@ -423,11 +423,12 @@ def _pages(pool, pairs: list[tuple[Group, dict]], dstats: dsearch.Stats, errors:
            ds_budget: list[int], timing: dict) -> None:
     """Открыть страницы: сами → DeepSeek Fetch (не открылась или нет цены) → встроенный браузер (цена из JavaScript)."""
     t = time.monotonic()
+    check = jobctl.checker(step)
     step(f"Открываю страницы: 0 из {len(pairs)}", f0)
     futs = [pool.submit(_open, c, g.arts) for g, c in pairs]
     for i, f in enumerate(futs):
         try:
-            f.result()
+            jobctl.result(f, check)
         except Exception as exc:
             errors.append(f"страница: {exc}")
         if i % 5 == 0:
@@ -447,7 +448,7 @@ def _pages(pool, pairs: list[tuple[Group, dict]], dstats: dsearch.Stats, errors:
         step(f"DeepSeek открывает страницы, которые не открылись: {len(need)}", f0 + (f1 - f0) * 0.65)
         for f in [pool.submit(_open_deepseek, c, g.arts, dstats) for g, c in need]:
             try:
-                f.result()
+                jobctl.result(f, check)
             except Exception as exc:
                 errors.append(f"страница (DeepSeek): {exc}")
     timing["страницы через DeepSeek"] = timing.get("страницы через DeepSeek", 0) + time.monotonic() - t
@@ -466,17 +467,23 @@ def _pages(pool, pairs: list[tuple[Group, dict]], dstats: dsearch.Stats, errors:
     todo_b = todo_b[:BROWSER_LIMIT]
     if todo_b:
         step(f"Встроенный браузер: {len(todo_b)} стр. (цена из скрипта страницы)", f0 + (f1 - f0) * 0.8)
-        with ThreadPoolExecutor(max_workers=BROWSER_PARALLEL) as bpool:
+        bpool = ThreadPoolExecutor(max_workers=BROWSER_PARALLEL)
+        try:
             for f in [bpool.submit(_reopen_in_browser, c, g.arts) for g, c in todo_b]:
                 try:
-                    f.result()
+                    jobctl.result(f, check)
                 except Exception as exc:
                     errors.append(f"встроенный браузер: {exc}")
+        finally:
+            jobctl.stop_pool(bpool)
     timing["встроенный браузер"] = timing.get("встроенный браузер", 0) + time.monotonic() - t
 
 
-def _check(pool, checker, work: list[tuple[Group, list[dict]]], errors: list[str]) -> None:
-    """Проверка моделью: по одному вызову на артикул (только новые открытые страницы)."""
+def _check(pool, checker, work: list[tuple[Group, list[dict]]], errors: list[str], step=None,
+           span: tuple[float, float, str] | None = None) -> None:
+    """Проверка моделью: по одному вызову на артикул (только новые открытые страницы). step — ход работы на странице
+    и проверка, не просят ли остановить задачу; span — (доля от, доля до, текст шага) для «N из M артикулов»."""
+    check = jobctl.checker(step)
     jfuts = []
     for g, cands in work:
         usable = [c for c in cands if c.get("opened") and "verdict" not in c]
@@ -489,14 +496,16 @@ def _check(pool, checker, work: list[tuple[Group, list[dict]]], errors: list[str
         if usable:
             label = f"Проверка: {g.arts[0] if g.arts else g.name[:30]}" + (" (перепроверка)" if g.rechecked else "")
             jfuts.append((g, usable, pool.submit(judge, checker, g.rows[0], usable, label)))
-    for g, usable, fut in jfuts:
+    for n, (g, usable, fut) in enumerate(jfuts):
         try:
-            verdicts = fut.result()
+            verdicts = jobctl.result(fut, check)
         except Exception as exc:
             errors.append(f"проверка ({g.arts[0] if g.arts else g.name[:30]}): {exc}")
             verdicts = {}
         for c in usable:
             c["verdict"] = verdicts.get(c["i"]) or {}
+        if step and span:
+            step(f"{span[2]}: {n + 1} из {len(jfuts)} артикулов", span[0] + (span[1] - span[0]) * (n + 1) / len(jfuts))
 
 
 def _country(domain: str, currency: str) -> str:
@@ -604,7 +613,7 @@ def _offer_marks(g: Group, abroad: bool) -> list[str]:
 
 
 def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool = False, abroad: bool = True,
-                engine: str | None = None) -> tuple[str, dict]:
+                engine: str | None = None, cache_dir: Path | None = None) -> tuple[str, dict]:
     """Поиск цен по позициям анализа. engine — deepseek / yandex / both (Россия); urgent — Яндекс мгновенным режимом;
     abroad — искать и за рубежом. Второй проход (Шаг 5.1i) — по артикулам, где меньше трёх цен."""
     started = time.time()
@@ -619,6 +628,8 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     groups = _groups(rows)
     usage = Usage()
     checker = DeepSeek(JUDGE_MODEL, usage) if JUDGE_MODEL.startswith("deepseek") else Claude(JUDGE_MODEL, usage, "low")
+    if cache_dir:       # ответы проверки после паузы / отмены / ошибки повторно не оплачиваются (app/jobctl.py)
+        checker.cache = jobctl.AnswerCache(cache_dir)
     errors: list[str] = []
     ystats, dstats = yandex.Stats(), dsearch.Stats()
     ds_budget = [DS_FETCH_LIMIT]
@@ -632,6 +643,8 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
 
     def step(text: str, frac: float) -> None:
         progress(text, max(0.0, min(frac, 0.99)))
+
+    step.check = check = jobctl.checker(progress)     # не просят ли остановить задачу (меню «В работе»)
 
     # 1. Своя база цен.
     step("Своя база цен (прошлые спецификации NocoDB)", 0.02)
@@ -674,7 +687,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
             step("Зарубеж: поиск Claude", 0.3)
             for g in groups:
                 try:
-                    claude_res[g.key] = claude_futs[g.key].result()
+                    claude_res[g.key] = jobctl.result(claude_futs[g.key], check)
                     g.abroad_queries = list(dict.fromkeys(g.abroad_queries + (claude_res[g.key].get("queries") or [])))
                 except Exception as exc:        # ошибка по одному артикулу не останавливает поиск по остальным
                     errors.append(f"Claude за рубежом ({g.arts[0] if g.arts else g.name[:30]}): {exc}")
@@ -685,7 +698,8 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
         _pages(pool, [(g, c) for g in groups for c in g.candidates], dstats, errors, step, 0.32, 0.55, ds_budget, timing)
         mark[0] = time.monotonic()
         step("Проверка предложений моделью", 0.55)
-        _check(pool, checker, [(g, g.candidates) for g in groups], errors)
+        _check(pool, checker, [(g, g.candidates) for g in groups], errors, step,
+               (0.55, 0.62, "Проверка предложений моделью"))
         lap("проверка моделью")
         for g in groups:
             _select(g, fx, abroad)
@@ -717,7 +731,8 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
             _pages(pool, new_pairs, dstats, errors, step, 0.7, 0.82, ds_budget, timing)
             mark[0] = time.monotonic()
             step("Перепроверка: проверка новых предложений моделью", 0.82)
-            _check(pool, checker, [(g, [c for gg, c in new_pairs if gg is g]) for g in need], errors)
+            _check(pool, checker, [(g, [c for gg, c in new_pairs if gg is g]) for g in need], errors, step,
+                   (0.82, 0.9, "Перепроверка: проверка моделью"))
             lap("проверка моделью")
             for g in need:
                 _select(g, fx, abroad)
@@ -793,7 +808,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     # 5. NocoDB — только колонки рынков и «Примечание», только в спецификации, созданной сайтом. Если анализ ещё
     # записывается в NocoDB (у нового конкурса — минуты), цены допишет задача noco_prices в той же очереди следом.
     if db.active_job(client.id, folder_name, "noco"):
-        db.enqueue(client.id, folder_name, "noco_prices")
+        db.enqueue(client.id, folder_name, "noco_prices", auto=True)
         noco = {"status": "pending", "text": "цены запишутся в спецификацию сразу после записи анализа в NocoDB"}
     else:
         noco = _write_noco(client, result, rows)

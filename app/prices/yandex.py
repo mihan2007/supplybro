@@ -194,56 +194,71 @@ def search_many(queries: list[str], *, urgent: bool, timeout_min: float, stats: 
         elif c.get("op") and not urgent:
             pending[q] = c["op"]            # отложенный запрос, отправленный до перезапуска
     stats.cached = len(out)
+    halt = threading.Event()            # задачу остановили — оставшиеся запросы не отправлять
     with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
-        if not urgent and queries:
-            def submit(q: str):
-                try:
-                    return q, _request("POST", ASYNC_URL, key, _body(q)), None
-                except LLMError as exc:
-                    return q, {}, exc
-            for q, op, exc in pool.map(submit, [q for q in queries if q not in out and q not in pending]):
-                if exc:
-                    stats.errors.append(f"отложенный запрос «{q}»: {exc}")
-                elif op.get("id"):
-                    pending[q] = op["id"]
-                    stats.async_ += 1
-                    _cache_put(q, op=op["id"])
-            if not pending and stats.errors and "ключ" in stats.errors[-1]:
-                raise LLMError(stats.errors[-1])
-            started = time.monotonic()
-
-            def poll(item):
-                q, op_id = item
-                try:
-                    return q, _request("GET", OPERATION_URL + op_id, key), None
-                except LLMError as exc:
-                    return q, {}, exc
-            while pending and time.monotonic() - started < timeout_min * 60:
-                waited = int(time.monotonic() - started)
-                progress(f"Яндекс, отложенный режим: готово {total - len(pending)} из {total} "
-                         f"(ждём {waited // 60} мин {waited % 60:02d} с, не дольше {timeout_min:g} мин)",
-                         total - len(pending), total)
-                time.sleep(min(POLL_SEC, max(5, timeout_min * 60 - waited)))
-                for q, op, exc in pool.map(poll, list(pending.items())):
+        try:
+            if not urgent and queries:
+                def submit(q: str):
+                    if halt.is_set():
+                        return q, {}, LLMError("остановлено")
+                    try:
+                        return q, _request("POST", ASYNC_URL, key, _body(q)), None
+                    except LLMError as exc:
+                        return q, {}, exc
+                for q, op, exc in pool.map(submit, [q for q in queries if q not in out and q not in pending]):
                     if exc:
-                        continue                    # операция ещё есть у Яндекса — спросим в следующий раз
-                    if op.get("done"):
-                        pending.pop(q, None)
-                        out[q] = _parse_op(op, q, stats)
-                        if not op.get("error"):
-                            _cache_put(q, hits=[asdict(h) for h in out[q]])
-        rest = [q for q in queries if q not in out]
+                        stats.errors.append(f"отложенный запрос «{q}»: {exc}")
+                    elif op.get("id"):
+                        pending[q] = op["id"]
+                        stats.async_ += 1
+                        _cache_put(q, op=op["id"])
+                if not pending and stats.errors and "ключ" in stats.errors[-1]:
+                    raise LLMError(stats.errors[-1])
+                started = time.monotonic()
 
-        def sync(q: str):
-            try:
-                hits = search_sync(q, stats)
-                _cache_put(q, hits=[asdict(h) for h in hits])
-                return q, hits, None
-            except LLMError as exc:
-                return q, [], exc
-        for i, (q, hits, exc) in enumerate(pool.map(sync, rest)):
-            if exc:
-                stats.errors.append(f"«{q}»: {exc}")
-            out[q] = hits
-            progress(f"Яндекс, мгновенный режим: {i + 1} из {len(rest)}", total - len(rest) + i + 1, total)
+                def poll(item):
+                    q, op_id = item
+                    if halt.is_set():
+                        return q, {}, LLMError("остановлено")
+                    try:
+                        return q, _request("GET", OPERATION_URL + op_id, key), None
+                    except LLMError as exc:
+                        return q, {}, exc
+                while pending and time.monotonic() - started < timeout_min * 60:
+                    pause_until = time.monotonic() + min(POLL_SEC, max(5, timeout_min * 60 - (time.monotonic() - started)))
+                    while True:             # ждём по секунде: счётчик на странице идёт, остановка задачи — сразу
+                        waited = int(time.monotonic() - started)
+                        progress(f"Яндекс, отложенный режим: готово {total - len(pending)} из {total} "
+                                 f"(ждём {waited // 60} мин {waited % 60:02d} с, не дольше {timeout_min:g} мин)",
+                                 total - len(pending), total)
+                        if time.monotonic() >= pause_until:
+                            break
+                        time.sleep(min(1.0, max(pause_until - time.monotonic(), 0)))
+                    for q, op, exc in pool.map(poll, list(pending.items())):
+                        if exc:
+                            continue                    # операция ещё есть у Яндекса — спросим в следующий раз
+                        if op.get("done"):
+                            pending.pop(q, None)
+                            out[q] = _parse_op(op, q, stats)
+                            if not op.get("error"):
+                                _cache_put(q, hits=[asdict(h) for h in out[q]])
+            rest = [q for q in queries if q not in out]
+
+            def sync(q: str):
+                if halt.is_set():
+                    return q, [], LLMError("остановлено")
+                try:
+                    hits = search_sync(q, stats)
+                    _cache_put(q, hits=[asdict(h) for h in hits])
+                    return q, hits, None
+                except LLMError as exc:
+                    return q, [], exc
+            for i, (q, hits, exc) in enumerate(pool.map(sync, rest)):
+                if exc:
+                    stats.errors.append(f"«{q}»: {exc}")
+                out[q] = hits
+                progress(f"Яндекс, мгновенный режим: {i + 1} из {len(rest)}", total - len(rest) + i + 1, total)
+        except BaseException:
+            halt.set()
+            raise
     return out

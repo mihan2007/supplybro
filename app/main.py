@@ -549,6 +549,54 @@ def api_jobs(client_id: str):
             "recent": [job_view(r, lanes, active) for r in db.recent_jobs(client.id)]}
 
 
+def _own_job(client: Client, job_id: int) -> dict:
+    job = db.get_job(job_id)
+    if not job or job["client_id"] != client.id:
+        raise HTTPException(404, "задача не найдена")
+    return job
+
+
+STOP_TEXT = {"canceled": "задача отменена", "paused": "задача приостановлена",
+             "stopping": "задача остановится на ближайшем шаге (обычно за несколько секунд)",
+             "finished": "задача уже закончилась", "missing": "задача не найдена"}
+
+
+@app.post("/api/clients/{client_id}/jobs/{job_id}/cancel")
+def api_job_cancel(client_id: str, job_id: int):
+    """Отменить задачу: ждущую — сразу, выполняющуюся — на ближайшем шаге."""
+    client = get_client(client_id)
+    _own_job(client, job_id)
+    res = db.request_stop(job_id, "cancel")
+    return {"result": res, "text": STOP_TEXT[res], "job": job_view(db.get_job(job_id))}
+
+
+@app.post("/api/clients/{client_id}/jobs/{job_id}/pause")
+def api_job_pause(client_id: str, job_id: int):
+    """Приостановить задачу (её очередь берёт следующую). «Продолжить» — снова в очередь, на прежнее место."""
+    client = get_client(client_id)
+    _own_job(client, job_id)
+    res = db.request_stop(job_id, "pause")
+    return {"result": res, "text": STOP_TEXT[res], "job": job_view(db.get_job(job_id))}
+
+
+@app.post("/api/clients/{client_id}/jobs/{job_id}/resume")
+def api_job_resume(client_id: str, job_id: int):
+    """Продолжить приостановленную задачу или передумать останавливать выполняющуюся."""
+    client = get_client(client_id)
+    job = _own_job(client, job_id)
+    if job["status"] == "paused":
+        # Пока задача стояла на паузе, такую же могли запустить заново кнопкой — тогда вторую не ставим.
+        twin = db.active_job(client.id, job["folder"], job["kind"])
+        if twin and twin["id"] != job_id:
+            db.request_stop(job_id, "cancel")
+            return {"result": "replaced", "text": "такая задача уже стоит в очереди или идёт — приостановленная отменена",
+                    "job": job_view(db.get_job(twin["id"]))}
+    res = db.resume(job_id)
+    text = {"queued": "задача снова в очереди", "running": "задача продолжает работу",
+            "finished": "задача уже закончилась", "missing": "задача не найдена"}[res]
+    return {"result": res, "text": text, "job": job_view(db.get_job(job_id))}
+
+
 # ---------- поиск цен ----------
 
 @app.get("/api/clients/{client_id}/prices")

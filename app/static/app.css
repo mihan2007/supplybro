@@ -292,4 +292,27 @@ td.block-row { background: var(--chip) !important; font-weight: 600; }
 .act-job.queued { border-left: 3px solid var(--line); color: var(--muted); }
 .act-job.error { border-left: 3px solid var(--bad); }
 .act-job.done { border-left: 3px solid var(--ok); color: var(--muted); }
+.act-job.paused { border-left: 3px dashed var(--warn-text); }
+.act-job.canceled { border-left: 3px solid var(--line-strong); color: var(--muted); }
+.act-job { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; }
+.act-text { flex: 1 1 280px; min-width: 0; }
+.act-job .job-ctl { margin-left: auto; }
+
+/* Отмена и пауза задач */
+.job-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.job-ctl:empty { display: none; }
+.job .job-ctl { margin-top: 6px; }
+.job-ctl .btn { padding: 2px 10px; font-size: 12px; }
+.btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.btn.danger:hover { color: var(--bad); border-color: var(--bad); }
+.ctl-ask { flex-basis: 100%; color: var(--text); line-height: 1.4; }
+.job.paused .progress span { background: var(--warn-text); }
+.job.canceled .progress span { background: var(--line-strong); }
+.job.paused .job-text, .job.canceled .job-text { color: var(--muted); }
+.toast {
+  position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 50; max-width: min(560px, 92vw);
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(16, 24, 40, .18); padding: 10px 14px; font-size: 13px;
+}
+.toast.bad { border-color: var(--bad); color: var(--bad); }
 @media (max-width: 700px) { .activity { max-width: 52vw; overflow: hidden; text-overflow: ellipsis; } }

@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .. import db
+from .. import db, jobctl
 from . import prompts
 from .corpus import QuoteIndex, build_documents_block, corpus_hash, load_docs
 from .fields import COMPUTED, CRITICAL, DISPLAY_ORDER, GROUPS, NOT_SPECIFIED, label_of
@@ -337,8 +337,11 @@ def _apply_markers(values: dict, verdicts: dict) -> dict[str, dict]:
 
 # ---------- главная функция ----------
 
-def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str | None = None) -> tuple[str, dict]:
-    """Анализ документов конкурса. Возвращает (итог одной строкой, результат). model — модель Claude (иначе CLAUDE_MODEL)."""
+def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str | None = None,
+            cache_dir: Path | None = None) -> tuple[str, dict]:
+    """Анализ документов конкурса. Возвращает (итог одной строкой, результат). model — модель Claude (иначе CLAUDE_MODEL).
+    cache_dir — кэш ответов модели этой задачи (app/jobctl.py): после паузы / отмены / ошибки / перезапуска
+    обработчика уже полученные ответы повторно не оплачиваются."""
     model = model if model in ANALYSIS_MODELS else CLAUDE_MODEL
     started = time.time()
     today = datetime.now(MSK).strftime("%d.%m.%Y")
@@ -348,6 +351,9 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
     docs_block, used, skipped = build_documents_block(docs, CORPUS_LIMIT)
     usage = Usage()
     claude = Claude(model, usage, effort_for(model))
+    if cache_dir:
+        claude.cache = jobctl.AnswerCache(cache_dir)
+    check = jobctl.checker(progress)      # просят ли остановить задачу (пока ждём ответов модели — раз в секунду)
     checks: list[str] = []
     if skipped:
         checks.append("⚠ Не поместились в анализ (слишком большой объём): " + ", ".join(d.base for d in skipped))
@@ -360,7 +366,7 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
     try:
         # 1. Перечень позиций — первым вызовом: он записывает документы в кэш, остальные вызовы читают из кэша.
         progress("Перечень позиций (документы передаются модели)", 0.05)
-        inv = _inventory(claude, docs_block, today)
+        inv = jobctl.result(pool.submit(_inventory, claude, docs_block, today), check)
         main = [p for p in inv.get("positions") or [] if str(p.get("name") or "").strip()]
         inv["positions"] = main
 
@@ -373,21 +379,21 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
         details: dict[str, dict] = {}
         done = 0
         for fut, part in part_futs:
-            for d in fut.result():
+            for d in jobctl.result(fut, check):
                 details[_clean_n(d.get("n"))] = d
             done += len(part)
             progress(f"Позиции подробно: {done} из {len(main)}", 0.2 + 0.5 * done / max(len(main), 1))
         raw_fields: dict[str, dict] = {}
         for f in group_futs:
-            raw_fields.update(f.result())
+            raw_fields.update(jobctl.result(f, check))
         # Повтор для позиций, которых не оказалось в ответах (один раз).
         missing = [p for p in main if _clean_n(p.get("n")) not in details]
         if missing:
             progress(f"Повтор для {len(missing)} поз.", 0.72)
             for i in range(0, len(missing), CHUNK):
                 part = missing[i:i + CHUNK]
-                for d in _details(claude, docs_block, today, inv.get("main_source") or "", part,
-                                  f"Позиции (повтор) {part[0]['n']}–{part[-1]['n']}"):
+                for d in jobctl.result(pool.submit(_details, claude, docs_block, today, inv.get("main_source") or "",
+                                                   part, f"Позиции (повтор) {part[0]['n']}–{part[-1]['n']}"), check):
                     details[_clean_n(d.get("n"))] = d
 
         values = {k: (v.get("value") or "").strip() or NOT_SPECIFIED for k, v in raw_fields.items()}
@@ -403,9 +409,10 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
         progress("Перепроверка критичных полей (DeepSeek)", 0.76)
         verification = {}
         try:
-            theirs = deepseek_future.result()
+            theirs = jobctl.result(deepseek_future, check)
             ds_fields = theirs if isinstance(theirs, dict) else {}
-            verdicts = _compare(claude, docs_block, today, {k: values[k] for k in CRITICAL if k in values}, ds_fields)
+            verdicts = jobctl.result(pool.submit(_compare, claude, docs_block, today,
+                                                 {k: values[k] for k in CRITICAL if k in values}, ds_fields), check)
             verification = _apply_markers(values, verdicts)
             for k, v in verification.items():
                 if v["verdict"] == "theirs_correct":
