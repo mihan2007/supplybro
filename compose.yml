@@ -42,12 +42,21 @@ services:
       CHAT_CACHE_TTL: ${CHAT_CACHE_TTL:-1h}
       # Поиск цен — см. .env.
       YANDEX_KEY_FILE_IN_CONTAINER: /run/secrets/yandex
-      PRICES_MODEL: ${PRICES_MODEL:-claude-haiku-5-5}
+      PRICES_SEARCH: ${PRICES_SEARCH:-deepseek}
+      PRICES_JUDGE_MODEL: ${PRICES_JUDGE_MODEL:-claude-haiku-5-5}
       PRICES_ABROAD: ${PRICES_ABROAD:-1}
+      PRICES_CLAUDE_ABROAD: ${PRICES_CLAUDE_ABROAD:-0}
+      PRICES_MODEL: ${PRICES_MODEL:-claude-haiku-5-5}
       PRICES_ABROAD_SEARCHES: ${PRICES_ABROAD_SEARCHES:-5}
       PRICES_ASYNC_TIMEOUT_MIN: ${PRICES_ASYNC_TIMEOUT_MIN:-30}
       PRICES_MAX_PAGES: ${PRICES_MAX_PAGES:-12}
+      PRICES_MAX_ABROAD_PAGES: ${PRICES_MAX_ABROAD_PAGES:-10}
+      PRICES_DS_FETCH_PER_ITEM: ${PRICES_DS_FETCH_PER_ITEM:-4}
+      PRICES_DS_FETCH_PAGES: ${PRICES_DS_FETCH_PAGES:-150}
+      PRICES_MAX_RATIO: ${PRICES_MAX_RATIO:-10}
+      PRICES_MIN_RATIO: ${PRICES_MIN_RATIO:-0.15}
       PRICES_HISTORY_HOURS: ${PRICES_HISTORY_HOURS:-12}
+      DEEPSEEK_SEARCH_COUNT: ${DEEPSEEK_SEARCH_COUNT:-50}
       YANDEX_RESULTS_PER_QUERY: ${YANDEX_RESULTS_PER_QUERY:-20}
     volumes:
       # Папка данных (база сайта, очередь задач) — внутри Ubuntu, из DATA_DIR в .env.
@@ -91,7 +100,7 @@ services:
 
   # Обработчик задач: подготовка документов (распаковка, конвертация, текст, распознавание),
   # анализ документов ИИ (Claude + перепроверка DeepSeek) и запись результата в NocoDB,
-  # поиск цен (Яндекс + Claude, отдельной очередью).
+  # поиск цен (DeepSeek / Яндекс, отдельной очередью).
   worker:
     image: supplybro-web:dev
     command: ["python", "-m", "app.worker"]

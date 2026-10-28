@@ -832,39 +832,7 @@ function renderAnalysisPositions(rows) {
 
 function showAnalysisTab(tab) {
   anTab = tab;
-  $("pr-run").addEventListener("click", async () => {
-  const t = currentTender();
-  if (!t || !t.folder) return;
-  $("pr-run").disabled = true;
-  try {
-    await api(clientPath("/prices/run"), { folder: t.folder, urgent: $("pr-urgent").checked ? "1" : "",
-      abroad: $("pr-abroad").checked ? "1" : "0" }, { method: "POST" });
-    $("pr-urgent").checked = false;
-  } catch (err) {
-    setStatus("pr-status", "Не удалось запустить поиск цен: " + err.message, true);
-  }
-  loadPrices();
-});
-$("pr-abroad").addEventListener("change", (e) => storageSet(PR_ABROAD_KEY, e.target.checked ? "1" : "0"));
-$("chat-form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const q = $("chat-input").value;
-  if (!q.trim() || chatBusy) return;
-  $("chat-input").value = "";
-  askChat(q.trim());
-});
-$("chat-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("chat-form").requestSubmit(); }
-});
-$("chat-model").addEventListener("change", (e) => storageSet(CHAT_MODEL_KEY, e.target.value));
-$("chat-clear").addEventListener("click", async () => {
-  const t = currentTender();
-  if (!t || !t.folder || chatBusy) return;
-  try { await api(clientPath("/chat/clear"), { folder: t.folder }, { method: "POST" }); } catch (_) { /* покажем как есть */ }
-  loadChat();
-});
-$("an-model").addEventListener("change", (e) => storageSet(AN_MODEL_KEY, e.target.value));
-for (const b of document.querySelectorAll("#analysis .tab")) b.classList.toggle("active", b.dataset.tab === tab);
+  for (const b of document.querySelectorAll("#analysis .tab")) b.classList.toggle("active", b.dataset.tab === tab);
   $("an-fields").hidden = tab !== "fields";
   $("an-positions").hidden = tab !== "positions";
   if (tab === "positions") {
@@ -957,34 +925,75 @@ function toNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+const PR_ENGINE_KEY = "supplybro.pricesEngine";
+const ENGINE_LABEL = { deepseek: "DeepSeek", yandex: "Яндекс (Россия) + DeepSeek (зарубеж)", both: "DeepSeek + Яндекс (сравнить)" };
+const SOURCE_LABEL = { deepseek: "DeepSeek", yandex: "Яндекс", claude: "Claude" };
+let prLast = null;   // последний ответ /prices — чтобы пересчитать оценку при смене настроек
+let prBusy = false;
+
+function priceEstimate(d) {
+  const e = d.estimate;
+  if (!e) return "";
+  const engine = $("pr-engine").value || "deepseek";
+  const abroad = $("pr-abroad").checked;
+  const ds = (engine !== "yandex" ? e.deepseek_rf_usd : 0) + (abroad ? e.deepseek_abroad_usd : 0) + e.deepseek_pages_usd +
+    (e.recheck_usd || 0);
+  const usdTotal = ds + e.judge_usd + (abroad ? e.claude_abroad_usd || 0 : 0);
+  let text = `${e.groups} артикулов: ≈ ${usd(usdTotal)} (поиск DeepSeek ≈ ${usd(ds)}, проверка моделью ≈ ${usd(e.judge_usd)}` +
+    (abroad && e.claude_abroad_usd ? `, Claude за рубежом ≈ ${usd(e.claude_abroad_usd)}` : "") + ")";
+  if (engine !== "deepseek") {
+    const rubY = $("pr-urgent").checked ? e.yandex_sync_rub : e.yandex_async_rub;
+    text += ` + Яндекс ≈ ${fmtRub.format(rubY)} ₽`;
+  }
+  return text;
+}
+
 function renderPrices(d, busy) {
+  prLast = d;
+  prBusy = busy;
   const r = d.report;
   const s = d.settings || {};
+  const engines = s.engines || ["deepseek"];
+  const savedEngine = storageGet(PR_ENGINE_KEY);
+  fillSelect($("pr-engine"), engines.map((x) => ({ value: x, label: ENGINE_LABEL[x] || x })),
+    engines.includes(savedEngine) ? savedEngine : s.engine);
   const abroadBox = $("pr-abroad");
   const saved = storageGet(PR_ABROAD_KEY);
   abroadBox.checked = saved === null ? s.abroad !== false : saved === "1";
   abroadBox.disabled = s.abroad === false;
+  const engine = $("pr-engine").value || "deepseek";
+  $("pr-urgent-box").hidden = engine === "deepseek";
+  const needYandex = engine !== "deepseek";
+  const needDeepseek = engine !== "yandex" || abroadBox.checked;
   const run = $("pr-run");
   run.textContent = r ? "Искать заново" : "Искать цены";
-  run.disabled = busy || !d.has_analysis || d.analysis_active || !s.yandex_key;
-  const e = d.estimate;
-  run.title = !d.has_analysis ? "Сначала нужен анализ документов — цены ищутся по его позициям"
+  const blocker = !d.has_analysis ? "Сначала нужен анализ документов — цены ищутся по его позициям"
     : d.analysis_active ? "Идёт подготовка или анализ документов — поиск цен после них"
-    : !s.yandex_key ? "Нет ключа Яндекса (secrets/API_key_Yandex.txt)"
-    : e ? `Артикулов: ${e.groups}, запросов к Яндексу: ${e.queries} (≈ ${e.yandex_async_rub} ₽, срочно ≈ ${e.yandex_sync_rub} ₽)` +
-          `; зарубеж ≈ $${e.abroad_usd}` : "";
+    : needYandex && !s.yandex_key ? "Нет ключа Яндекса (secrets/API_key_Yandex.txt) — выберите поиск DeepSeek"
+    : needDeepseek && !s.deepseek_key ? "Нет ключа DeepSeek (secrets/API_key_DeepSeek.txt)" : "";
+  run.disabled = busy || Boolean(blocker);
+  const est = priceEstimate(d);
+  run.title = blocker || (est ? "Оценка: " + est : "");
   $("pr-stale").hidden = !(d.stale && !busy);
-  $("pr-info").textContent = r
-    ? `· ${r.at_text} · ${Math.max(1, Math.round((r.seconds || 0) / 60))} мин · ≈ ${usd(r.cost.claude_usd)} + ${fmtRub.format(r.cost.yandex_rub)} ₽`
-    : "";
-  if (!s.yandex_key) {
-    setStatus("pr-status", "Поиск по России выключен: нет ключа Яндекса. Положите ключ в файл secrets\\API_key_Yandex.txt и перезапустите сайт.", true);
+  if (r) {
+    const c = r.cost || {};
+    const total = c.usd !== undefined ? c.usd : (c.claude_usd || 0);
+    $("pr-info").textContent = `· ${r.at_text} · ${Math.max(1, Math.round((r.seconds || 0) / 60))} мин · ≈ ${usd(total)}` +
+      (c.yandex_rub ? ` + ${fmtRub.format(c.yandex_rub)} ₽` : "");
+  } else {
+    $("pr-info").textContent = "";
+  }
+  if (blocker && d.has_analysis && !d.analysis_active) {
+    setStatus("pr-status", blocker + ".", true);
   } else if (!r && !busy) {
     setStatus("pr-status", d.has_analysis
-      ? "Цен ещё нет. «Искать цены» — программа найдёт товар в Яндексе (Россия)" + (abroadBox.checked ? " и через Claude за рубежом" : "") +
+      ? "Цен ещё нет. «Искать цены» — программа найдёт товар поиском " + (engine === "deepseek" ? "DeepSeek" : engine === "yandex" ? "Яндекса" : "DeepSeek и Яндекса") +
+        (abroadBox.checked ? " (Россия и зарубеж)" : " (Россия)") +
         ", откроет страницы магазинов, проверит артикул и цену и выберет по 3 самые низкие цены со ссылками." +
-        (e ? ` Оценка: ${e.groups} артикулов, ≈ ${e.yandex_async_rub} ₽ Яндекс` + (abroadBox.checked ? ` + ≈ $${e.abroad_usd} Claude.` : ".") : "")
+        (est ? " Оценка: " + est + "." : "")
       : "Поиск цен станет доступен после анализа документов.");
+  } else {
+    setStatus("pr-status", "");
   }
   if (!r) {
     $("pr-wrap").hidden = true;
@@ -1001,14 +1010,29 @@ function renderPrices(d, busy) {
   }));
   const sm = r.summary || {};
   const checks = [`Артикулов: ${sm.groups}; Россия — цены у ${sm.rf_found} (все три — у ${sm.rf_full}); ` +
-    (r.abroad === false ? "зарубеж не искали." : `зарубеж — у ${sm.abroad_found} (все три — у ${sm.abroad_full}).`),
-    ...(r.checks || []), ...(r.errors || []).slice(0, 8).map((x) => "⚠ " + x)];
+    (r.abroad === false ? "зарубеж не искали." : `зарубеж — у ${sm.abroad_found} (все три — у ${sm.abroad_full}).`)];
+  const bs = sm.by_source || {};
+  if (Object.keys(bs).length > 1) {
+    checks.push("Кто нашёл подтверждённые цены: " + Object.entries(bs).map(([src, v]) =>
+      `${SOURCE_LABEL[src] || src} — Россия у ${v.rf_groups} арт. (${v.rf_offers} цен)` +
+      (r.abroad === false ? "" : `, зарубеж у ${v.abroad_groups} арт. (${v.abroad_offers} цен)`)).join("; ") + ".");
+  }
+  checks.push(...(r.checks || []), ...(r.errors || []).slice(0, 8).map((x) => "⚠ " + x));
   $("pr-checks").replaceChildren(...checks.map((c) => el("li", { class: c.startsWith("⚠") || /замечаний — [1-9]/.test(c) ? "warn" : "", text: c })));
   renderPricesTable(r, d.positions || []);
   const c = r.cost || {};
-  $("pr-usage").textContent = `Яндекс: отложенных запросов ${c.yandex_async || 0}, мгновенных ${c.yandex_sync || 0}` +
-    (c.yandex_cached ? `, из сохранённых за сутки ${c.yandex_cached}` : "") + ` ≈ ${fmtRub.format(c.yandex_rub || 0)} ₽. ` +
-    (c.searches ? `Поисков Claude за рубежом: ${c.searches}. ` : "") + usageText(c.claude);
+  const parts = [];
+  if (c.deepseek_searches || c.deepseek_pages || c.deepseek_cached) {
+    parts.push(`DeepSeek: поисков ${c.deepseek_searches || 0}` + (c.deepseek_cached ? ` (+ ${c.deepseek_cached} из сохранённых за сутки)` : "") +
+      `, страниц открыто ${c.deepseek_pages || 0} ≈ ${usd(c.deepseek_usd || 0)}.`);
+  }
+  if (c.yandex_async || c.yandex_sync || c.yandex_cached) {
+    parts.push(`Яндекс: отложенных запросов ${c.yandex_async || 0}, мгновенных ${c.yandex_sync || 0}` +
+      (c.yandex_cached ? `, из сохранённых ${c.yandex_cached}` : "") + ` ≈ ${fmtRub.format(c.yandex_rub || 0)} ₽.`);
+  }
+  if (c.claude_searches || c.searches) parts.push(`Поисков Claude за рубежом: ${c.claude_searches || c.searches}.`);
+  parts.push(usageText(c.models || c.claude));
+  $("pr-usage").textContent = parts.join(" ");
 }
 
 function offerList(items, abroad) {
@@ -1016,7 +1040,10 @@ function offerList(items, abroad) {
   for (const a of items || []) {
     const line = el("div");
     line.append(el("a", { href: a.url, target: "_blank", rel: "noopener", text: rub(a.price_rub), title: a.note || a.url }));
-    line.append(el("span", { class: "muted", text: " " + a.domain + (abroad && a.currency && a.currency !== "RUB" ? ` · ${a.price} ${a.currency}` : "") }));
+    const src = (a.sources || []).map((x) => SOURCE_LABEL[x] || x).join(" + ");
+    line.append(el("span", { class: "muted", text: " " + a.domain + (abroad && a.currency && a.currency !== "RUB" ? ` · ${a.price} ${a.currency}` : "") +
+      (abroad && a.country ? ` · ${a.country}` : "") + (a.original === "no" ? " · аналог" : ""),
+      title: src ? "Нашёл: " + src + (a.via === "deepseek" ? "; страницу открыл DeepSeek" : a.via === "browser" ? "; страница открыта встроенным браузером" : "") : null }));
     box.append(line);
   }
   return box;
@@ -1055,10 +1082,12 @@ function renderPricesTable(r, positions) {
       hist.append(line);
     }
     const how = el("td");
-    const qs = [`Яндекс: ${(g.rf_queries || []).map((q) => "«" + q + "»").join(", ")}`];
-    if ((g.abroad_queries || []).length) qs.push(`Claude: ${g.abroad_queries.map((q) => "«" + q + "»").join(", ")}`);
+    const qs = [`Россия (${r.engine === "yandex" ? "Яндекс" : r.engine === "both" ? "DeepSeek + Яндекс" : r.engine === "deepseek" ? "DeepSeek" : "Яндекс"}): ` +
+      (g.rf_queries || []).map((q) => "«" + q + "»").join(", ")];
+    if ((g.abroad_queries || []).length) qs.push(`Зарубеж: ${g.abroad_queries.map((q) => "«" + q + "»").join(", ")}`);
     qs.push(`Найдено страниц: ${g.found || 0}, открыто и проверено: ${g.checked || 0}`);
     if ((g.unopened || []).length) qs.push("Не открылись: " + [...new Set(g.unopened)].join(", "));
+    for (const note of g.notes || []) qs.push(note);
     how.append(longText(qs.join("\n")));
     body.append(el("tr", {},
       el("td", { class: "stick0", text: (g.positions || []).join(", ") }), pos,
@@ -1379,6 +1408,23 @@ $("an-run").addEventListener("click", async () => {
   }
   loadAnalysis();
 });
+$("pr-run").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  $("pr-run").disabled = true;
+  try {
+    const engine = $("pr-engine").value || "deepseek";
+    await api(clientPath("/prices/run"), { folder: t.folder, engine, urgent: engine !== "deepseek" && $("pr-urgent").checked ? "1" : "",
+      abroad: $("pr-abroad").checked ? "1" : "0" }, { method: "POST" });
+    $("pr-urgent").checked = false;
+  } catch (err) {
+    setStatus("pr-status", "Не удалось запустить поиск цен: " + err.message, true);
+  }
+  loadPrices();
+});
+$("pr-abroad").addEventListener("change", (e) => { storageSet(PR_ABROAD_KEY, e.target.checked ? "1" : "0"); if (prLast) renderPrices(prLast, prBusy); });
+$("pr-engine").addEventListener("change", (e) => { storageSet(PR_ENGINE_KEY, e.target.value); if (prLast) renderPrices(prLast, prBusy); });
+$("pr-urgent").addEventListener("change", () => { if (prLast) renderPrices(prLast, prBusy); });
 $("chat-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const q = $("chat-input").value;

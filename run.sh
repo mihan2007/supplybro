@@ -57,14 +57,14 @@ for pair in "CLAUDE_KEY_FILE:Claude" "DEEPSEEK_KEY_FILE:DeepSeek"; do
   fi
 done
 
-# 3а-2. Ключ Яндекса — для поиска цен по России. Без него сайт работает, кнопка «Искать цены» выключена:
+# 3а-2. Ключ Яндекса — для поиска цен через Яндекс (по выбору). Без него поиск идёт через DeepSeek:
 #       создаём пустой файл, чтобы контейнер запустился (ключ — потом, в этот же файл).
 if [ -z "${YANDEX_KEY_FILE:-}" ]; then
   echo "В .env не указан YANDEX_KEY_FILE" >&2
   exit 1
 fi
 if [ ! -s "$YANDEX_KEY_FILE" ]; then
-  echo "Нет ключа Яндекса ($YANDEX_KEY_FILE) — поиск цен по России будет выключен."
+  echo "Нет ключа Яндекса ($YANDEX_KEY_FILE) — поиск цен через Яндекс недоступен (через DeepSeek — работает)."
   [ -e "$YANDEX_KEY_FILE" ] || : > "$YANDEX_KEY_FILE"
 fi
 

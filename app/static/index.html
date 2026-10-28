@@ -136,8 +136,9 @@
       <div class="section-head">
         <h2>Поиск цен <span class="muted" id="pr-info"></span></h2>
         <div class="section-tools">
-          <label class="inline check" title="Искать и за рубежом (Германия, Китай, США) — веб-поиск Claude, ≈ $0,06 за артикул"><input type="checkbox" id="pr-abroad" checked> за рубежом</label>
-          <label class="inline check" title="Мгновенный режим Яндекса: ответ сразу, но запрос в 16 раз дороже. Без галочки — отложенный режим: дёшево, ответ обычно за несколько минут"><input type="checkbox" id="pr-urgent"> срочно</label>
+          <label class="inline" title="Чем искать цены по России (выбор запоминается в этом браузере)">Поиск <select id="pr-engine"></select></label>
+          <label class="inline check" title="Искать и за рубежом (Германия, Китай, США и др.) — поиском DeepSeek"><input type="checkbox" id="pr-abroad" checked> за рубежом</label>
+          <label class="inline check" id="pr-urgent-box" title="Мгновенный режим Яндекса: ответ сразу, но запрос в 16 раз дороже. Без галочки — отложенный режим: дёшево, ответ обычно за несколько минут"><input type="checkbox" id="pr-urgent"> срочно</label>
           <button class="btn small primary" id="pr-run" type="button">Искать цены</button>
         </div>
       </div>

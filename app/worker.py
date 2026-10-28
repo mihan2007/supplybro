@@ -8,7 +8,8 @@
   prepare — подготовка документов без ИИ (этап 1); с параметром analyze=true после неё ставится анализ;
   analyze — анализ документов ИИ (этап 3) и запись в NocoDB (если NOCODB_WRITE=1);
   noco    — только запись готового анализа в NocoDB (например, «Записать всё равно» при конфликте);
-  prices  — поиск цен по позициям анализа (app/prices): Яндекс (Россия) + Claude (зарубеж), запись в xlsx и NocoDB.
+  prices  — поиск цен по позициям анализа (app/prices): DeepSeek (Россия и зарубеж; Яндекс — на выбор), запись
+            в xlsx и NocoDB.
             Идёт отдельной очередью (своим потоком): отложенный поиск Яндекса ждёт ответов до получаса
             и не должен задерживать подготовку и анализ других конкурсов.
 """
@@ -96,7 +97,7 @@ def run_job(job) -> str:
     if job["kind"] == "prices":
         from .prices.run import find_prices
         summary, _report = find_prices(client, job["folder"], folder, progress, urgent=bool(params.get("urgent")),
-                                       abroad=params.get("abroad", True) is not False)
+                                       abroad=params.get("abroad", True) is not False, engine=params.get("engine"))
         return summary
 
     raise RuntimeError(f"неизвестный вид задачи: {job['kind']}")

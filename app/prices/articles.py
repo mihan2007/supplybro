@@ -114,6 +114,52 @@ def queries_rf(name: str, brand_model: str) -> tuple[list[str], list[str]]:
     return arts, list(dict.fromkeys(" ".join(q.split())[:400] for q in qs if q.strip()))
 
 
+def queries_abroad(name: str, brand_model: str, arts: list[str], en: str = "") -> list[str]:
+    """Запросы для зарубежного рынка — набор Шага 5.1g: голый артикул, бренд + артикул, английское название детали +
+    бренд + артикул (en — перевод наименования), eBay / Amazon, AliExpress, «Preis» (Германия), «price» (США),
+    каждый альтернативный артикул. Фильтр языка (lang:) не ставится: на редких артикулах он отсекает и нужные
+    страницы (проверено 27.10.2026)."""
+    brand = brand_of(brand_model, name)
+    en = " ".join(str(en or "").split())[:60]
+    if not arts:
+        # Без артикула за рубежом ищем только по латинской марке/модели (по русскому названию — бессмысленно).
+        base = brand_model.strip()[:80] if re.search(r"[A-Za-z]{2}", brand_model or "") else ""
+        if not base:
+            return []
+        qs = [base, f"{en} {base}" if en else f"{base} buy", f"{base} price", f"{base} Preis",
+              f"{base} site:ebay.com OR site:ebay.de OR site:amazon.com", f"aliexpress {base}"]
+    else:
+        main = arts[0].translate(LOOKALIKE)
+        qs = [main, f"{brand} {main}" if brand else f"{main} buy",
+              f"{en} {brand} {main}".strip() if en else f"{main} spare part",
+              f"{main} price", f"{main} Preis",
+              f"{main} site:ebay.com OR site:ebay.de OR site:amazon.com", f"aliexpress {main}"]
+        qs += [alt.translate(LOOKALIKE) for alt in arts[1:3]]
+    return list(dict.fromkeys(" ".join(q.split())[:128] for q in qs if q.strip()))
+
+
+def recheck_queries(name: str, brand_model: str, arts: list[str], en: str = "") -> tuple[list[str], list[str]]:
+    """Шаг 5.1i — второй проход по артикулам без трёх цен: другие запросы (Россия, зарубеж)."""
+    brand = brand_of(brand_model, name)
+    plain_name = _name_without_codes(name, arts)
+    en = " ".join(str(en or "").split())[:60]
+    if arts:
+        main = arts[0].translate(LOOKALIKE)
+        named = plain_name if not brand or brand.lower() in plain_name.lower() else f"{plain_name} {brand}"
+        rf = [f"{main} lang:ru", f"{brand} {main} купить".strip(), f"{named} {main} цена".strip(), f"{main} в наличии"]
+        rf += [f"{alt.translate(LOOKALIKE)} купить" for alt in arts[1:3]]
+        ab = [f"{main} kaufen", f"{main} 价格", f"{en} {main} price".strip() if en else f"{main} buy",
+              f"{main} site:alibaba.com OR site:made-in-china.com", f"{main} Preis lang:de", f"{main} price lang:en"]
+        ab += [f"{alt.translate(LOOKALIKE)} price" for alt in arts[1:3]]
+    else:
+        base = (brand_model or plain_name).strip()[:80]
+        rf = [f"{plain_name} {brand_model} lang:ru".strip(), f"{base} в наличии", f"{plain_name} купить"] if base else []
+        latin = brand_model.strip()[:80] if re.search(r"[A-Za-z]{2}", brand_model or "") else ""
+        ab = [f"{latin} kaufen", f"{latin} 价格", f"{en} {latin} price".strip(), f"{latin} price lang:en"] if latin else []
+    clean = lambda qs: list(dict.fromkeys(" ".join(q.split())[:128] for q in qs if q.strip()))
+    return clean(rf), clean(ab)
+
+
 def mentions(text: str, arts: list[str]) -> bool:
     """Есть ли в тексте один из артикулов (без учёта разделителей, регистра, кириллицы-двойников)."""
     if not arts:

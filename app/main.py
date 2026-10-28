@@ -520,8 +520,8 @@ def api_prices(client_id: str, folder: str):
 
 
 @app.post("/api/clients/{client_id}/prices/run")
-def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bool = True):
-    """Запустить поиск цен по позициям анализа (Яндекс — Россия, Claude — зарубеж)."""
+def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bool = True, engine: str = ""):
+    """Запустить поиск цен по позициям анализа. engine — deepseek / yandex / both (чем искать по России)."""
     client = get_client(client_id)
     base = folder_path(client, folder)
     result = load_result(base)
@@ -529,7 +529,11 @@ def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bo
         raise HTTPException(400, "сначала нужен анализ документов — цены ищутся по его позициям")
     if db.active_job(client.id, folder, "analyze") or db.active_job(client.id, folder, "prepare"):
         raise HTTPException(409, "идёт подготовка или анализ документов — поиск цен можно запустить после них")
-    return {"job_id": db.enqueue(client.id, folder, "prices", {"urgent": bool(urgent), "abroad": bool(abroad)})}
+    from .prices import run as prices
+    params = {"urgent": bool(urgent), "abroad": bool(abroad)}
+    if engine in prices.ENGINES:
+        params["engine"] = engine
+    return {"job_id": db.enqueue(client.id, folder, "prices", params)}
 
 
 # ---------- чат по документации ----------

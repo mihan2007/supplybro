@@ -19,7 +19,7 @@ from html.parser import HTMLParser
 
 from .articles import mentions, norm
 
-CURRENCY_SIGNS = {"₽": "RUB", "руб": "RUB", "р.": "RUB", "rub": "RUB", "€": "EUR", "eur": "EUR", "$": "USD",
+CURRENCY_SIGNS = {"₽": "RUB", "руб": "RUB", "р.": "RUB", "р": "RUB", "rub": "RUB", "€": "EUR", "eur": "EUR", "$": "USD",
                   "usd": "USD", "¥": "CNY", "cny": "CNY", "rmb": "CNY", "£": "GBP", "gbp": "GBP"}
 
 
@@ -180,8 +180,9 @@ def _from_jsonld(blocks: list[str]) -> list[Offer]:
     return offers
 
 
-_TEXT_PRICE = re.compile(r"(\d[\d\s .,]{1,14}\d|\d)\s*(₽|руб\.?|р\.|€|\$|eur|usd|¥)|(€|\$|¥|USD|EUR)\s*(\d[\d\s.,]{0,14}\d)",
-                         re.IGNORECASE)
+# Число: не продолжение артикула («A0P0R74100 2 470 ₽» → 2 470, а не 741002470); разряды — по 3 цифры.
+_NUM = r"(?<![\w.,])(?:\d{1,3}(?:[ \u00a0\u202f\u2009.,]\d{3})+|\d+)(?:[.,]\d{1,2})?(?!\d)"
+_TEXT_PRICE = re.compile(rf"({_NUM})\s*(₽|руб\.?|р\.|€|\$|eur|usd|¥)|(€|\$|¥|USD|EUR)\s*({_NUM})", re.IGNORECASE)
 
 
 def _from_text(text: str, around: str) -> list[Offer]:
