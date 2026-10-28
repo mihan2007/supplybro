@@ -54,6 +54,13 @@ TABLE_ID_RE = re.compile(r"/(m[a-z0-9]{8,})(?:/|$|\?)")
 app = FastAPI(title="SupplyBro", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
+# Админ-панель учётных записей (/admin) — только при ADMIN_PANEL=1 в .env; по умолчанию выключена,
+# вход на сам сайт пока не требуется (app/admin.py, app/auth.py).
+ADMIN_PANEL = os.environ.get("ADMIN_PANEL", "0").strip().lower() in ("1", "true", "yes", "on")
+if ADMIN_PANEL:
+    from . import admin
+    app.include_router(admin.router)
+
 
 db.init()
 

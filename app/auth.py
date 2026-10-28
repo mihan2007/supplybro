@@ -1,0 +1,502 @@
+"""
+Учётные записи сотрудников: логины, пароли, роли, доступ к клиентам, сеансы входа и журнал действий.
+
+Пока используется только админ-панелью (/admin, включается ADMIN_PANEL=1 в .env). Сам сайт вход ещё не требует —
+это следующий шаг (доступ сотрудникам по VPN): тогда страница будет спрашивать логин, показывать только клиентов из
+доступа сотрудника и разрешать действия по его роли (ROLES ниже).
+
+Пароли хранятся только как хеш scrypt со своей солью для каждого; сеансы — как хеш случайного ключа из cookie
+(украденная база не даёт ни паролей, ни действующих сеансов). Данные — в app.db (папка данных сайта).
+
+Забыли пароль администратора — в Ubuntu, в папке проекта:
+    docker compose exec web python -m app.auth reset-password <логин>
+(напечатает новый временный пароль).
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import re
+import secrets
+import sys
+import time
+
+from . import db
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    login           TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name            TEXT NOT NULL DEFAULT '',
+    email           TEXT NOT NULL DEFAULT '',
+    phone           TEXT NOT NULL DEFAULT '',
+    role            TEXT NOT NULL,
+    clients         TEXT NOT NULL DEFAULT '["*"]',   -- id клиентов из clients.json; ["*"] — все
+    active          INTEGER NOT NULL DEFAULT 1,
+    note            TEXT NOT NULL DEFAULT '',
+    password_hash   TEXT NOT NULL,
+    must_change     INTEGER NOT NULL DEFAULT 1,       -- сменить временный пароль при первом входе
+    failed          INTEGER NOT NULL DEFAULT 0,       -- неудачных попыток подряд
+    locked_until    REAL NOT NULL DEFAULT 0,
+    created_at      REAL, updated_at REAL, password_changed_at REAL, last_login_at REAL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash  TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    created_at  REAL, seen_at REAL, expires_at REAL,
+    ip          TEXT NOT NULL DEFAULT '',
+    agent       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+CREATE TABLE IF NOT EXISTS user_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          REAL,
+    actor_id    INTEGER,                -- кто сделал (NULL — система / командная строка)
+    actor       TEXT NOT NULL DEFAULT '',
+    user_id     INTEGER,                -- с чьей учётной записью
+    user        TEXT NOT NULL DEFAULT '',
+    action      TEXT NOT NULL,
+    details     TEXT NOT NULL DEFAULT '',
+    ip          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS user_events_at ON user_events(at);
+"""
+
+# Роли. Права — на будущее подключение входа на сайт; сейчас по ним только админ-панель решает, кого пускать.
+# view — представление «Реестра конкурсов» NocoDB по умолчанию для роли.
+ROLES = {
+    "admin": {"title": "Администратор", "view": "Вся таблица",
+              "text": "Всё, что может тендерный специалист, плюс учётные записи сотрудников (эта панель)."},
+    "tender": {"title": "Тендерный специалист", "view": "Тендерный специалист",
+               "text": "Конкурсы, документы, анализ, запись в NocoDB, поиск цен, чат, отмена и пауза задач."},
+    "buyer": {"title": "Закупщик", "view": "Закупщик",
+              "text": "Просмотр конкурсов и документов, поиск цен, спецификации, чат по документации."},
+    "logist": {"title": "Логист", "view": "Логист",
+               "text": "Просмотр конкурсов, документов и спецификаций, чат по документации."},
+    "viewer": {"title": "Наблюдатель", "view": "Вся таблица",
+               "text": "Только просмотр: конкурсы, документы, анализ, цены — без запуска задач и изменений."},
+}
+PERMISSIONS = {
+    "view": "Смотреть конкурсы, документы, анализ, цены",
+    "chat": "Вопросы по документации",
+    "upload": "Загружать документы, создавать конкурсы",
+    "analyze": "Запускать анализ и запись в NocoDB",
+    "prices": "Искать цены",
+    "jobs": "Отменять и приостанавливать задачи",
+    "users": "Учётные записи сотрудников",
+}
+ROLE_PERMISSIONS = {
+    "admin": set(PERMISSIONS),
+    "tender": {"view", "chat", "upload", "analyze", "prices", "jobs"},
+    "buyer": {"view", "chat", "prices"},
+    "logist": {"view", "chat"},
+    "viewer": {"view"},
+}
+
+SESSION_DAYS = 14
+MAX_FAILED = 5                  # столько неверных паролей подряд — вход закрыт на LOCK_MINUTES
+LOCK_MINUTES = 10
+MIN_PASSWORD = 10
+LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
+_SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
+
+
+class AuthError(Exception):
+    """Понятная пользователю ошибка (показывается на странице)."""
+
+
+def init() -> None:
+    db.init()
+    with db.connect() as con:
+        con.executescript(SCHEMA)
+
+
+# ---------- пароли ----------
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, **_SCRYPT)
+    b64 = lambda b: base64.b64encode(b).decode("ascii")
+    return f"scrypt${_SCRYPT['n']}${_SCRYPT['r']}${_SCRYPT['p']}${b64(salt)}${b64(dk)}"
+
+
+def check_password(password: str, stored: str) -> bool:
+    try:
+        kind, n, r, p, salt, dk = stored.split("$")
+        if kind != "scrypt":
+            return False
+        want = base64.b64decode(dk)
+        got = hashlib.scrypt(password.encode("utf-8"), salt=base64.b64decode(salt), dklen=len(want),
+                             n=int(n), r=int(r), p=int(p))
+        return hmac.compare_digest(got, want)
+    except (ValueError, TypeError):
+        return False
+
+
+def password_problem(password: str, login: str = "") -> str:
+    """Почему пароль не годится ('' — годится)."""
+    if len(password or "") < MIN_PASSWORD:
+        return f"пароль — не короче {MIN_PASSWORD} символов"
+    if login and login.lower() in password.lower():
+        return "пароль не должен содержать логин"
+    if len(set(password)) < 5:
+        return "слишком простой пароль"
+    return ""
+
+
+def temp_password() -> str:
+    """Временный пароль для выдачи сотруднику: 12 символов без похожих букв (l/1, O/0)."""
+    alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(12))
+        if any(c.isdigit() for c in pw) and any(c.isupper() for c in pw) and any(c.islower() for c in pw):
+            return pw
+
+
+# ---------- учётные записи ----------
+
+def _row(r) -> dict | None:
+    if not r:
+        return None
+    u = dict(r)
+    try:
+        u["clients"] = json.loads(u.get("clients") or '["*"]')
+    except ValueError:
+        u["clients"] = ["*"]
+    return u
+
+
+def public(u: dict | None) -> dict | None:
+    """Учётная запись для страницы — без хеша пароля."""
+    if not u:
+        return None
+    out = {k: v for k, v in u.items() if k not in ("password_hash",)}
+    out["role_title"] = ROLES.get(u["role"], {}).get("title", u["role"])
+    out["locked"] = bool(u.get("locked_until") and u["locked_until"] > time.time())
+    return out
+
+
+def count_users() -> int:
+    with db.connect() as con:
+        return con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+def get_user(user_id: int) -> dict | None:
+    with db.connect() as con:
+        return _row(con.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone())
+
+
+def find_user(login: str) -> dict | None:
+    with db.connect() as con:
+        return _row(con.execute("SELECT * FROM users WHERE login=?", (login.strip().lower(),)).fetchone())
+
+
+def list_users() -> list[dict]:
+    with db.connect() as con:
+        return [_row(r) for r in con.execute("SELECT * FROM users ORDER BY active DESC, role='admin' DESC, name, login")]
+
+
+def _active_admins(exclude: int | None = None) -> int:
+    with db.connect() as con:
+        return con.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1 AND id!=?",
+                           (exclude or -1,)).fetchone()[0]
+
+
+def _clean(data: dict, known_clients: set[str], creating: bool) -> dict:
+    out = {}
+    if creating or "login" in data:
+        login = str(data.get("login") or "").strip().lower()
+        if not LOGIN_RE.match(login):
+            raise AuthError("логин — 2–32 символа: латинские буквы, цифры, точка, дефис, подчёркивание")
+        out["login"] = login
+    if creating or "name" in data:
+        name = " ".join(str(data.get("name") or "").split())[:120]
+        if not name:
+            raise AuthError("укажите ФИО")
+        out["name"] = name
+    for k, limit in (("email", 120), ("phone", 40), ("note", 500)):
+        if k in data:
+            out[k] = str(data.get(k) or "").strip()[:limit]
+    if out.get("email") and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", out["email"]):
+        raise AuthError("e-mail указан неверно")
+    if creating or "role" in data:
+        role = str(data.get("role") or "")
+        if role not in ROLES:
+            raise AuthError("выберите роль")
+        out["role"] = role
+    if creating or "clients" in data:
+        cl = data.get("clients") or []
+        if cl == ["*"] or cl == "*":
+            out["clients"] = ["*"]
+        else:
+            cl = [str(c) for c in cl if str(c) in known_clients]
+            if not cl:
+                raise AuthError("отметьте хотя бы одного клиента (или «все клиенты»)")
+            out["clients"] = sorted(set(cl))
+    if "active" in data:
+        out["active"] = 1 if data.get("active") else 0
+    return out
+
+
+def create_user(data: dict, actor: dict | None, known_clients: set[str], ip: str = "") -> tuple[dict, str]:
+    """Новая учётная запись. Пароль: data['password'] или временный (возвращается один раз, чтобы передать
+    сотруднику). Возвращает (учётная запись, временный пароль или '')."""
+    fields = _clean(data, known_clients, creating=True)
+    if find_user(fields["login"]):
+        raise AuthError(f"логин «{fields['login']}» уже занят")
+    given = str(data.get("password") or "")
+    if given:
+        problem = password_problem(given, fields["login"])
+        if problem:
+            raise AuthError(problem)
+    pw = given or temp_password()
+    now = time.time()
+    with db.connect() as con:
+        cur = con.execute(
+            "INSERT INTO users(login, name, email, phone, role, clients, active, note, password_hash, must_change, "
+            "created_at, updated_at, password_changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (fields["login"], fields["name"], fields.get("email", ""), fields.get("phone", ""), fields["role"],
+             json.dumps(fields["clients"]), 1, fields.get("note", ""), hash_password(pw),
+             0 if given and data.get("must_change") is False else 1, now, now, now))
+        user_id = cur.lastrowid
+    user = get_user(user_id)
+    event(actor, user, "создана", f"роль: {ROLES[user['role']]['title']}; клиенты: {_clients_text(user['clients'])}", ip)
+    return user, ("" if given else pw)
+
+
+def update_user(user_id: int, data: dict, actor: dict | None, known_clients: set[str], ip: str = "") -> dict:
+    user = get_user(user_id)
+    if not user:
+        raise AuthError("учётная запись не найдена")
+    fields = _clean(data, known_clients, creating=False)
+    if "login" in fields and fields["login"] != user["login"]:
+        other = find_user(fields["login"])
+        if other and other["id"] != user_id:
+            raise AuthError(f"логин «{fields['login']}» уже занят")
+    losing_admin = user["role"] == "admin" and user["active"] and (
+        fields.get("role", "admin") != "admin" or fields.get("active", 1) == 0)
+    if losing_admin and not _active_admins(exclude=user_id):
+        raise AuthError("это единственный администратор — сначала назначьте другого")
+    if actor and actor["id"] == user_id and fields.get("active", 1) == 0:
+        raise AuthError("себя заблокировать нельзя")
+    changes = {k: v for k, v in fields.items() if (json.dumps(v) if k == "clients" else v) !=
+               (json.dumps(user[k]) if k == "clients" else user[k])}
+    if not changes:
+        return user
+    sets = ", ".join(f"{k}=?" for k in changes) + ", updated_at=?"
+    vals = [json.dumps(v) if k == "clients" else v for k, v in changes.items()]
+    with db.connect() as con:
+        con.execute(f"UPDATE users SET {sets} WHERE id=?", (*vals, time.time(), user_id))
+        if changes.get("active") == 0:
+            con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))   # заблокирован — сразу выход
+    new = get_user(user_id)
+    diff = _diff_text(user, changes)
+    if diff:
+        event(actor, new, "изменена", diff, ip)
+    if changes.get("active") == 0:
+        event(actor, new, "заблокирована", "", ip)
+    elif changes.get("active") == 1:
+        event(actor, new, "разблокирована", "", ip)
+    return new
+
+
+def reset_password(user_id: int, actor: dict | None, ip: str = "") -> str:
+    """Новый временный пароль (сотрудник сменит его при входе); все сеансы сотрудника закрываются."""
+    user = get_user(user_id)
+    if not user:
+        raise AuthError("учётная запись не найдена")
+    pw = temp_password()
+    with db.connect() as con:
+        con.execute("UPDATE users SET password_hash=?, must_change=1, failed=0, locked_until=0, password_changed_at=?, "
+                    "updated_at=? WHERE id=?", (hash_password(pw), time.time(), time.time(), user_id))
+        con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+    event(actor, user, "пароль сброшен", "выдан временный пароль, все входы закрыты", ip)
+    return pw
+
+
+def change_password(user_id: int, old: str, new: str, ip: str = "") -> None:
+    user = get_user(user_id)
+    if not user or not check_password(old, user["password_hash"]):
+        raise AuthError("текущий пароль указан неверно")
+    problem = password_problem(new, user["login"])
+    if problem:
+        raise AuthError(problem)
+    if check_password(new, user["password_hash"]):
+        raise AuthError("новый пароль совпадает с текущим")
+    with db.connect() as con:
+        con.execute("UPDATE users SET password_hash=?, must_change=0, password_changed_at=?, updated_at=? WHERE id=?",
+                    (hash_password(new), time.time(), time.time(), user_id))
+    event(user, user, "пароль изменён", "сотрудником", ip)
+
+
+def delete_user(user_id: int, actor: dict | None, ip: str = "") -> None:
+    user = get_user(user_id)
+    if not user:
+        raise AuthError("учётная запись не найдена")
+    if actor and actor["id"] == user_id:
+        raise AuthError("себя удалить нельзя")
+    if user["role"] == "admin" and user["active"] and not _active_admins(exclude=user_id):
+        raise AuthError("это единственный администратор — его удалить нельзя")
+    with db.connect() as con:
+        con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM users WHERE id=?", (user_id,))
+    event(actor, user, "удалена", f"{user['name']}, {ROLES.get(user['role'], {}).get('title', user['role'])}", ip)
+
+
+def unlock(user_id: int, actor: dict | None, ip: str = "") -> None:
+    with db.connect() as con:
+        con.execute("UPDATE users SET failed=0, locked_until=0 WHERE id=?", (user_id,))
+    event(actor, get_user(user_id), "вход открыт", "после неверных паролей", ip)
+
+
+# ---------- вход и сеансы ----------
+
+def login(login_name: str, password: str, ip: str = "", agent: str = "") -> tuple[dict, str]:
+    """Проверка логина и пароля. Возвращает (учётная запись, ключ сеанса для cookie)."""
+    user = find_user(login_name or "")
+    now = time.time()
+    if not user:
+        check_password(password or "", hash_password("x"))     # одинаковое время ответа для чужих логинов
+        event(None, None, "неудачный вход", f"логин «{(login_name or '')[:40]}» не найден", ip)
+        raise AuthError("неверный логин или пароль")
+    if user["locked_until"] > now:
+        raise AuthError(f"слишком много неверных паролей — вход закрыт ещё на "
+                        f"{max(1, round((user['locked_until'] - now) / 60))} мин")
+    if not check_password(password or "", user["password_hash"]):
+        failed = user["failed"] + 1
+        locked = now + LOCK_MINUTES * 60 if failed >= MAX_FAILED else 0
+        with db.connect() as con:
+            con.execute("UPDATE users SET failed=?, locked_until=? WHERE id=?", (0 if locked else failed, locked, user["id"]))
+        event(None, user, "неудачный вход", "вход закрыт на 10 мин" if locked else f"неверный пароль ({failed})", ip)
+        raise AuthError("неверный логин или пароль")
+    if not user["active"]:
+        event(None, user, "неудачный вход", "учётная запись заблокирована", ip)
+        raise AuthError("учётная запись заблокирована — обратитесь к администратору")
+    token = secrets.token_urlsafe(32)
+    with db.connect() as con:
+        con.execute("UPDATE users SET failed=0, locked_until=0, last_login_at=? WHERE id=?", (now, user["id"]))
+        con.execute("INSERT INTO sessions(token_hash, user_id, created_at, seen_at, expires_at, ip, agent) "
+                    "VALUES (?,?,?,?,?,?,?)", (_token_hash(token), user["id"], now, now, now + SESSION_DAYS * 86400,
+                                               ip, (agent or "")[:200]))
+        con.execute("DELETE FROM sessions WHERE expires_at<?", (now,))
+    event(user, user, "вход", "", ip)
+    return get_user(user["id"]), token
+
+
+def session_user(token: str | None) -> dict | None:
+    """Учётная запись по ключу сеанса из cookie (None — не вошёл, сеанс истёк или сотрудник заблокирован)."""
+    if not token:
+        return None
+    now = time.time()
+    with db.connect() as con:
+        s = con.execute("SELECT * FROM sessions WHERE token_hash=?", (_token_hash(token),)).fetchone()
+        if not s or s["expires_at"] < now:
+            return None
+        if now - (s["seen_at"] or 0) > 300:
+            con.execute("UPDATE sessions SET seen_at=? WHERE token_hash=?", (now, s["token_hash"]))
+    user = get_user(s["user_id"])
+    return user if user and user["active"] else None
+
+
+def logout(token: str | None) -> None:
+    if token:
+        with db.connect() as con:
+            con.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(token),))
+
+
+def end_sessions(user_id: int, actor: dict | None, ip: str = "", keep_token: str | None = None) -> int:
+    with db.connect() as con:
+        n = con.execute("DELETE FROM sessions WHERE user_id=? AND token_hash!=?",
+                        (user_id, _token_hash(keep_token) if keep_token else "")).rowcount
+    if n:
+        event(actor, get_user(user_id), "входы закрыты", f"закрыто сеансов: {n}", ip)
+    return n
+
+
+def sessions_count() -> dict[int, int]:
+    with db.connect() as con:
+        return {r[0]: r[1] for r in con.execute(
+            "SELECT user_id, COUNT(*) FROM sessions WHERE expires_at>? GROUP BY user_id", (time.time(),))}
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# ---------- журнал ----------
+
+def event(actor: dict | None, user: dict | None, action: str, details: str = "", ip: str = "") -> None:
+    with db.connect() as con:
+        con.execute("INSERT INTO user_events(at, actor_id, actor, user_id, user, action, details, ip) VALUES (?,?,?,?,?,?,?,?)",
+                    (time.time(), actor["id"] if actor else None, (actor or {}).get("login", ""),
+                     user["id"] if user else None, (user or {}).get("login", ""), action, details[:500], ip))
+
+
+def events(limit: int = 200, user_id: int | None = None) -> list[dict]:
+    q, args = "SELECT * FROM user_events", []
+    if user_id:
+        q += " WHERE user_id=?"
+        args.append(user_id)
+    with db.connect() as con:
+        return [dict(r) for r in con.execute(q + " ORDER BY id DESC LIMIT ?", (*args, limit))]
+
+
+def _clients_text(clients: list[str]) -> str:
+    if clients == ["*"]:
+        return "все"
+    try:
+        from .config import load_clients
+        names = {c.id: c.name for c in load_clients().values()}
+    except Exception:
+        names = {}
+    return ", ".join(names.get(c, c) for c in clients)
+
+
+_FIELD_TITLES = {"login": "логин", "name": "ФИО", "email": "e-mail", "phone": "телефон", "role": "роль",
+                 "clients": "клиенты", "active": "активна", "note": "заметка"}
+
+
+def _diff_text(before: dict, changes: dict) -> str:
+    parts = []
+    for k, v in changes.items():
+        if k == "role":
+            parts.append(f"роль: {ROLES.get(before['role'], {}).get('title')} → {ROLES[v]['title']}")
+        elif k == "clients":
+            parts.append(f"клиенты: {_clients_text(before['clients'])} → {_clients_text(v)}")
+        elif k == "active":
+            continue
+        elif k == "note":
+            parts.append("заметка изменена")
+        else:
+            parts.append(f"{_FIELD_TITLES.get(k, k)}: «{before.get(k) or ''}» → «{v}»")
+    return "; ".join(parts)
+
+
+# ---------- командная строка (если забыли пароль администратора) ----------
+
+def _cli(argv: list[str]) -> int:
+    init()
+    if len(argv) == 2 and argv[0] == "reset-password":
+        user = find_user(argv[1])
+        if not user:
+            print(f"учётной записи «{argv[1]}» нет")
+            return 1
+        pw = reset_password(user["id"], None, "командная строка")
+        with db.connect() as con:
+            con.execute("UPDATE users SET active=1 WHERE id=?", (user["id"],))
+        print(f"Новый временный пароль для «{user['login']}»: {pw}\nПри входе его нужно будет сменить.")
+        return 0
+    if argv == ["list"]:
+        for u in list_users():
+            print(f"{u['login']:<20} {ROLES.get(u['role'], {}).get('title', u['role']):<22} "
+                  f"{'активна' if u['active'] else 'заблокирована'}  {u['name']}")
+        return 0
+    print("использование: python -m app.auth reset-password <логин> | list")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(_cli(sys.argv[1:]))

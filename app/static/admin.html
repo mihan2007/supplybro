@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SupplyBro — учётные записи</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">SupplyBro <span class="ver">учётные записи</span></div>
+    <div class="topbar-tools">
+      <span class="muted me-name" id="me-name"></span>
+      <button class="btn ghost" id="me-pass" type="button" hidden>Сменить пароль</button>
+      <button class="btn ghost" id="logout" type="button" hidden>Выйти</button>
+      <a class="btn ghost" href="/">← На сайт</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="notice" id="not-connected">
+      Вход на сам сайт пока не включён: учётные записи можно завести заранее, а сотрудники начнут входить, когда
+      подключим вход (доступ по VPN). Тогда каждый увидит только своих клиентов и сможет делать то, что разрешает его роль.
+    </div>
+
+    <!-- Первый администратор -->
+    <form class="panel auth-box" id="v-setup" hidden>
+      <h1>Первый администратор</h1>
+      <p class="muted">Учётных записей ещё нет. Создайте свою — администратор заводит остальных сотрудников.</p>
+      <label class="field"><span class="label">ФИО</span><input id="s-name" autocomplete="name" required></label>
+      <label class="field"><span class="label">Логин</span><input id="s-login" autocomplete="username" required
+        placeholder="латиницей, например mstrok"></label>
+      <label class="field"><span class="label">Пароль</span><input id="s-pass" type="password" autocomplete="new-password" required></label>
+      <label class="field"><span class="label">Пароль ещё раз</span><input id="s-pass2" type="password" autocomplete="new-password" required></label>
+      <p class="status" id="s-status"></p>
+      <button class="btn primary" type="submit">Создать и войти</button>
+    </form>
+
+    <!-- Вход -->
+    <form class="panel auth-box" id="v-login" hidden>
+      <h1>Вход в админ-панель</h1>
+      <label class="field"><span class="label">Логин</span><input id="l-login" autocomplete="username" required></label>
+      <label class="field"><span class="label">Пароль</span><input id="l-pass" type="password" autocomplete="current-password" required></label>
+      <p class="status" id="l-status"></p>
+      <button class="btn primary" type="submit">Войти</button>
+      <p class="muted small-note">Забыли пароль — попросите другого администратора сбросить его. Если администратор один:
+        в Ubuntu, в папке проекта, команда <code>docker compose exec web python -m app.auth reset-password ЛОГИН</code>.</p>
+    </form>
+
+    <!-- Смена пароля (временного — при первом входе, или своего по кнопке) -->
+    <form class="panel auth-box" id="v-change" hidden>
+      <h1 id="c-title">Смените пароль</h1>
+      <p class="muted" id="c-note"></p>
+      <label class="field"><span class="label">Текущий пароль</span><input id="c-old" type="password" autocomplete="current-password" required></label>
+      <label class="field"><span class="label">Новый пароль</span><input id="c-new" type="password" autocomplete="new-password" required></label>
+      <label class="field"><span class="label">Новый пароль ещё раз</span><input id="c-new2" type="password" autocomplete="new-password" required></label>
+      <p class="status" id="c-status"></p>
+      <div class="row-actions">
+        <button class="btn primary" type="submit">Сменить пароль</button>
+        <button class="btn" type="button" id="c-cancel" hidden>Отмена</button>
+      </div>
+    </form>
+
+    <!-- Панель -->
+    <div id="v-main" class="admin-main" hidden>
+      <nav class="tabs" id="tabs">
+        <button type="button" data-tab="users" class="active">Сотрудники <span class="muted" id="users-count"></span></button>
+        <button type="button" data-tab="roles">Роли и права</button>
+        <button type="button" data-tab="events">Журнал</button>
+      </nav>
+
+      <section class="panel" id="t-users">
+        <div class="section-head">
+          <div class="section-tools">
+            <input class="search" id="u-search" type="search" placeholder="Поиск: ФИО, логин, e-mail">
+            <label class="inline">Показать
+              <select id="u-filter">
+                <option value="all">всех</option>
+                <option value="active">активных</option>
+                <option value="blocked">заблокированных</option>
+              </select>
+            </label>
+          </div>
+          <button class="btn primary" id="u-new" type="button">+ Новый сотрудник</button>
+        </div>
+        <div class="table-wrap"><table class="users" id="u-table"></table></div>
+        <p class="status" id="u-status"></p>
+      </section>
+
+      <section class="panel" id="t-roles" hidden>
+        <p class="muted">Что сможет делать сотрудник каждой роли, когда на сайте будет включён вход. Роль задаётся
+          в карточке сотрудника; «Представление» — какое представление «Реестра конкурсов» NocoDB открывать ему по умолчанию.</p>
+        <div class="table-wrap"><table class="roles" id="r-table"></table></div>
+      </section>
+
+      <section class="panel" id="t-events" hidden>
+        <div class="table-wrap"><table class="events" id="e-table"></table></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Карточка сотрудника: новый / изменить -->
+  <dialog id="editor">
+    <form id="ed-form" method="dialog">
+      <div class="dlg-head">
+        <h2 id="ed-title">Новый сотрудник</h2>
+        <button class="btn ghost" type="button" id="ed-close" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="ed-state" id="ed-state"></div>
+      <div class="grid2">
+        <label class="field"><span class="label">ФИО</span><input id="ed-name" required></label>
+        <label class="field"><span class="label">Логин</span><input id="ed-login" required placeholder="латиницей: ivanov"></label>
+        <label class="field"><span class="label">E-mail</span><input id="ed-email" type="email"></label>
+        <label class="field"><span class="label">Телефон</span><input id="ed-phone"></label>
+      </div>
+      <label class="field"><span class="label">Роль</span><select id="ed-role"></select></label>
+      <p class="muted role-text" id="ed-role-text"></p>
+      <fieldset class="clients">
+        <legend class="label">Доступ к клиентам</legend>
+        <label class="check"><input type="checkbox" id="ed-all"> все клиенты (и новые тоже)</label>
+        <div id="ed-clients"></div>
+      </fieldset>
+      <div id="ed-pass-box">
+        <fieldset class="clients">
+          <legend class="label">Пароль</legend>
+          <label class="check"><input type="radio" name="pw" value="temp" checked> выдать временный пароль
+            (покажется один раз; сотрудник сменит его при первом входе)</label>
+          <label class="check"><input type="radio" name="pw" value="set"> задать пароль</label>
+          <input id="ed-pass" type="password" autocomplete="new-password" placeholder="не короче 10 символов" hidden>
+        </fieldset>
+      </div>
+      <label class="field"><span class="label">Заметка</span><textarea id="ed-note" rows="2"
+        placeholder="например: отдел закупок, работает с ИП Саргсян"></textarea></label>
+      <p class="status" id="ed-status"></p>
+      <div class="row-actions">
+        <button class="btn primary" type="submit" id="ed-save">Создать</button>
+        <button class="btn" type="button" id="ed-cancel">Отмена</button>
+      </div>
+      <div class="ed-more" id="ed-more" hidden>
+        <div class="label">Действия</div>
+        <div class="row-actions" id="ed-actions"></div>
+        <div class="ed-ask" id="ed-ask" hidden></div>
+        <div class="label">История</div>
+        <div class="ed-history" id="ed-history"></div>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Временный пароль — показывается один раз -->
+  <dialog id="secret">
+    <div class="dlg-head"><h2>Передайте сотруднику</h2></div>
+    <p class="muted">Пароль показывается только сейчас. Сотрудник сменит его при первом входе.</p>
+    <div class="secret-box">
+      <div><span class="label">Логин</span><div class="secret-val" id="sec-login"></div></div>
+      <div><span class="label">Временный пароль</span><div class="secret-val" id="sec-pass"></div></div>
+    </div>
+    <div class="row-actions">
+      <button class="btn primary" type="button" id="sec-copy">Скопировать логин и пароль</button>
+      <button class="btn" type="button" id="sec-close">Готово</button>
+    </div>
+    <p class="status" id="sec-status"></p>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/static/admin.js"></script>
+</body>
+</html>
