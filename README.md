@@ -157,7 +157,8 @@ docker compose exec web python -m app.auth reset-password ЛОГИН
 - Код — `app/`: `main.py` (адреса сайта), `worker.py` (обработчик), `docs/` (подготовка документов),
   `tenders.py` (папки конкурсов), `nocodb.py` (чтение NocoDB), `db.py` (база и очередь), `static/` (страница).
 - `tools/extract_archive.py` — распаковка архивов (копия из проекта StrokTenderDataExtractor).
-- Клиенты и юр. лица — `config/clients.json` (`tenders_folder` — папка клиента в `Dropbox\Агент`).
+- Клиенты и юр. лица — `config/clients.json` (`tenders_folder` — папка клиента в `Dropbox\Агент`): «Наша компания»
+  и «ИП Саргсян» (своя база NocoDB, своя нумерация с К1).
 - Настройки запуска — `.env` (в GitHub не попадает), образец — `.env.example`.
 - Ключи — папка `secrets/` (в GitHub и в образ не попадает).
 - Данные сайта (база, очередь) — `DATA_DIR` внутри Ubuntu (по умолчанию `/home/user_1/supplybro-data`).

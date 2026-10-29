@@ -19,6 +19,24 @@
         { "id": "prostor", "name": "ООО «Простор»", "inn": "7842219678", "aliases": ["Простор"] },
         { "id": "strok", "name": "ИП Строк А. В.", "inn": "650110731107", "aliases": ["ИП Строк"] }
       ]
+    },
+    {
+      "id": "sargsyan",
+      "name": "ИП Саргсян",
+      "tenders_folder": "ИП Саргсян",
+      "nocodb": {
+        "url": "https://app.nocodb.com",
+        "workspace_id": "wzs963xn",
+        "base_id": "pjfas6m5chjuosv",
+        "registry_table_id": "mdrzjzpmo43ocd9",
+        "token_file": "/run/secrets/nocodb_main",
+        "participant_column": "Участник",
+        "default_registry_view": "Вся таблица",
+        "default_spec_view": "Сбор цен"
+      },
+      "legal_entities": [
+        { "id": "sargsyan", "name": "ИП Саргсян", "inn": "", "aliases": ["Саргсян"] }
+      ]
     }
   ]
 }

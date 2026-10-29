@@ -898,8 +898,8 @@ def _write_noco(client, result: dict, rows: list[dict]) -> dict:
         return {"status": "skipped", "text": "не записано — спецификацию этого конкурса в NocoDB создал не сайт "
                                              "(или её ещё нет); цены — в Позиции_и_цены.xlsx"}
     s = client.nocodb
-    nc.BASE_ID = s.base_id
     try:
+        # nc.BASE_ID не меняем (его использует запись в NocoDB в другом потоке): адреса ниже — по id таблицы.
         token = s.token()
         table_id = link["spec_table_id"]
         nc.ensure_spec_columns(token, table_id, only=nc.MARKET_OFFER_FIELDS)

@@ -19,7 +19,7 @@ from tools import nocodb_client as nc
 
 DATA_DIR = Path(os.environ.get("DATA_DIR_IN_CONTAINER", "/data"))
 CACHE_HOURS = float(os.environ.get("PRICES_HISTORY_HOURS", "12"))
-SPEC_TITLE = re.compile(r"^(?:[КK]-?\d{3,4}|Спецификация\s+—\s+.+)$")
+SPEC_TITLE = re.compile(r"^(?:[КK]-?\d{1,5}|Спецификация\s+—\s+.+)$")
 
 
 def _price_fields(row: dict) -> list[dict]:
@@ -49,7 +49,8 @@ def load_index(client, progress=None) -> dict[str, list[dict]]:
         except ValueError:
             pass
     s = client.nocodb
-    nc.BASE_ID = s.base_id
+    # nc.BASE_ID не трогаем: это общая настройка программы агента, её в это же время может использовать запись
+    # в NocoDB другого клиента (другой поток обработчика). Здесь база указывается в адресе явно.
     token = s.token()
     status, body = nc._request("GET", f"{nc.META_URL}/bases/{s.base_id}/tables", token)
     if status != 200:

@@ -111,6 +111,11 @@ def _same_positions(token: str, table_id: str, rows: list[dict]) -> bool:
 
 def check_conflicts(client: Client, internal: str, purchase_number: str) -> dict:
     """Что уже есть в NocoDB по этому конкурсу. Только чтение."""
+    with _WRITE_LOCK:
+        return _check_conflicts(client, internal, purchase_number)
+
+
+def _check_conflicts(client: Client, internal: str, purchase_number: str) -> dict:
     token = _configure(client)
     by_internal = None
     for v in _internal_variants(internal):
@@ -137,8 +142,19 @@ def check_conflicts(client: Client, internal: str, purchase_number: str) -> dict
     return {"token": token, "by_internal": by_internal, "duplicates": others, "created_by_site": created_by_site}
 
 
+# Программа агента (tools/nocodb_client.py) хранит базу и таблицу реестра в общих настройках модуля — у клиентов
+# разные базы (Наша — pf3o1felxit8s5b, ИП Саргсян — pjfas6m5chjuosv), поэтому запись идёт строго по одной:
+# настроили на клиента → записали → следующая.
+_WRITE_LOCK = threading.RLock()
+
+
 def save(client: Client, folder_name: str, result: dict, force: bool = False, progress=None) -> dict:
     """Записывает результат анализа в NocoDB. Возвращает сведения для analysis.json["noco"]."""
+    with _WRITE_LOCK:
+        return _save_locked(client, folder_name, result, force, progress)
+
+
+def _save_locked(client: Client, folder_name: str, result: dict, force: bool, progress) -> dict:
     outer = progress or (lambda *_: None)
     state_ = {"n": 0, "text": "NocoDB", "frac": 0.0}
 

@@ -229,7 +229,9 @@ async function loadTenders() {
   const hints = [];
   if (data.noco_error) hints.push("NocoDB: " + data.noco_error);
   if (data.folders_error) hints.push("Папки конкурсов: " + data.folders_error);
-  if (!data.participant_column_exists && !data.noco_error) {
+  const curClient = state.clients.find((c) => c.id === state.client);
+  // Подсказка про колонку «Участник» нужна, только если у клиента несколько юр. лиц (у ИП Саргсян — одно).
+  if (!data.participant_column_exists && !data.noco_error && curClient && curClient.entities.length > 1) {
     hints.push(`В «Реестре конкурсов» нет колонки «${data.participant_column}», поэтому юр. лицо известно только там, ` +
       `где агент записал «Участник: …» в перечне документов заявки. Остальные конкурсы — в группе «${UNKNOWN_GROUP}».`);
   }

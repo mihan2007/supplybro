@@ -28,7 +28,9 @@ DEFAULT_SUBFOLDERS = ["Конкурсная документация", "Разъ
 # Папки внутри конкурса, которые никогда не обрабатываются как документы.
 NEVER_PROCESS = {"AIExtract", "Платежки", "Письма поставщикам"}
 
-_NUM_RE = re.compile(r"^\s*(?:[КK]\s*-?\s*)?(\d{3,4})(?=\D|$)", re.IGNORECASE)
+# «К939», «K-990», «К1» (с буквой К — от 1 до 5 цифр: у ИП Саргсян нумерация с К1); без буквы — только 3–4 цифры
+# («915 …»), чтобы папка вроде «12 стульев» не стала конкурсом № 12.
+_NUM_RE = re.compile(r"^\s*(?:[КK]\s*-?\s*(\d{1,5})|(\d{3,4}))(?=\D|$)", re.IGNORECASE)
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -37,9 +39,9 @@ class FolderError(RuntimeError):
 
 
 def norm_number(text: str | None) -> str | None:
-    """«К939», «K-990», «915 …» → «К939», «К990», «К915»; иначе None."""
+    """«К939», «K-990», «915 …», «K2» → «К939», «К990», «К915», «К2» (буква всегда русская); иначе None."""
     m = _NUM_RE.match(str(text or ""))
-    return f"К{int(m.group(1))}" if m else None
+    return f"К{int(m.group(1) or m.group(2))}" if m else None
 
 
 def client_root(client: Client) -> Path:
@@ -59,9 +61,11 @@ def list_folders(client: Client) -> list[dict]:
     except FolderError:
         return []
     result = []
-    for p in sorted(root.iterdir(), key=lambda x: x.name):
+    for p in root.iterdir():
         if p.is_dir() and not p.name.startswith(("#", ".", "~")) and p.name != TEMPLATE_FOLDER:
             result.append({"name": p.name, "number": norm_number(p.name)})
+    # Новые сверху, как записи NocoDB: по номеру (К1004 выше К999, «K2» латиницей — между К1 и К3); без номера — в конце.
+    result.sort(key=lambda f: (f["number"] is None, -int(f["number"][1:]) if f["number"] else 0, f["name"]))
     return result
 
 
