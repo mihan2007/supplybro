@@ -10,6 +10,8 @@
     (поиск по индексу из этапа 1, SQLite FTS5).
 
 Модель: CHAT_MODEL (по умолчанию claude-haiku-5-5), список для выбора на странице — CHAT_MODELS.
+Чат доступен всегда, как только у конкурса есть документы с текстом (анализ не нужен). Под чатом — cache_status():
+документы ещё в кэше (до какого времени, вопрос ≈ $…) или уже нет (первый вопрос дороже, дальше снова дёшево).
 Модель отвечает только по документам, со ссылками; цитаты в «Источниках» программа проверяет по тексту документов.
 Инструментов у модели нет: менять что-либо (NocoDB, файлы) чат не может.
 """
@@ -148,6 +150,66 @@ def _claude_messages(block: str, analysis: str, pairs: list[tuple[str, str]], qu
 
 def _event(kind: str, **data) -> str:
     return json.dumps({"t": kind, **data}, ensure_ascii=False) + "\n"
+
+
+# ---------- состояние кэша (для подсказки под чатом) ----------
+
+CHARS_PER_TOKEN = 2.5        # тексты конкурсов: К992 — 244 тыс. символов запроса = 98 тыс. токенов
+TTL_SECONDS = {"1h": 3600, "5m": 300}
+TYPICAL_OUTPUT = 800         # токенов в ответе, пока своих ответов нет
+
+
+def cache_status(client_id: str, folder_name: str, model: str | None = None) -> dict:
+    """Готов ли чат и сколько будет стоить следующий вопрос: документы ещё в кэше модели (до какого времени) или
+    уже нет. Только чтение базы сайта — без обращений к модели.
+
+    Кэш Claude живёт CHAT_CACHE_TTL после последнего вопроса (каждый вопрос его продлевает); он сбрасывается, если
+    после вопроса изменились документы или сменился день (в задании модели есть сегодняшняя дата)."""
+    from .analysis.corpus import TEXT_STATUSES
+    from .analysis.pricing import cost
+
+    model = model if model in CHAT_MODELS else CHAT_MODEL
+    now = time.time()
+    rows = [r for r in db.doc_rows(client_id, folder_name).values()
+            if r.get("status") in TEXT_STATUSES and r.get("text_path")]
+    out = {"model": model, "provider": "deepseek" if model.startswith("deepseek") else "claude", "now": now,
+           "ready": bool(rows), "docs": len(rows), "preparing": bool(db.active_job(client_id, folder_name, "prepare")),
+           "warm": False, "expires_at": None}
+    if not rows:
+        return out
+    chars = sum(int(r.get("chars") or 0) for r in rows)
+    docs_changed = max(float(r.get("updated_at") or 0) for r in rows)
+    mode = "fragments" if chars > CHAT_MAX_CHARS else "documents"
+
+    calls = [m for m in db.chat_history(client_id, folder_name, limit=60)
+             if m["role"] == "assistant" and (m["meta"].get("usage") or {}).get("model") == model]
+    last = calls[-1] if calls else None
+    usage = (last or {}).get("meta", {}).get("usage") or {}
+    tokens = sum(int(usage.get(k) or 0) for k in ("input", "cache_write", "cache_read"))
+    estimated = not tokens or (last or {}).get("meta", {}).get("mode") != mode
+    if estimated:
+        tokens = int((min(chars, CHAT_MAX_CHARS) + 9000) / CHARS_PER_TOKEN)   # + анализ и правила
+    outs = [int((m["meta"].get("usage") or {}).get("output") or 0) for m in calls[-5:]]
+    out_tok = int(sum(outs) / len(outs)) if outs and sum(outs) else TYPICAL_OUTPUT
+
+    if out["provider"] == "deepseek":
+        cold = cost(model, input=tokens, output=out_tok, at=now)
+        warm = cost(model, input=tokens, cache_read=max(tokens - 300, 0), output=out_tok, at=now)
+        out.update(mode=mode, tokens=tokens, tokens_estimated=estimated, cost_cold=cold, cost_warm=warm)
+        return out
+
+    ttl = "5m" if (last or {}).get("meta", {}).get("cache_ttl_fallback") or CHAT_CACHE_TTL == "5m" else "1h"
+    if last and not last["meta"].get("fallback") and mode == "documents":
+        started = float(last.get("created_at") or 0) - float(last["meta"].get("seconds") or 0)
+        same_day = datetime.fromtimestamp(started, MSK).date() == datetime.fromtimestamp(now, MSK).date()
+        expires = started + TTL_SECONDS[ttl]
+        if same_day and expires > now and started > docs_changed:
+            out.update(warm=True, expires_at=expires)
+    write = {"cache_write_1h": tokens} if ttl == "1h" else {"cache_write_5m": tokens}
+    out.update(mode=mode, ttl=TTL_SECONDS[ttl], tokens=tokens, tokens_estimated=estimated,
+               cost_cold=cost(model, input=300, output=out_tok, **write),
+               cost_warm=cost(model, input=300, cache_read=tokens, output=out_tok))
+    return out
 
 
 def ask(client_id: str, folder_name: str, folder: Path, question: str, model: str | None):

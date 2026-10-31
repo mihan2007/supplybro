@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import chat, db
@@ -60,6 +60,12 @@ ADMIN_PANEL = os.environ.get("ADMIN_PANEL", "0").strip().lower() in ("1", "true"
 if ADMIN_PANEL:
     from . import admin
     app.include_router(admin.router)
+
+# Страница сотрудника (/user) — та же страница, что «/» (страница администратора), но без выбора модели анализа,
+# модели чата и поисковика цен. Только при USER_PAGE=1 в .env; по умолчанию выключена (решение пользователя
+# 29.10.2026 «сгенерируй, но пока не подключай»). Вход по логину ещё не требуется — при подключении входа сотрудникам
+# (не admin) открывать /user, а сервер должен сам не принимать от них model / engine.
+USER_PAGE = os.environ.get("USER_PAGE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 db.init()
@@ -160,6 +166,16 @@ def spec_table_id(link: str | None) -> str | None:
 @app.get("/")
 def index():
     return FileResponse(ROOT / "static" / "index.html")
+
+
+if USER_PAGE:
+    @app.get("/user")
+    def user_page():
+        """Страница сотрудника: та же index.html с пометкой в <body> (app.js прячет выбор моделей и их не отправляет)."""
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        html = html.replace("<body>", '<body class="user-mode" data-mode="user">', 1)
+        html = html.replace("<title>SupplyBro — конкурсы</title>", "<title>SupplyBro — конкурсы (сотрудник)</title>", 1)
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/health")
@@ -665,6 +681,14 @@ def api_chat_history(client_id: str, folder: str):
     folder_path(client, folder)
     return {"messages": db.chat_history(client.id, folder), "models": chat.CHAT_MODELS, "default_model": chat.CHAT_MODEL,
             "cache_ttl": chat.CHAT_CACHE_TTL}
+
+
+@app.get("/api/clients/{client_id}/chat/status")
+def api_chat_status(client_id: str, folder: str, model: str | None = None):
+    """Готов ли чат и сколько стоит следующий вопрос: документы в кэше модели (до какого времени) или нет."""
+    client = get_client(client_id)
+    folder_path(client, folder)
+    return chat.cache_status(client.id, folder, model)
 
 
 @app.post("/api/clients/{client_id}/chat")

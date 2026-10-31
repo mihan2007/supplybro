@@ -31,6 +31,8 @@ services:
       AUTO_PRICES: ${AUTO_PRICES:-1}
       # Админ-панель учётных записей (http://127.0.0.1:8000/admin): 1 — включена; вход на сам сайт пока не требуется.
       ADMIN_PANEL: ${ADMIN_PANEL:-0}
+      # Страница сотрудника (http://127.0.0.1:8000/user) — без выбора моделей: 1 — включена.
+      USER_PAGE: ${USER_PAGE:-0}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
       ANALYSIS_MODELS: ${ANALYSIS_MODELS:-claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5}
       CLAUDE_EFFORT: ${CLAUDE_EFFORT:-medium}

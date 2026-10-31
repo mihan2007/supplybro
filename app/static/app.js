@@ -23,7 +23,7 @@ const state = {
   nextNumber: "",
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, pr: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0 };
 let docsTimer = null;
 let anTimer = null;
 let anLastJob = null;   // последняя увиденная задача анализа — чтобы заметить её окончание
@@ -175,7 +175,7 @@ function renderValue(value, uidt) {
 async function loadClients() {
   try {
     const data = await api("/api/clients");
-    $("version").textContent = "версия " + data.version;
+    $("version").textContent = "версия " + data.version + (USER_MODE ? " · страница сотрудника" : "");
     state.clients = data.clients;
   } catch (err) {
     setPickersHint("Не удалось загрузить список клиентов: " + err.message);
@@ -860,6 +860,9 @@ function renderAnalysisJob(job) {
 }
 
 const AN_MODEL_KEY = "supplybro.analysisModel";
+// Страница сотрудника (/user, та же страница с пометкой в <body>): выбора модели анализа, модели чата и поисковика
+// цен нет — сайт берёт свои настройки по умолчанию (CLAUDE_MODEL, CHAT_MODEL, PRICES_SEARCH).
+const USER_MODE = document.body.dataset.mode === "user";
 
 function usd(x) {
   if (x === null || x === undefined) return "";
@@ -1173,7 +1176,7 @@ function renderPrices(d, busy) {
   const engines = s.engines || ["deepseek"];
   const savedEngine = storageGet(PR_ENGINE_KEY);
   fillSelect($("pr-engine"), engines.map((x) => ({ value: x, label: ENGINE_LABEL[x] || x })),
-    engines.includes(savedEngine) ? savedEngine : s.engine);
+    !USER_MODE && engines.includes(savedEngine) ? savedEngine : s.engine);
   const abroadBox = $("pr-abroad");
   const saved = storageGet(PR_ABROAD_KEY);
   abroadBox.checked = saved === null ? s.abroad !== false : saved === "1";
@@ -1428,9 +1431,65 @@ async function loadChat() {
   fillSelect($("chat-model"), d.models.map((x) => ({ value: x, label: x })), d.models.includes(saved) ? saved : d.default_model);
   $("chat-log").replaceChildren(...d.messages.map(renderChatMessage));
   $("chat-hint").textContent = "Ответы — только по документам этого конкурса, с источниками; цитаты программа сверяет с текстом. " +
-    `Документы передаются модели один раз и дальше берутся из кэша (${d.cache_ttl === "1h" ? "час" : "5 минут"} после последнего вопроса) — около 10 % цены.`;
+    "Задавать вопросы можно в любое время, как только документы подготовлены, — анализ для этого не нужен.";
   scrollChat();
+  loadChatStatus();
 }
+
+// ---------- состояние чата: готов ли и сколько стоит следующий вопрос ----------
+
+let chatStatus = null;     // ответ /chat/status; skew — разница часов сайта и браузера
+
+async function loadChatStatus() {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  const my = ++seq.chatStatus;
+  let d = null;
+  try {
+    d = await api(clientPath("/chat/status"), { folder: t.folder, model: USER_MODE ? "" : $("chat-model").value });
+    d.skew = d.now - Date.now() / 1000;
+  } catch (_) { /* покажем без состояния */ }
+  if (my !== seq.chatStatus) return;
+  chatStatus = d;
+  renderChatStatus();
+}
+
+function renderChatStatus() {
+  const box = $("chat-cache");
+  const d = chatStatus;
+  box.className = "chat-cache";
+  if (!d) { box.replaceChildren(); return; }
+  const line = (cls, ...parts) => { box.classList.add(cls); box.replaceChildren(el("span", { class: "dot" }), ...parts); };
+  const b = (text) => el("b", { text });
+  $("chat-send").disabled = chatBusy || !d.ready;
+  $("chat-send").title = d.ready ? "" : "Сначала нужны документы с текстом";
+  if (!d.ready) {
+    if (d.preparing) return line("wait", "Документы готовятся — вопросы можно задавать, как только подготовка закончится (анализ ждать не нужно).");
+    return line("cold", "У конкурса пока нет документов с текстом — загрузите их в блоке «Документы».");
+  }
+  const est = d.tokens_estimated ? "≈ " : "";
+  if (d.provider === "deepseek") {
+    return line("warm", "Чат готов. DeepSeek кэширует документы сам: первый вопрос ", b(`≈ ${usd(d.cost_cold)}`),
+      ", повторные обычно ", b(`≈ ${usd(d.cost_warm)}`), ".");
+  }
+  if (d.mode === "fragments") {
+    return line("warm", "Чат готов. Документы большие — модель получает найденные по вопросу фрагменты (дешевле, но что-то можно упустить).");
+  }
+  const ttlText = d.ttl === 300 ? "5 минут" : "час";
+  const left = d.warm && d.expires_at ? d.expires_at - (Date.now() / 1000 + d.skew) : 0;
+  if (left > 0) {
+    const mins = Math.ceil(left / 60);
+    return line("warm", "Чат готов, документы в кэше ещё ", b(mins <= 1 ? "минуту" : `${mins} мин`), " — вопрос ",
+      b(`≈ ${usd(d.cost_warm)}`), `. Каждый вопрос продлевает кэш на ${ttlText}.`);
+  }
+  line("cold", "Чат готов. Документы сейчас не в кэше — первый вопрос ", b(`${est}${usd(d.cost_cold)}`),
+    ` и на несколько секунд дольше, следующие ${ttlText === "час" ? "в течение часа" : "5 минут"} — `, b(`≈ ${usd(d.cost_warm)}`), ".");
+}
+
+// Обратный отсчёт и смена «готовятся → готов»: раз в 30 с, пока блок чата виден.
+setInterval(() => {
+  if (!$("chat").hidden && !document.hidden) loadChatStatus();
+}, 30000);
 
 function scrollChat() {
   const log = $("chat-log");
@@ -1453,7 +1512,7 @@ async function askChat(question) {
     const u = new URL(clientPath("/chat"), location.origin);
     u.searchParams.set("folder", t.folder);
     const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, model: $("chat-model").value }) });
+      body: JSON.stringify({ question, model: USER_MODE ? null : $("chat-model").value }) });
     if (!r.ok || !r.body) {
       let detail = "";
       try { detail = (await r.json()).detail; } catch (_) { /* не JSON */ }
@@ -1494,6 +1553,7 @@ async function askChat(question) {
     chatBusy = false;
     $("chat-send").disabled = false;
     scrollChat();
+    loadChatStatus();     // после ответа документы в кэше — показать «ещё час»
   }
 }
 
@@ -1586,6 +1646,7 @@ async function pollActivity() {
     if (!docsTimer) loadDocs();
     if (!anTimer) loadAnalysis();
     if (!prTimer) loadPrices();
+    loadChatStatus();     // документы подготовились — чат готов
   }
   actSignature = sig;
 }
@@ -1751,7 +1812,7 @@ $("an-run").addEventListener("click", async () => {
   if (!t || !t.folder) return;
   $("an-run").disabled = true;
   try {
-    const r = await api(clientPath("/analysis/run"), { folder: t.folder, model: $("an-model").value }, { method: "POST" });
+    const r = await api(clientPath("/analysis/run"), { folder: t.folder, model: USER_MODE ? "" : $("an-model").value }, { method: "POST" });
     if (r.already) setStatus("an-status", "Анализ уже идёт (запущен раньше или в другой вкладке) — показываю его ход.");
   } catch (err) {
     setStatus("an-status", "Не удалось запустить анализ: " + err.message, true);
@@ -1764,7 +1825,8 @@ $("pr-run").addEventListener("click", async () => {
   $("pr-run").disabled = true;
   try {
     const engine = $("pr-engine").value || "deepseek";
-    const r = await api(clientPath("/prices/run"), { folder: t.folder, engine, urgent: engine !== "deepseek" && $("pr-urgent").checked ? "1" : "",
+    const r = await api(clientPath("/prices/run"), { folder: t.folder, engine: USER_MODE ? "" : engine,
+      urgent: !USER_MODE && engine !== "deepseek" && $("pr-urgent").checked ? "1" : "",
       abroad: $("pr-abroad").checked ? "1" : "0" }, { method: "POST" });
     if (r.already) setStatus("pr-status", "Поиск цен уже идёт (запущен сам после анализа или в другой вкладке) — показываю его ход.");
     $("pr-urgent").checked = false;
@@ -1786,7 +1848,7 @@ $("chat-form").addEventListener("submit", (e) => {
 $("chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("chat-form").requestSubmit(); }
 });
-$("chat-model").addEventListener("change", (e) => storageSet(CHAT_MODEL_KEY, e.target.value));
+$("chat-model").addEventListener("change", (e) => { storageSet(CHAT_MODEL_KEY, e.target.value); loadChatStatus(); });
 $("chat-clear").addEventListener("click", async () => {
   const t = currentTender();
   if (!t || !t.folder || chatBusy) return;

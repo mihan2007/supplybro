@@ -123,7 +123,7 @@
       <div class="section-head">
         <h2>Анализ документов <span class="muted" id="an-info"></span></h2>
         <div class="section-tools">
-          <label class="inline" title="Модель Claude для анализа (выбор запоминается в этом браузере)">Модель <select id="an-model"></select></label>
+          <label class="inline admin-only" title="Модель Claude для анализа (выбор запоминается в этом браузере)">Модель <select id="an-model"></select></label>
           <button class="btn small primary" id="an-run" type="button">Запустить анализ</button>
         </div>
       </div>
@@ -152,7 +152,7 @@
       <div class="section-head">
         <h2>Поиск цен <span class="muted" id="pr-info"></span></h2>
         <div class="section-tools">
-          <label class="inline" title="Чем искать цены по России (выбор запоминается в этом браузере)">Поиск <select id="pr-engine"></select></label>
+          <label class="inline admin-only" title="Чем искать цены по России (выбор запоминается в этом браузере)">Поиск <select id="pr-engine"></select></label>
           <label class="inline check" title="Искать и за рубежом (Германия, Китай, США и др.) — поиском DeepSeek"><input type="checkbox" id="pr-abroad" checked> за рубежом</label>
           <label class="inline check" id="pr-urgent-box" title="Мгновенный режим Яндекса: ответ сразу, но запрос в 16 раз дороже. Без галочки — отложенный режим: дёшево, ответ обычно за несколько минут"><input type="checkbox" id="pr-urgent"> срочно</label>
           <button class="btn small primary" id="pr-run" type="button">Искать цены</button>
@@ -176,7 +176,7 @@
       <div class="section-head">
         <h2>Вопросы по документации</h2>
         <div class="section-tools">
-          <label class="inline">Модель <select id="chat-model"></select></label>
+          <label class="inline admin-only">Модель <select id="chat-model"></select></label>
           <button class="btn small" id="chat-clear" type="button" title="Удалить историю вопросов по этому конкурсу">Очистить</button>
         </div>
       </div>
@@ -185,6 +185,7 @@
         <textarea id="chat-input" rows="2" placeholder="Например: какие документы нужны во второй части заявки? Есть ли аванс? Можно ли предложить аналог?"></textarea>
         <button class="btn primary" type="submit" id="chat-send">Спросить</button>
       </form>
+      <div class="chat-cache" id="chat-cache"></div>
       <div class="chat-hint" id="chat-hint"></div>
     </section>
 
