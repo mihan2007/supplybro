@@ -33,6 +33,8 @@ services:
       ADMIN_PANEL: ${ADMIN_PANEL:-0}
       # Страница сотрудника (http://127.0.0.1:8000/user) — без выбора моделей: 1 — включена.
       USER_PAGE: ${USER_PAGE:-0}
+      # Страница входа (http://127.0.0.1:8000/login) — проверка логина и пароля: 1 — включена; сайт вход пока не требует.
+      LOGIN_PAGE: ${LOGIN_PAGE:-0}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
       ANALYSIS_MODELS: ${ANALYSIS_MODELS:-claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5}
       CLAUDE_EFFORT: ${CLAUDE_EFFORT:-medium}

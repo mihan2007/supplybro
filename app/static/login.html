@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SupplyBro — вход</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/admin.css">
+  <link rel="stylesheet" href="/static/login.css">
+</head>
+<body class="login-page">
+  <header class="topbar">
+    <div class="brand">SupplyBro <span class="ver">вход</span></div>
+    <div class="topbar-tools">
+      <a class="btn ghost" href="/">← На сайт</a>
+    </div>
+  </header>
+
+  <main class="login-main">
+    <!-- Учётных записей нет -->
+    <section class="panel auth-box" id="v-empty" hidden>
+      <h1>Учётных записей ещё нет</h1>
+      <p class="muted">Заведите первого администратора в админ-панели (<a href="/admin">/admin</a>, включается
+        <code>ADMIN_PANEL=1</code>) или создайте тестовые учётные записи — в Ubuntu, в папке проекта:</p>
+      <p><code>docker compose exec web python -m app.auth demo-users</code></p>
+      <button class="btn" type="button" id="e-retry">Проверить ещё раз</button>
+    </section>
+
+    <!-- Вход -->
+    <form class="panel auth-box" id="v-login" hidden>
+      <h1>Вход в SupplyBro</h1>
+      <label class="field"><span class="label">Логин</span>
+        <input id="l-login" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+      <label class="field"><span class="label">Пароль</span>
+        <input id="l-pass" type="password" autocomplete="current-password" required></label>
+      <label class="check small-note"><input type="checkbox" id="l-show"> показать пароль</label>
+      <p class="status" id="l-status" role="alert"></p>
+      <button class="btn primary big" type="submit" id="l-submit">Войти</button>
+      <p class="muted small-note">Забыли пароль — попросите администратора сбросить его в админ-панели.</p>
+    </form>
+
+    <!-- Смена пароля (временного — при первом входе, или своего по кнопке) -->
+    <form class="panel auth-box" id="v-change" hidden>
+      <h1 id="c-title">Смените пароль</h1>
+      <p class="muted" id="c-note"></p>
+      <label class="field"><span class="label">Текущий пароль</span><input id="c-old" type="password" autocomplete="current-password" required></label>
+      <label class="field"><span class="label">Новый пароль</span><input id="c-new" type="password" autocomplete="new-password" required></label>
+      <label class="field"><span class="label">Новый пароль ещё раз</span><input id="c-new2" type="password" autocomplete="new-password" required></label>
+      <p class="status" id="c-status" role="alert"></p>
+      <div class="row-actions">
+        <button class="btn primary" type="submit">Сменить пароль</button>
+        <button class="btn" type="button" id="c-cancel" hidden>Отмена</button>
+        <button class="btn ghost" type="button" id="c-logout">Выйти</button>
+      </div>
+    </form>
+
+    <!-- Вошли: что будет доступно сотруднику -->
+    <section class="panel me-box" id="v-me" hidden>
+      <div class="me-head">
+        <div>
+          <div class="label">Вы вошли</div>
+          <h1 id="m-name"></h1>
+          <div class="muted" id="m-login"></div>
+        </div>
+        <span class="pill role-pill" id="m-role"></span>
+      </div>
+
+      <div class="notice" id="m-notice">
+        Вход на сайт пока не включён — это проверка логина и пароля. Сайт по-прежнему открывается без входа.
+        Ниже — что будет у этого сотрудника, когда вход подключим.
+      </div>
+
+      <dl class="fields me-fields">
+        <dt>Роль</dt><dd id="m-role-text"></dd>
+        <dt>Клиенты</dt><dd id="m-clients"></dd>
+        <dt>Реестр NocoDB</dt><dd id="m-view"></dd>
+        <dt>После входа</dt><dd id="m-home"></dd>
+      </dl>
+
+      <div>
+        <div class="label perm-label">Что может делать</div>
+        <ul class="perms" id="m-perms"></ul>
+      </div>
+
+      <div class="row-actions">
+        <a class="btn primary" id="m-open" href="/">Открыть сайт</a>
+        <a class="btn" id="m-admin" href="/admin" hidden>Админ-панель</a>
+        <button class="btn" type="button" id="m-pass">Сменить пароль</button>
+        <button class="btn ghost" type="button" id="m-logout">Выйти</button>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/static/login.js"></script>
+</body>
+</html>

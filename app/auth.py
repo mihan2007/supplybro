@@ -1,7 +1,8 @@
 """
 Учётные записи сотрудников: логины, пароли, роли, доступ к клиентам, сеансы входа и журнал действий.
 
-Пока используется только админ-панелью (/admin, включается ADMIN_PANEL=1 в .env). Сам сайт вход ещё не требует —
+Пока используется админ-панелью (/admin, включается ADMIN_PANEL=1 в .env) и страницей входа для проверки
+(/login, LOGIN_PAGE=1 — app/login.py). Сам сайт вход ещё не требует —
 это следующий шаг (доступ сотрудникам по VPN): тогда страница будет спрашивать логин, показывать только клиентов из
 доступа сотрудника и разрешать действия по его роли (ROLES ниже).
 
@@ -11,6 +12,10 @@
 Забыли пароль администратора — в Ubuntu, в папке проекта:
     docker compose exec web python -m app.auth reset-password <логин>
 (напечатает новый временный пароль).
+
+Тестовые учётные записи для проверки входа (по одной на роль; настоящие не трогает):
+    docker compose exec web python -m app.auth demo-users            (ещё раз — новые пароли)
+    docker compose exec web python -m app.auth demo-users --delete   (удалить только тестовые)
 """
 
 from __future__ import annotations
@@ -475,10 +480,119 @@ def _diff_text(before: dict, changes: dict) -> str:
     return "; ".join(parts)
 
 
+# ---------- тестовые учётные записи (проверка входа, 0.6.4) ----------
+
+# По одной на каждую роль + сотрудник только одного клиента с временным паролем (проверить смену пароля при первом
+# входе и доступ к клиентам). Узнаются по заметке DEMO_NOTE — настоящие учётные записи команда не трогает никогда.
+DEMO_NOTE = "тестовая учётная запись (demo-users); удалить: python -m app.auth demo-users --delete"
+DEMO_USERS = [
+    # логин, ФИО, роль, клиенты, временный пароль (сменить при первом входе)
+    ("test.admin", "Тест Администратор", "admin", ["*"], False),
+    ("test.tender", "Тест Тендерный специалист", "tender", ["*"], False),
+    ("test.buyer", "Тест Закупщик", "buyer", ["*"], False),
+    ("test.logist", "Тест Логист", "logist", ["main"], False),
+    ("test.viewer", "Тест Наблюдатель", "viewer", ["*"], False),
+    ("test.sargsyan", "Тест Сотрудник ИП Саргсян", "tender", ["sargsyan"], True),
+]
+
+
+def _is_demo(user: dict | None) -> bool:
+    return bool(user) and user["login"] in {d[0] for d in DEMO_USERS} and user.get("note") == DEMO_NOTE
+
+
+def demo_users(known_clients: set[str], ip: str = "командная строка") -> list[dict]:
+    """Создать тестовые учётные записи (или выдать им новые пароли, если уже есть). Возвращает строки для печати:
+    login, name, role, clients, password, must_change, state ('создана' / 'новый пароль' / 'логин занят')."""
+    out = []
+    for login_name, name, role, clients, temp in DEMO_USERS:
+        clients = clients if clients == ["*"] else ([c for c in clients if c in known_clients] or ["*"])
+        row = {"login": login_name, "name": name, "role": role, "clients": clients, "must_change": temp, "password": ""}
+        user = find_user(login_name)
+        if user and not _is_demo(user):
+            out.append({**row, "state": "логин занят настоящей учётной записью — не трогаю"})
+            continue
+        pw = temp_password()
+        if user:
+            with db.connect() as con:
+                con.execute("UPDATE users SET password_hash=?, must_change=?, failed=0, locked_until=0, active=1, "
+                            "role=?, clients=?, name=?, password_changed_at=?, updated_at=? WHERE id=?",
+                            (hash_password(pw), 1 if temp else 0, role, json.dumps(clients), name,
+                             time.time(), time.time(), user["id"]))
+                con.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+            event(None, user, "пароль сброшен", "тестовые учётные записи (demo-users), все входы закрыты", ip)
+            out.append({**row, "password": pw, "state": "новый пароль"})
+        else:
+            create_user({"login": login_name, "name": name, "role": role, "clients": clients, "note": DEMO_NOTE,
+                         "password": pw, "must_change": True if temp else False}, None, known_clients, ip)
+            out.append({**row, "password": pw, "state": "создана"})
+    return out
+
+
+def delete_demo_users(ip: str = "командная строка") -> list[tuple[str, str]]:
+    """Удалить только тестовые учётные записи (по заметке DEMO_NOTE). Возвращает [(логин, что сделано)]."""
+    out = []
+    for login_name, *_ in reversed(DEMO_USERS):          # администратор — последним
+        user = find_user(login_name)
+        if not user:
+            continue
+        if not _is_demo(user):
+            out.append((login_name, "настоящая учётная запись — не трогаю"))
+            continue
+        try:
+            if count_users() == 1:
+                # Последняя учётная запись вообще — удаляем и её: админ-панель снова предложит «Первого администратора».
+                with db.connect() as con:
+                    con.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                    con.execute("DELETE FROM users WHERE id=?", (user["id"],))
+                event(None, user, "удалена", "тестовые учётные записи (demo-users)", ip)
+            else:
+                delete_user(user["id"], None, ip)
+            out.append((login_name, "удалена"))
+        except AuthError as exc:
+            out.append((login_name, f"не удалена: {exc}"))
+    return out[::-1]
+
+
+def _cli_demo(delete: bool) -> int:
+    if delete:
+        rows = delete_demo_users()
+        for login_name, what in rows:
+            print(f"{login_name:<16} {what}")
+        if not rows:
+            print("Тестовых учётных записей нет.")
+        return 0
+    try:
+        from .config import load_clients
+        known = {c.id for c in load_clients().values()}
+    except Exception:
+        known = set()
+    rows = demo_users(known)
+    print("Тестовые учётные записи (пароли показываются только сейчас; запустить команду ещё раз — новые пароли):\n")
+    print(f"{'Логин':<16} {'Пароль':<14} {'Роль':<22} Клиенты")
+    for r in rows:
+        if not r["password"]:
+            print(f"{r['login']:<16} {'—':<14} {r['state']}")
+            continue
+        role = ROLES[r["role"]]["title"]
+        note = "  (временный — сменить при первом входе)" if r["must_change"] else ""
+        print(f"{r['login']:<16} {r['password']:<14} {role:<22} {_clients_text(r['clients'])}{note}")
+    others = [u for u in list_users() if not _is_demo(u)]
+    if others:
+        print("\nДругие учётные записи (команда их не меняла):")
+        for u in others:
+            print(f"{u['login']:<16} {ROLES.get(u['role'], {}).get('title', u['role']):<22} "
+                  f"{'активна' if u['active'] else 'заблокирована'}  {u['name']}")
+    print("\nВход: http://127.0.0.1:8000/login (нужно LOGIN_PAGE=1 в .env). "
+          "Удалить тестовые: python -m app.auth demo-users --delete")
+    return 0
+
+
 # ---------- командная строка (если забыли пароль администратора) ----------
 
 def _cli(argv: list[str]) -> int:
     init()
+    if argv and argv[0] == "demo-users" and argv[1:] in ([], ["--delete"]):
+        return _cli_demo(argv[1:] == ["--delete"])
     if len(argv) == 2 and argv[0] == "reset-password":
         user = find_user(argv[1])
         if not user:
@@ -494,7 +608,7 @@ def _cli(argv: list[str]) -> int:
             print(f"{u['login']:<20} {ROLES.get(u['role'], {}).get('title', u['role']):<22} "
                   f"{'активна' if u['active'] else 'заблокирована'}  {u['name']}")
         return 0
-    print("использование: python -m app.auth reset-password <логин> | list")
+    print("использование: python -m app.auth reset-password <логин> | list | demo-users [--delete]")
     return 2
 
 

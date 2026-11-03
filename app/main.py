@@ -67,6 +67,14 @@ if ADMIN_PANEL:
 # (не admin) открывать /user, а сервер должен сам не принимать от них model / engine.
 USER_PAGE = os.environ.get("USER_PAGE", "0").strip().lower() in ("1", "true", "yes", "on")
 
+# Страница входа (/login) — проверка логина и пароля сотрудников (те же учётные записи, что в админ-панели).
+# Только при LOGIN_PAGE=1 в .env; по умолчанию выключена (решение пользователя 31.10.2026 «пока не подключай, нужно
+# просто проверить»). Сам сайт вход пока не требует (app/login.py).
+LOGIN_PAGE = os.environ.get("LOGIN_PAGE", "0").strip().lower() in ("1", "true", "yes", "on")
+if LOGIN_PAGE:
+    from . import login
+    app.include_router(login.router)
+
 
 db.init()
 

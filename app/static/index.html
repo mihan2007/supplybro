@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <header class="topbar">
+  <header class="topbar" id="top">
     <div class="brand">SupplyBro <span class="ver" id="version"></span></div>
     <div class="topbar-tools">
       <div class="activity-wrap">
@@ -16,6 +16,16 @@
       </div>
       <button class="btn ghost" id="refresh" type="button" title="Заново загрузить данные из NocoDB">Обновить из NocoDB</button>
     </div>
+    <!-- Вкладки: переход к разделу этой же страницы (страница одна, разделы не прячутся) -->
+    <nav class="jump-nav" id="jump-nav" aria-label="Разделы страницы" hidden>
+      <a class="jump" href="#top" data-target="top">Конкурс</a>
+      <a class="jump" href="#docs" data-target="docs">Документы</a>
+      <a class="jump" href="#analysis" data-target="analysis">Анализ</a>
+      <a class="jump" href="#prices" data-target="prices">Цены</a>
+      <a class="jump" href="#chat" data-target="chat">Чат</a>
+      <a class="jump" href="#card" data-target="card">NocoDB</a>
+      <a class="jump" href="#spec" data-target="spec">Спецификация</a>
+    </nav>
   </header>
 
   <main>

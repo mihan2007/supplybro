@@ -1,0 +1,31 @@
+/* Страница входа (/login). Основа — app.css и admin.css (поля, кнопки, плашки). */
+
+.login-main { max-width: 560px; padding-top: 32px; }
+.login-main .auth-box { margin-top: 0; max-width: none; }
+.btn.big { font-size: 15px; padding: 9px 16px; }
+input[type="text"], input:not([type]) {
+  width: 100%; min-width: 0; padding: 8px 10px; font: inherit; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px;
+}
+
+.me-box { display: grid; gap: 14px; }
+.me-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.me-head h1 { margin-top: 2px; }
+.role-pill { font-size: 13px; padding: 3px 12px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.me-box .notice { margin: 0; }
+.me-fields { grid-template-columns: minmax(110px, 150px) 1fr; }
+.me-fields dd .muted { font-size: 13px; }
+.perm-label { margin-bottom: 6px; }
+.perms { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.perms li { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
+.perms li::before { content: "✓"; color: var(--ok); font-weight: 700; width: 14px; flex: none; text-align: center; }
+.perms li.no { color: var(--muted); }
+.perms li.no::before { content: "—"; color: var(--line-strong); font-weight: 400; }
+
+@media (max-width: 560px) {
+  .login-main { padding: 16px 16px 32px; }
+  .me-head { flex-direction: column-reverse; gap: 6px; }
+  .me-fields { grid-template-columns: 1fr; }
+  .me-fields dt { border-top: 1px solid var(--line); padding-bottom: 0; }
+  .me-fields dd { border-top: 0; padding-top: 2px; }
+}
