@@ -16,16 +16,6 @@
       </div>
       <button class="btn ghost" id="refresh" type="button" title="Заново загрузить данные из NocoDB">Обновить из NocoDB</button>
     </div>
-    <!-- Вкладки: переход к разделу этой же страницы (страница одна, разделы не прячутся) -->
-    <nav class="jump-nav" id="jump-nav" aria-label="Разделы страницы" hidden>
-      <a class="jump" href="#top" data-target="top">Конкурс</a>
-      <a class="jump" href="#docs" data-target="docs">Документы</a>
-      <a class="jump" href="#analysis" data-target="analysis">Анализ</a>
-      <a class="jump" href="#prices" data-target="prices">Цены</a>
-      <a class="jump" href="#chat" data-target="chat">Чат</a>
-      <a class="jump" href="#card" data-target="card">NocoDB</a>
-      <a class="jump" href="#spec" data-target="spec">Спецификация</a>
-    </nav>
   </header>
 
   <main>
@@ -81,6 +71,20 @@
         <p class="status" id="nt-status"></p>
       </form>
     </section>
+
+    <!-- Вкладки: панель под выбором конкурса, при прокрутке закреплена под шапкой; нажатие — переход к разделу
+         этой же страницы (страница одна, разделы не прячутся; решение пользователя 03.11.2026) -->
+    <div class="jump-wrap" id="jump-wrap" hidden>
+      <nav class="panel jump-nav" id="jump-nav" aria-label="Разделы страницы">
+        <a class="jump" href="#top" data-target="top">Конкурс</a>
+        <a class="jump" href="#docs" data-target="docs">Документы</a>
+        <a class="jump" href="#analysis" data-target="analysis">Анализ</a>
+        <a class="jump" href="#prices" data-target="prices">Цены</a>
+        <a class="jump" href="#card" data-target="card">NocoDB</a>
+        <a class="jump" href="#spec" data-target="spec">Спецификация</a>
+        <a class="jump" href="#chat" data-target="chat">Чат</a>
+      </nav>
+    </div>
 
     <div id="empty" class="empty">Выберите конкурс — здесь появятся его документы, данные из NocoDB и спецификация.</div>
 
@@ -181,24 +185,6 @@
       <div class="usage" id="pr-usage"></div>
     </section>
 
-    <!-- Вопросы по документации (чат): ответы только по документам конкурса, со ссылками -->
-    <section class="panel" id="chat" hidden>
-      <div class="section-head">
-        <h2>Вопросы по документации</h2>
-        <div class="section-tools">
-          <label class="inline admin-only">Модель <select id="chat-model"></select></label>
-          <button class="btn small" id="chat-clear" type="button" title="Удалить историю вопросов по этому конкурсу">Очистить</button>
-        </div>
-      </div>
-      <div class="chat-log" id="chat-log"></div>
-      <form class="chat-form" id="chat-form">
-        <textarea id="chat-input" rows="2" placeholder="Например: какие документы нужны во второй части заявки? Есть ли аванс? Можно ли предложить аналог?"></textarea>
-        <button class="btn primary" type="submit" id="chat-send">Спросить</button>
-      </form>
-      <div class="chat-cache" id="chat-cache"></div>
-      <div class="chat-hint" id="chat-hint"></div>
-    </section>
-
     <!-- Данные из «Реестра конкурсов» -->
     <section class="panel" id="card" hidden>
       <div class="section-head">
@@ -227,6 +213,24 @@
       </div>
       <div class="status" id="spec-status"></div>
       <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
+    </section>
+
+    <!-- Вопросы по документации (чат): ответы только по документам конкурса, со ссылками -->
+    <section class="panel" id="chat" hidden>
+      <div class="section-head">
+        <h2>Вопросы по документации</h2>
+        <div class="section-tools">
+          <label class="inline admin-only">Модель <select id="chat-model"></select></label>
+          <button class="btn small" id="chat-clear" type="button" title="Удалить историю вопросов по этому конкурсу">Очистить</button>
+        </div>
+      </div>
+      <div class="chat-log" id="chat-log"></div>
+      <form class="chat-form" id="chat-form">
+        <textarea id="chat-input" rows="2" placeholder="Например: какие документы нужны во второй части заявки? Есть ли аванс? Можно ли предложить аналог?"></textarea>
+        <button class="btn primary" type="submit" id="chat-send">Спросить</button>
+      </form>
+      <div class="chat-cache" id="chat-cache"></div>
+      <div class="chat-hint" id="chat-hint"></div>
     </section>
   </main>
 

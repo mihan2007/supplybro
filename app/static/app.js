@@ -1867,26 +1867,32 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest("#activity, #activity-panel")) $("activity-panel").hidden = true;
 });
 
-// ---------- вкладки-переходы (0.6.5) ----------
-// Строка вкладок в шапке: нажатие прокручивает к разделу этой же страницы, подсвечена вкладка раздела, который
-// сейчас перед глазами. Вкладка раздела, скрытого для этого конкурса (например, нет записи в NocoDB), не видна.
+// ---------- вкладки-переходы (0.6.5; панель — 0.6.6) ----------
+// Панель вкладок под выбором конкурса (при прокрутке закреплена под шапкой): нажатие прокручивает к разделу этой же
+// страницы, подсвечена вкладка раздела, который сейчас перед глазами. Вкладка раздела, скрытого для этого конкурса
+// (например, нет записи в NocoDB), не видна.
 (function jumpNav() {
+  const wrap = $("jump-wrap");
   const nav = $("jump-nav");
   const header = document.querySelector(".topbar");
   const links = [...nav.querySelectorAll(".jump")];
   const section = (a) => (a.dataset.target === "top" ? null : $(a.dataset.target));
   let pinned = null;          // вкладка, нажатая последней, — пока пользователь сам не прокрутит страницу
-  let frame = 0;
+  let autoScroll = false, autoTimer = 0, frame = 0;
 
-  function stickyHeight() { return header.getBoundingClientRect().height; }
+  const headerHeight = () => header.getBoundingClientRect().height;
+  // Сколько сверху занято закреплёнными шапкой и панелью вкладок.
+  const stickyHeight = () => headerHeight() + (wrap.hidden ? 0 : wrap.getBoundingClientRect().height);
 
   function syncVisibility() {
-    nav.hidden = $("head").hidden;          // конкурс не выбран — вкладок нет
+    wrap.hidden = $("head").hidden;         // конкурс не выбран — вкладок нет
     for (const a of links) {
       const s = section(a);
       a.hidden = Boolean(s && s.hidden);
     }
-    document.documentElement.style.setProperty("--sticky-h", stickyHeight() + "px");
+    const root = document.documentElement.style;
+    root.setProperty("--topbar-h", headerHeight() + "px");
+    root.setProperty("--sticky-h", stickyHeight() + "px");
     spy();
   }
 
@@ -1903,7 +1909,9 @@ document.addEventListener("click", (e) => {
   }
 
   function spy() {
-    if (nav.hidden) return;
+    if (wrap.hidden) return;
+    // Панель прилипла к шапке — лёгкая тень, чтобы было видно, что страница уходит под неё.
+    wrap.classList.toggle("stuck", window.scrollY > 0 && wrap.getBoundingClientRect().top <= headerHeight() + 0.5);
     if (pinned && !pinned.hidden) return setActive(pinned);
     const line = stickyHeight() + 40;                       // раздел «текущий», когда его верх выше этой линии
     const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
@@ -1932,7 +1940,6 @@ document.addEventListener("click", (e) => {
     setActive(a);
   });
   // Пользователь сам крутит страницу (колесо, палец, клавиши, полоса прокрутки) — снова подсвечиваем по положению.
-  let autoScroll = false, autoTimer = 0;
   const unpin = () => { pinned = null; };
   for (const ev of ["wheel", "touchstart", "keydown", "mousedown"]) {
     window.addEventListener(ev, (e) => { if (!nav.contains(e.target)) { autoScroll = false; unpin(); } }, { passive: true });
@@ -1943,7 +1950,9 @@ document.addEventListener("click", (e) => {
     if (!frame) frame = requestAnimationFrame(() => { frame = 0; spy(); });
   }, { passive: true });
   window.addEventListener("resize", syncVisibility);
-  new ResizeObserver(syncVisibility).observe(header);
+  const ro = new ResizeObserver(syncVisibility);
+  ro.observe(header);
+  ro.observe(wrap);
   const watched = ["head", ...links.map((a) => a.dataset.target).filter((t) => t !== "top")];
   const mo = new MutationObserver(syncVisibility);
   for (const id of watched) mo.observe($(id), { attributes: true, attributeFilter: ["hidden"] });
