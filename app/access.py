@@ -70,6 +70,24 @@ RULES = [
     (re.compile(r"^/chat/clear$"), "chat", "очистил историю чата"),
 ]
 CLIENT_PATH = re.compile(r"^/api/clients/([^/]+)(/.*)?$")
+# Адреса разделов страницы (0.11.0): выключенный сотруднику раздел (auth.BLOCKS, админ-панель) отвечает 403 — и чтение,
+# и действия. Карточка NocoDB (/tenders/<id>) не закрывается: из неё и шапка конкурса — поля убирает main.py.
+BLOCK_PATHS = [
+    (re.compile(r"^/docs(/|$)"), "docs"),
+    (re.compile(r"^/analysis(/|$)"), "analysis"),
+    (re.compile(r"^/(prices|pricelists)(/|$)"), "prices"),
+    (re.compile(r"^/tenders/[^/]+/spec$"), "spec"),
+    (re.compile(r"^/chat(/|$)"), "chat"),
+]
+
+
+def block_of(rest: str) -> str | None:
+    return next((b for rx, b in BLOCK_PATHS if rx.match(rest)), None)
+
+
+def block_on(name: str) -> bool:
+    """Включён ли раздел у того, кто сейчас вошёл (вход выключен — всё включено)."""
+    return name not in auth.blocks_off(current_user())
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -167,6 +185,10 @@ class LoginMiddleware:
             client_id, rest = m.group(1), m.group(2) or ""
             if not can_client(user, client_id):
                 return await _deny(request, 403, "у вашей учётной записи нет доступа к этому клиенту")(scope, receive, send)
+            blk = block_of(rest)
+            if blk and blk in auth.blocks_off(user):
+                return await _deny(request, 403, f"раздел «{auth.BLOCKS[blk].split(' (')[0]}» для вашей учётной записи "
+                                                 "выключен (админ-панель)")(scope, receive, send)
             if method in MUTATING:
                 rule = next((r for r in RULES if r[0].match(rest)), None)
                 need = rule[1] if rule else "users"          # неизвестное изменение — только администратору

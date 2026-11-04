@@ -84,6 +84,7 @@ async function boot() {
     document.querySelector("main").replaceChildren(el("div", { class: "notice bad", text: "Админ-панель недоступна: " + e.message }));
     return;
   }
+  $("not-connected").hidden = Boolean(st.login_required);   // вход на сайт уже включён — подсказка не нужна
   if (!st.has_users) return showSetup();
   if (!st.me) return showLogin();
   if (st.me.must_change) return showChange(true);
@@ -202,7 +203,8 @@ function renderUsers() {
   for (const u of list) {
     const tr = el("tr", { title: "Открыть карточку" },
       el("td", {}, el("div", { class: "u-name", text: u.name }), el("div", { class: "u-login", text: u.login + (st.me && u.id === st.me.id ? " · это вы" : "") })),
-      el("td", {}, el("span", { class: "pill" + (u.role === "admin" ? " role-admin" : ""), text: u.role_title })),
+      el("td", {}, el("span", { class: "pill" + (u.role === "admin" ? " role-admin" : ""), text: u.role_title }),
+        ...(blocksText(u.blocks_off) ? [el("div", { class: "u-login", text: blocksText(u.blocks_off) })] : [])),
       el("td", { text: clientsText(u.clients) }),
       el("td", {}, ...statePills(u)),
       el("td", { text: when(u.last_login_at) }),
@@ -274,6 +276,18 @@ for (const r of document.querySelectorAll("input[name=pw]")) {
   r.addEventListener("change", () => { $("ed-pass").hidden = document.querySelector("input[name=pw]:checked").value !== "set"; });
 }
 
+// Разделы страницы конкурса (0.11.0): отмечены — видны; снятые — выключены сотруднику.
+function fillBlocks(off) {
+  const set = new Set(off || []);
+  $("ed-blocks").replaceChildren(...Object.entries(st.blocks || {}).map(([key, title]) => el("label", { class: "check" },
+    el("input", { type: "checkbox", value: key, checked: set.has(key) ? null : "" }), title)));
+}
+
+function blocksText(off) {
+  const names = (off || []).map((k) => ((st.blocks || {})[k] || k).split(" (")[0]);
+  return names.length ? "выключено: " + names.join(", ") : "";
+}
+
 function openEditor(u) {
   editing = u || null;
   $("ed-title").textContent = u ? u.name : "Новый сотрудник";
@@ -284,6 +298,7 @@ function openEditor(u) {
   $("ed-note").value = u ? u.note : "";
   fillRoles(u ? u.role : "tender");
   fillClients(u ? u.clients : ["*"]);
+  fillBlocks(u ? u.blocks_off : []);
   $("ed-pass-box").hidden = Boolean(u);
   document.querySelector("input[name=pw][value=temp]").checked = true;
   $("ed-pass").hidden = true;
@@ -301,8 +316,9 @@ function openEditor(u) {
 function formData() {
   const all = $("ed-all").checked;
   const clients = all ? ["*"] : [...$("ed-clients").querySelectorAll("input:checked")].map((cb) => cb.value);
+  const blocks_off = [...$("ed-blocks").querySelectorAll("input")].filter((cb) => !cb.checked).map((cb) => cb.value);
   return { name: $("ed-name").value, login: $("ed-login").value, email: $("ed-email").value, phone: $("ed-phone").value,
-    role: $("ed-role").value, clients, note: $("ed-note").value };
+    role: $("ed-role").value, clients, note: $("ed-note").value, blocks_off };
 }
 
 $("ed-form").addEventListener("submit", async (e) => {

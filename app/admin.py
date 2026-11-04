@@ -94,8 +94,13 @@ def state(request: Request):
     me = _me(request)
     return {"has_users": auth.count_users() > 0, "me": auth.public(me),
             "roles": auth.ROLES, "permissions": auth.PERMISSIONS,
-            "role_permissions": {k: sorted(v) for k, v in auth.ROLE_PERMISSIONS.items()},
-            "clients": _clients(), "min_password": auth.MIN_PASSWORD}
+            "role_permissions": {k: sorted(v) for k, v in auth.ROLE_PERMISSIONS.items()}, "blocks": auth.BLOCKS,
+            "clients": _clients(), "min_password": auth.MIN_PASSWORD, "login_required": _login_required()}
+
+
+def _login_required() -> bool:
+    from . import access                         # вход на сайт включён — сотрудники уже входят (0.7.0)
+    return access.LOGIN_REQUIRED
 
 
 @router.post("/api/admin/setup")
@@ -164,7 +169,8 @@ def create(request: Request, data: dict = Body(...)):
 @router.patch("/api/admin/users/{user_id}")
 def update(request: Request, user_id: int, data: dict = Body(...)):
     me = _admin(request, change=True)
-    data = {k: v for k, v in data.items() if k in ("login", "name", "email", "phone", "role", "clients", "active", "note")}
+    data = {k: v for k, v in data.items()
+            if k in ("login", "name", "email", "phone", "role", "clients", "active", "note", "blocks_off")}
     return {"user": auth.public(_wrap(lambda: auth.update_user(user_id, data, me, _known(), _ip(request))))}
 
 

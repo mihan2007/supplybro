@@ -313,6 +313,8 @@ async def api_tender(client_id: str, record_id: int, view: str | None = None, fr
     else:
         columns = [{"title": c["title"], "uidt": c["uidt"]} for c in meta["columns"]]
     fields = [{"title": c["title"], "uidt": c["uidt"], "value": record.get(c["title"])} for c in columns]
+    card_on = access.block_on("card")                # раздел выключен сотруднику — только шапка конкурса (0.11.0)
+    spec_on = access.block_on("spec")
 
     spec_id = spec_table_id(record.get(F_SPEC_LINK))
     return {
@@ -327,12 +329,13 @@ async def api_tender(client_id: str, record_id: int, view: str | None = None, fr
         "participants": participants_of(record, client),
         "links": {
             "procedure": clean(record.get(F_PROCEDURE)),
-            "nocodb": noco.table_link(reg_id, (meta["views"][0]["id"] if meta["views"] else None), record_id),
-            "spec": clean(record.get(F_SPEC_LINK)) if spec_id else "",
+            "nocodb": noco.table_link(reg_id, (meta["views"][0]["id"] if meta["views"] else None), record_id) if card_on else "",
+            "spec": clean(record.get(F_SPEC_LINK)) if spec_id and spec_on else "",
         },
-        "views": meta["views"],
-        "view": chosen,
-        "fields": fields,
+        "views": meta["views"] if card_on else [],
+        "view": chosen if card_on else None,
+        "fields": fields if card_on else [],
+        "card_off": not card_on,
     }
 
 

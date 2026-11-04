@@ -53,6 +53,7 @@ dialog form { display: grid; gap: 12px; }
 fieldset.clients { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 10px; margin: 0; display: grid; gap: 6px; }
 fieldset.clients legend { padding: 0 4px; }
 #ed-clients { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px 12px; }
+#ed-blocks { display: grid; grid-template-columns: 1fr; gap: 4px; }   /* разделы страницы — столбиком (0.11.0) */
 .role-text { margin: -6px 0 0; font-size: 13px; }
 .ed-state { display: flex; gap: 6px; flex-wrap: wrap; }
 .ed-state:empty { display: none; }

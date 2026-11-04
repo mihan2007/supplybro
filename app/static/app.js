@@ -324,12 +324,18 @@ function currentTender() {
   return state.tenders.get(state.tender) || null;
 }
 
+// Разделы, выключенные сотруднику в админ-панели (0.11.0): на <body> класс off-<раздел> (loadMe). Раздел не
+// показывается и не загружается (сайт всё равно ответил бы 403); вкладка-переход прячется вместе с разделом.
+function blockOff(name) { return document.body.classList.contains("off-" + name); }
+
 function showTender(t) {
-  $("head").hidden = $("docs").hidden = !t;
-  $("analysis").hidden = !(t && t.folder);
-  $("prices").hidden = !(t && t.folder);
-  $("chat").hidden = !(t && t.folder);
-  $("card").hidden = $("spec").hidden = !(t && t.source === "nocodb");
+  $("head").hidden = !t;
+  $("docs").hidden = !t || blockOff("docs");
+  $("analysis").hidden = !(t && t.folder) || blockOff("analysis");
+  $("prices").hidden = !(t && t.folder) || blockOff("prices");
+  $("chat").hidden = !(t && t.folder) || blockOff("chat");
+  $("card").hidden = !(t && t.source === "nocodb") || blockOff("card");
+  $("spec").hidden = !(t && t.source === "nocodb") || blockOff("spec");
   $("empty").hidden = Boolean(t);
 }
 
@@ -435,7 +441,7 @@ async function loadDocs() {
   const t = currentTender();
   const my = ++seq.docs;
   stopDocsPolling();
-  if (!t) return;
+  if (!t || blockOff("docs")) return;
   if (!t.folder) {
     $("docs-nofolder").hidden = false;
     $("docs-body").hidden = true;
@@ -806,7 +812,7 @@ async function loadAnalysis() {
   const t = currentTender();
   const my = ++seq.an;
   stopAnalysisPolling();
-  if (!t || !t.folder) { $("analysis").hidden = true; return; }
+  if (!t || !t.folder || blockOff("analysis")) { $("analysis").hidden = true; return; }
   $("analysis").hidden = false;
   let d;
   try {
@@ -1296,7 +1302,7 @@ async function loadPrices() {
   const t = currentTender();
   const my = ++seq.pr;
   stopPricesPolling();
-  if (!t || !t.folder) { $("prices").hidden = true; return; }
+  if (!t || !t.folder || blockOff("prices")) { $("prices").hidden = true; return; }
   $("prices").hidden = false;
   let d;
   try {
@@ -1545,7 +1551,7 @@ function applyPriceTab() {
 
 async function loadPriceSummary() {
   const t = currentTender();
-  if (!t || !t.folder) return;
+  if (!t || !t.folder || blockOff("prices")) return;
   const my = ++seq.ps;
   let d;
   try {
@@ -1823,7 +1829,7 @@ function renderChatMessage(m) {
 async function loadChat() {
   const t = currentTender();
   const my = ++seq.chat;
-  if (!t || !t.folder) return;
+  if (!t || !t.folder || blockOff("chat")) return;
   let d;
   try {
     d = await api(clientPath("/chat"), { folder: t.folder });
@@ -1869,7 +1875,7 @@ function renderChatLog() {
 
 async function loadPricelists() {
   const t = currentTender();
-  if (!t || !t.folder) return;
+  if (!t || !t.folder || blockOff("chat") || blockOff("prices")) return;
   const my = ++seq.pl;
   clearTimeout(plTimer);
   let d;
@@ -2054,7 +2060,7 @@ let chatStatus = null;     // ответ /chat/status; skew — разница �
 
 async function loadChatStatus() {
   const t = currentTender();
-  if (!t || !t.folder) return;
+  if (!t || !t.folder || blockOff("chat")) return;
   const my = ++seq.chatStatus;
   let d = null;
   try {
@@ -2179,6 +2185,7 @@ async function askChat(question) {
 
 async function loadSpec() {
   const my = ++seq.spec;
+  if (blockOff("spec")) return;
   setStatus("spec-status", "Загрузка спецификации…");
   $("spec-table").replaceChildren();
   $("spec-count").textContent = "";
@@ -2596,6 +2603,14 @@ async function loadMe() {
   if (!d.required) return;
   if (!d.me || d.me.must_change) return toLogin();
   const allowed = new Set(d.access.permissions.filter((p) => p.allowed).map((p) => p.key));
+  // Выключенные разделы (админ-панель, 0.11.0): «Документы» — и без загрузки (новый конкурс, дозагрузка изменений),
+  // «Цены» — и без прайсов в чате, «Анализ» — без запуска анализа.
+  const off = new Set((d.access.blocks || []).filter((b) => !b.on).map((b) => b.key));
+  for (const b of d.access.blocks || []) document.body.classList.toggle("off-" + b.key, off.has(b.key));
+  if (off.has("docs")) allowed.delete("upload");
+  if (off.has("prices")) allowed.delete("prices");
+  if (off.has("analysis")) allowed.delete("analyze");
+  if (off.has("chat")) allowed.delete("chat");
   for (const k of ["upload", "analyze", "prices", "jobs", "chat"]) document.body.classList.toggle("no-" + k, !allowed.has(k));
   $("me-name").textContent = d.me.name === d.access.role_title ? d.me.name : `${d.me.name} · ${d.access.role_title}`;
   $("me-name").title = `Логин: ${d.me.login}`;

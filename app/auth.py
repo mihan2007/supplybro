@@ -95,6 +95,18 @@ PERMISSIONS = {
     "jobs": "Отменять и приостанавливать задачи",
     "users": "Учётные записи сотрудников",
 }
+# Разделы страницы, которые админ может выключить сотруднику (0.11.0, пользователь 04.11.2026: «у каждого пользователя
+# в админ-панели опция отключать тот или иной блок»). Выключенный раздел не показывается, его адреса отвечают 403
+# (app/access.py), карточка NocoDB — без полей (шапка конкурса остаётся), чат не получает цены / анализ.
+BLOCKS = {
+    "docs": "Документы",
+    "analysis": "Анализ документов (и изменения)",
+    "prices": "Цены (поиск, все цены, прайсы поставщиков)",
+    "card": "NocoDB — карточка конкурса",
+    "spec": "Спецификация",
+    "chat": "Чат по документации",
+}
+
 ROLE_PERMISSIONS = {
     "admin": set(PERMISSIONS),
     "tender": {"view", "chat", "upload", "analyze", "prices", "jobs"},
@@ -119,6 +131,12 @@ def init() -> None:
     db.init()
     with db.connect() as con:
         con.executescript(SCHEMA)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
+        if "blocks_off" not in cols:                 # 0.11.0: выключенные разделы страницы
+            try:
+                con.execute("ALTER TABLE users ADD COLUMN blocks_off TEXT NOT NULL DEFAULT '[]'")
+            except Exception:                        # сайт и админ-панель добавили одновременно
+                pass
 
 
 # ---------- пароли ----------
@@ -173,7 +191,16 @@ def _row(r) -> dict | None:
         u["clients"] = json.loads(u.get("clients") or '["*"]')
     except ValueError:
         u["clients"] = ["*"]
+    try:
+        u["blocks_off"] = [b for b in json.loads(u.get("blocks_off") or "[]") if b in BLOCKS]
+    except ValueError:
+        u["blocks_off"] = []
     return u
+
+
+def blocks_off(user: dict | None) -> set[str]:
+    """Выключенные разделы страницы у сотрудника (нет входа — ничего не выключено)."""
+    return set((user or {}).get("blocks_off") or [])
 
 
 def public(u: dict | None) -> dict | None:
@@ -245,6 +272,11 @@ def _clean(data: dict, known_clients: set[str], creating: bool) -> dict:
             out["clients"] = sorted(set(cl))
     if "active" in data:
         out["active"] = 1 if data.get("active") else 0
+    if "blocks_off" in data:
+        bo = data.get("blocks_off") or []
+        if not isinstance(bo, list):
+            raise AuthError("разделы указаны неверно")
+        out["blocks_off"] = [b for b in BLOCKS if b in {str(x) for x in bo}]
     return out
 
 
@@ -264,10 +296,11 @@ def create_user(data: dict, actor: dict | None, known_clients: set[str], ip: str
     with db.connect() as con:
         cur = con.execute(
             "INSERT INTO users(login, name, email, phone, role, clients, active, note, password_hash, must_change, "
-            "created_at, updated_at, password_changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at, updated_at, password_changed_at, blocks_off) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fields["login"], fields["name"], fields.get("email", ""), fields.get("phone", ""), fields["role"],
              json.dumps(fields["clients"]), 1, fields.get("note", ""), hash_password(pw),
-             0 if given and data.get("must_change") is False else 1, now, now, now))
+             0 if given and data.get("must_change") is False else 1, now, now, now,
+             json.dumps(fields.get("blocks_off") or [])))
         user_id = cur.lastrowid
     user = get_user(user_id)
     event(actor, user, "создана", f"роль: {ROLES[user['role']]['title']}; клиенты: {_clients_text(user['clients'])}", ip)
@@ -289,12 +322,13 @@ def update_user(user_id: int, data: dict, actor: dict | None, known_clients: set
         raise AuthError("это единственный администратор — сначала назначьте другого")
     if actor and actor["id"] == user_id and fields.get("active", 1) == 0:
         raise AuthError("себя заблокировать нельзя")
-    changes = {k: v for k, v in fields.items() if (json.dumps(v) if k == "clients" else v) !=
-               (json.dumps(user[k]) if k == "clients" else user[k])}
+    js = ("clients", "blocks_off")                   # хранятся списком в JSON
+    changes = {k: v for k, v in fields.items() if (json.dumps(v) if k in js else v) !=
+               (json.dumps(user.get(k)) if k in js else user[k])}
     if not changes:
         return user
     sets = ", ".join(f"{k}=?" for k in changes) + ", updated_at=?"
-    vals = [json.dumps(v) if k == "clients" else v for k, v in changes.items()]
+    vals = [json.dumps(v) if k in js else v for k, v in changes.items()]
     with db.connect() as con:
         con.execute(f"UPDATE users SET {sets} WHERE id=?", (*vals, time.time(), user_id))
         if changes.get("active") == 0:
@@ -473,6 +507,9 @@ def _diff_text(before: dict, changes: dict) -> str:
             parts.append(f"роль: {ROLES.get(before['role'], {}).get('title')} → {ROLES[v]['title']}")
         elif k == "clients":
             parts.append(f"клиенты: {_clients_text(before['clients'])} → {_clients_text(v)}")
+        elif k == "blocks_off":
+            names = lambda keys: ", ".join(BLOCKS[b].split(" (")[0] for b in keys) or "нет"
+            parts.append(f"выключенные разделы: {names(before.get('blocks_off') or [])} → {names(v)}")
         elif k == "active":
             continue
         elif k == "note":

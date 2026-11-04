@@ -64,6 +64,10 @@ SYSTEM = """Ты — помощник тендерного специалист�
 Если цен по позиции нет — так и скажи. Для ответа о ценах в «Источниках» строка: «- Цены: <магазин или прайс>»."""
 
 
+class _PricesOff(Exception):
+    """Раздел «Цены» выключен сотруднику (админ-панель, 0.11.0)."""
+
+
 # ---------- части запроса ----------
 
 def _analysis_text(result: dict | None) -> str:
@@ -253,8 +257,12 @@ def ask(client_id: str, folder_name: str, folder: Path, question: str, model: st
         else:
             meta["mode"] = "documents"
         today = datetime.now(MSK).strftime("%d.%m.%Y")
-        analysis = _analysis_text(load_result(folder))
+        from .access import block_on
+        analysis = (_analysis_text(load_result(folder)) if block_on("analysis")
+                    else "<analysis>\nРаздел анализа для этого пользователя выключен.\n</analysis>")
         try:
+            if not block_on("prices"):
+                raise _PricesOff()
             # Цены: интернет, «не проверено», прайсы поставщиков, уже записанные в спецификацию NocoDB (агент, рынки,
             # отдел закупок) и прошлые конкурсы с тем же артикулом (0.10.0).
             from .config import load_clients
@@ -263,6 +271,8 @@ def ask(client_id: str, folder_name: str, folder: Path, question: str, model: st
             spec = spec_for_chat(client, folder_name) if client else None
             hist = history_index(client, refresh=False)[0] if client else None
             analysis += "\n\n" + chat_text(folder, spec, hist)
+        except _PricesOff:
+            analysis += "\n\n<prices>\nЦены этому пользователю не показываются (раздел «Цены» выключен) — о ценах не отвечай.\n</prices>"
         except Exception as exc:                           # без цен чат по документам всё равно работает
             analysis += f"\n\n<prices>\nЦены не загрузились: {exc}\n</prices>"
         turns = [m for m in history if m["role"] in ("user", "assistant") and m["content"].strip()]
