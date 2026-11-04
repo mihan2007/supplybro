@@ -1,5 +1,5 @@
-// SupplyBro — логика страницы: выпадающие списки «клиент → юр. лицо → конкурс»,
-// документы конкурса (папка в Dropbox), карточка из NocoDB и спецификация.
+// SupplyBro — логика страницы: «клиент → юр. лицо», панель «Конкурсы» (0.13.0; конкурс открывается в новой
+// вкладке браузера), документы конкурса (папка в Dropbox), карточка из NocoDB и спецификация.
 // Выбор запоминается в адресе страницы (?client=…&entity=…&tender=…), поэтому
 // страницу можно обновить или сохранить в закладки.
 "use strict";
@@ -220,7 +220,8 @@ async function loadTenders() {
   const select = $("tender");
   select.disabled = true;
   fillSelect(select, [{ value: "", label: "Загрузка конкурсов…" }]);
-  if (!state.client) return;
+  if (!state.tender) { $("tlist").hidden = false; tlMessage("Загрузка конкурсов…"); }
+  if (!state.client) { tlMessage("Нет доступных клиентов."); return; }
   let data;
   try {
     data = await api(clientPath("/tenders"), { entity: state.entity });
@@ -228,6 +229,7 @@ async function loadTenders() {
     if (my !== seq.tenders) return;
     fillSelect(select, [{ value: "", label: "Не удалось загрузить конкурсы" }]);
     setPickersHint(err.message);
+    tlMessage("Не удалось загрузить конкурсы: " + err.message);
     return;
   }
   if (my !== seq.tenders) return;
@@ -244,6 +246,7 @@ async function loadTenders() {
   setPickersHint(hints.join(" "));
   state.nextNumber = data.next_number || "";
   state.tenders = new Map(data.tenders.map((t) => [t.id, t]));
+  state.list = data.tenders;
 
   // Группы: по юр. лицу-участнику, затем «Участник не указан», затем папки без записи в NocoDB.
   const groups = new Map();
@@ -272,6 +275,136 @@ async function loadTenders() {
     state.fresh = false;
   }
   saveUrl();
+}
+
+// ---------- панель «Конкурсы» (0.13.0) ----------
+// Пользователь 04.11.2026: вместо выпадающего списка при входе — панель с конкурсами выбранного юр. лица (номер,
+// заказчик, оборудование, минимум сведений); конкурс открывается в отдельной вкладке браузера. Данные — тот же
+// список /tenders (сервер добавляет короткие поля из app/tender_list.py). Фильтр и сортировка запоминаются в браузере.
+
+const TL_FILTER_KEY = "sb.tl.filter";
+const TL_SORT_KEY = "sb.tl.sort";
+const TL_SORTS = { no: "№", price: "НМЦ", deadline: "Подача заявок до" };
+let tlSort = { key: "no", dir: -1 };
+try { const s = JSON.parse(storageGet(TL_SORT_KEY) || "null"); if (s && TL_SORTS[s.key]) tlSort = s; } catch (_) { /* как по умолчанию */ }
+
+function tlHref(t) {
+  const p = new URLSearchParams({ client: state.client });
+  if (state.entity) p.set("entity", state.entity);
+  if (t) p.set("tender", t.id);
+  return location.pathname + "?" + p;
+}
+function tlNo(t) { const m = /(\d+)/.exec(t.internal || ""); return m ? Number(m[1]) : -1; }
+function tlDeadline(t) {
+  const d = t.deadline_at;
+  return d ? new Date(`${d.date}T${d.time || "23:59"}:00`) : null;
+}
+function tlHasData(t) { return t.source === "folder" || Boolean(t.customer || t.subject || t.number); }
+function tlNorm(s) { return String(s || "").toLowerCase().replace(/k/g, "к").replace(/ё/g, "е"); }
+
+function tlMessage(text) {
+  $("tl-count").textContent = "";
+  $("tl-more").hidden = true;
+  $("tl-table").replaceChildren(el("tbody", {}, el("tr", {}, el("td", { class: "tl-empty-val", text }))));
+}
+
+const CUR_SIGN = { RUB: "₽", EUR: "€", USD: "$", CNY: "¥" };
+function tlPrice(p) {
+  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(p.value)} ${CUR_SIGN[p.currency] || p.currency}`;
+}
+
+function tlLeft(dt) {
+  const ms = dt - Date.now();
+  if (ms < 0) return el("span", { class: "badge muted tl-left", text: "подача прошла" });
+  const h = ms / 3600000;
+  if (h < 24) return el("span", { class: "badge bad tl-left", text: h < 1 ? "меньше часа" : `осталось ${Math.floor(h)} ч` });
+  const d = Math.floor(h / 24);
+  return el("span", { class: "badge tl-left " + (d <= 3 ? "warn" : "ok"), text: `ещё ${d} дн.` });
+}
+
+const RESULT_CLASS = { "выиграли": "ok", "проиграли": "bad" };
+
+function tlRow(t) {
+  const href = tlHref(t);
+  const none = () => el("span", { class: "tl-empty-val", text: "—" });
+  const dt = tlDeadline(t);
+  const d = t.deadline_at;
+  const status = t.source === "folder"
+    ? el("span", { class: "badge muted", text: "нет в NocoDB", title: "Есть папка в Dropbox, записи в «Реестре конкурсов» ещё нет" })
+    : t.result ? el("span", { class: "badge " + (RESULT_CLASS[t.result.toLowerCase()] || "muted"), text: t.result })
+    : t.stage_short ? el("span", { text: t.stage_short }) : none();
+  const tr = el("tr", { "data-id": t.id, title: "Открыть в новой вкладке" },
+    el("td", { class: "no" },
+      el("a", { class: "tl-no", href, target: "_blank", rel: "noopener", text: t.internal || "без номера" }),
+      t.number ? el("div", { class: "tl-sub", text: "№ " + t.number }) : null),
+    el("td", { class: "tl-cust", title: t.customer_full || null },
+      t.customer ? el("div", { class: "tl-clamp", text: t.customer }) : none()),
+    el("td", { class: "tl-subj", title: t.subject_full || t.title || null },
+      t.subject ? el("div", { class: "tl-clamp", text: t.subject }) : none()),
+    el("td", { class: "price", title: t.price_full || null },
+      ...(t.price ? [el("div", { text: tlPrice(t.price) }), t.price.vat ? el("div", { class: "tl-sub", text: t.price.vat }) : null] : [none()])),
+    el("td", { class: "dl", title: t.deadline_full || null },
+      ...(d ? [el("div", { text: d.date.split("-").reverse().join(".") + (d.time ? " " + d.time : "") + (d.local ? " (местн.)" : "") }), tlLeft(dt)] : [none()])),
+    el("td", { class: "st", title: t.stage_full || null }, status));
+  const open = (e) => {
+    if (e.target.closest("a")) return;                        // по номеру — ссылка сама откроет вкладку
+    if (e.type === "auxclick" && e.button !== 1) return;
+    window.open(href, "_blank", "noopener");
+  };
+  tr.addEventListener("click", open);
+  tr.addEventListener("auxclick", open);
+  return tr;
+}
+
+function renderTenderList() {
+  if (state.tender || !state.list) return;
+  const all = state.list;
+  const filter = $("tl-filter").value;
+  const q = tlNorm($("tl-search").value.trim());
+  const now = Date.now();
+  let list = all.filter((t) => filter === "all" || (filter === "open" ? (tlDeadline(t) || 0) >= now : tlHasData(t)));
+  const before = list.length;
+  if (q) {
+    list = list.filter((t) => tlNorm([t.internal, t.number, t.customer_full, t.subject_full, t.title, t.folder].join(" ")).includes(q));
+  }
+  const { key, dir } = tlSort;
+  const val = (t) => (key === "no" ? tlNo(t) : key === "price" ? (t.price ? t.price.value : null) : (tlDeadline(t) || null));
+  list = [...list].sort((a, b) => {
+    const x = val(a), y = val(b);
+    const nx = x === null || x === -1, ny = y === null || y === -1;
+    if (nx !== ny) return nx ? 1 : -1;                         // без значения — всегда внизу
+    if (!nx && x - y) return (x - y) * dir;
+    return (Number(b.id) || 0) - (Number(a.id) || 0);
+  });
+
+  const head = el("tr", {}, ...[["no", "№"], ["", "Заказчик"], ["", "Что поставляем"], ["price", "НМЦ"],
+    ["deadline", "Подача заявок до"], ["", "Итог / стадия"]].map(([k, text]) => {
+    if (!k) return el("th", { text });
+    const th = el("th", { class: "sort", "data-sort": k, title: "Сортировать" }, text,
+      key === k ? el("span", { class: "arrow", text: dir < 0 ? "↓" : "↑" }) : null);
+    th.addEventListener("click", () => {
+      tlSort = { key: k, dir: key === k ? -dir : (k === "deadline" ? 1 : -1) };
+      storageSet(TL_SORT_KEY, JSON.stringify(tlSort));
+      renderTenderList();
+    });
+    return th;
+  }));
+  const body = el("tbody", {}, ...list.map(tlRow));
+  if (!list.length) {
+    body.append(el("tr", {}, el("td", { colspan: "6", class: "tl-empty-val",
+      text: !all.length ? "Конкурсов пока нет — нажмите «+ Новый конкурс»." : q ? "Ничего не нашлось." :
+        filter === "open" ? "Конкурсов, где подача заявок ещё идёт, нет (по сроку подачи в NocoDB)." : "Конкурсов нет." })));
+  }
+  $("tl-table").replaceChildren(el("thead", {}, head), body);
+  $("tl-count").textContent = list.length === all.length ? `(${all.length})` : `(${list.length} из ${all.length})`;
+  const hidden = filter === "data" ? all.length - before : 0;
+  $("tl-more").hidden = !hidden || Boolean(q);
+  if (hidden && !q) {
+    const a = el("a", { class: "link", href: "#", text: "показать все записи реестра" });
+    a.addEventListener("click", (e) => { e.preventDefault(); $("tl-filter").value = "all"; storageSet(TL_FILTER_KEY, "all"); renderTenderList(); });
+    $("tl-more").replaceChildren(`Ещё ${hidden} записей «Реестра конкурсов» — только с внутренним номером, без заказчика и `
+      + "предмета (старые или зарезервированные номера) — ", a, ".");
+  }
 }
 
 // ---------- новый конкурс ----------
@@ -329,6 +462,14 @@ function currentTender() {
 function blockOff(name) { return document.body.classList.contains("off-" + name); }
 
 function showTender(t) {
+  // Конкурс не выбран — панель «Конкурсы» (0.13.0); выбран — его разделы, вверху список для смены и «Все конкурсы».
+  $("tlist").hidden = Boolean(t);
+  $("pickers").classList.toggle("mode-list", !t);
+  $("pickers").classList.toggle("mode-tender", Boolean(t));
+  $("to-list").href = tlHref(null);
+  document.title = t ? `${[t.internal || (t.number ? "№ " + t.number : ""), t.subject || t.customer || t.title]
+    .filter(Boolean).join(" · ").slice(0, 80)} — SupplyBro` : "Конкурсы — SupplyBro";
+  if (!t) renderTenderList();
   $("head").hidden = !t;
   $("docs").hidden = !t || blockOff("docs");
   $("analysis").hidden = !(t && t.folder) || blockOff("analysis");
@@ -336,7 +477,6 @@ function showTender(t) {
   $("chat").hidden = !(t && t.folder) || blockOff("chat");
   $("card").hidden = !(t && t.source === "nocodb") || blockOff("card");
   $("spec").hidden = !(t && t.source === "nocodb") || blockOff("spec");
-  $("empty").hidden = Boolean(t);
 }
 
 async function loadTender() {
@@ -2353,6 +2493,12 @@ function jobItem(j, controls = true) {
 
 // ---------- события ----------
 
+$("tl-search").addEventListener("input", renderTenderList);
+$("tl-filter").addEventListener("change", (e) => { storageSet(TL_FILTER_KEY, e.target.value); renderTenderList(); });
+{
+  const f = storageGet(TL_FILTER_KEY);
+  if (f && [...$("tl-filter").options].some((o) => o.value === f)) $("tl-filter").value = f;
+}
 $("client").addEventListener("change", (e) => {
   state.client = e.target.value;
   state.entity = ""; state.tender = ""; state.regView = ""; state.specView = "";

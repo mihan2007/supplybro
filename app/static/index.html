@@ -25,8 +25,8 @@
   </header>
 
   <main>
-    <!-- Выбор: клиент → юр. лицо → конкурс -->
-    <section class="panel pickers">
+    <!-- Выбор: клиент → юр. лицо; конкурс — из панели «Конкурсы» ниже (0.13.0) или, когда конкурс открыт, из списка -->
+    <section class="panel pickers mode-list" id="pickers">
       <label class="field">
         <span class="label">Клиент</span>
         <select id="client"></select>
@@ -35,10 +35,14 @@
         <span class="label">Юр. лицо</span>
         <select id="entity"></select>
       </label>
-      <label class="field wide">
+      <label class="field wide tender-field">
         <span class="label">Конкурс</span>
         <select id="tender" disabled><option>Загрузка…</option></select>
       </label>
+      <div class="field add-field to-list-field">
+        <span class="label">&nbsp;</span>
+        <a class="btn" id="to-list" href="./" title="Список конкурсов этого клиента и юр. лица">☰ Все конкурсы</a>
+      </div>
       <div class="field add-field">
         <span class="label">&nbsp;</span>
         <button class="btn primary need-upload" id="new-tender-btn" type="button">+ Новый конкурс</button>
@@ -92,7 +96,27 @@
       </nav>
     </div>
 
-    <div id="empty" class="empty">Выберите конкурс — здесь появятся его документы, данные из NocoDB и спецификация.</div>
+    <!-- Панель «Конкурсы» (0.13.0, пользователь 04.11.2026): вместо выбора из выпадающего списка при входе;
+         конкурс открывается в новой вкладке браузера -->
+    <section class="panel tlist" id="tlist" hidden>
+      <div class="section-head">
+        <h2>Конкурсы <span class="muted" id="tl-count"></span></h2>
+        <div class="section-tools">
+          <input class="tl-search" id="tl-search" type="search" placeholder="Поиск: номер, заказчик, оборудование"
+            autocomplete="off">
+          <label class="inline">Показать
+            <select id="tl-filter">
+              <option value="data">с данными</option>
+              <option value="open">идёт подача заявок</option>
+              <option value="all">все записи реестра</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <p class="tl-note muted">Нажмите на конкурс — он откроется в новой вкладке браузера.</p>
+      <div class="table-wrap tl-wrap"><table class="tl-table" id="tl-table"></table></div>
+      <p class="tl-more muted" id="tl-more" hidden></p>
+    </section>
 
     <!-- Шапка конкурса -->
     <section class="panel" id="head" hidden>

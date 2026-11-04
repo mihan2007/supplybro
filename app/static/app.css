@@ -405,3 +405,55 @@ td.block-row { background: var(--chip) !important; font-weight: 600; }
 }
 .toast.bad { border-color: var(--bad); color: var(--bad); }
 @media (max-width: 700px) { .activity { max-width: 52vw; overflow: hidden; text-overflow: ellipsis; } }
+
+/* ---------- Панель «Конкурсы» (0.13.0) ---------- */
+.pickers.mode-list { grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.6fr) auto; }
+.pickers.mode-list .tender-field, .pickers.mode-list .to-list-field { display: none; }
+.pickers.mode-tender { grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) minmax(240px, 2.4fr) auto auto; }
+.to-list-field .btn { padding: 8px 14px; font-size: 14px; text-align: center; }
+.tl-search {
+  width: min(340px, 70vw); padding: 7px 10px; font: inherit; font-size: 13px; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px;
+}
+.tl-note { margin: -4px 0 10px; font-size: 13px; }
+.tl-more { margin: 10px 0 0; font-size: 13px; }
+table.tl-table { width: 100%; }
+.tl-table th { white-space: nowrap; }
+.tl-table th.sort { cursor: pointer; user-select: none; }
+.tl-table th.sort:hover { color: var(--accent); }
+.tl-table th .arrow { color: var(--accent); margin-left: 4px; }
+.tl-table td { white-space: normal; max-width: none; }
+.tl-table tbody tr { cursor: pointer; }
+.tl-table tbody tr:hover td { background: var(--accent-soft); }
+.tl-table td.no { white-space: nowrap; width: 1%; }
+.tl-no { font-weight: 700; font-size: 14px; color: var(--accent); text-decoration: none; }
+.tl-no:hover { text-decoration: underline; }
+.tl-sub { color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.tl-cust { min-width: 180px; width: 24%; }
+.tl-subj { min-width: 220px; width: 36%; }
+.tl-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.tl-table td.price, .tl-table td.dl { white-space: nowrap; width: 1%; }
+.tl-table td.price { text-align: right; font-variant-numeric: tabular-nums; }
+.tl-table td.dl { font-variant-numeric: tabular-nums; }
+.tl-left { display: inline-block; margin-top: 3px; }
+.tl-table td.st { min-width: 120px; width: 14%; }
+.tl-empty-val { color: var(--muted); }
+.tl-group td { background: var(--chip) !important; font-weight: 600; cursor: default; }
+@media (max-width: 760px) {
+  .pickers.mode-list, .pickers.mode-tender { grid-template-columns: 1fr; }
+  .tl-search { width: 100%; }
+  /* Телефон: строка конкурса — карточкой (номер и НМЦ, заказчик, оборудование, срок и стадия), без сортировки. */
+  .tl-wrap { max-height: none; overflow: visible; }
+  .tl-table thead { display: none; }
+  .tl-table, .tl-table tbody { display: block; width: 100%; min-width: 0; }
+  .tl-table tbody tr { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "no price" "cust cust"
+    "subj subj" "dl st"; gap: 4px 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .tl-table tbody tr:nth-child(even) { background: var(--row-alt); }
+  .tl-table tbody tr:nth-child(odd) { background: var(--panel); }
+  .tl-table tbody td { display: block; border: 0; padding: 0; min-width: 0; width: auto; background: none !important; }
+  .tl-table td.no { grid-area: no; } .tl-table td.price { grid-area: price; }
+  .tl-table td.tl-cust { grid-area: cust; font-weight: 600; } .tl-table td.tl-subj { grid-area: subj; }
+  .tl-table td.dl { grid-area: dl; white-space: normal; } .tl-table td.st { grid-area: st; text-align: right; }
+  .tl-table td .tl-empty-val:only-child { display: none; }
+  .tl-table tbody tr td[colspan] { grid-column: 1 / -1; }
+}

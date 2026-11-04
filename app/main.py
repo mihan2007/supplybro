@@ -20,7 +20,7 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, chat, db, price_summary, pricelists
+from . import access, chat, db, price_summary, pricelists, tender_list
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
 from .analysis import changes
@@ -47,6 +47,8 @@ F_CURRENCY = "Валюта"
 F_PROCEDURE = "Ссылка на процедуру"
 F_SPEC_LINK = "Ссылка на спецификацию"
 F_DOCS = "Перечень документов заявки"   # первая строка может быть «Участник: … (ИНН …)»
+F_CUSTOMER = "Заказчик"
+F_RESULT = "Статус конкурса (выиграли - проиграли)"   # есть только в «Реестре конкурсов» клиента «Наша»
 NOT_SPECIFIED = "Не указано в документах"
 
 # id таблицы NocoDB в ссылке вида https://app.nocodb.com/<ws>/<base>/<таблица>/<вид>
@@ -234,7 +236,8 @@ async def api_tenders(client_id: str, entity: str | None = None, fresh: bool = F
         meta = await noco.table_meta(reg_id, fresh)
         titles = {c["title"] for c in meta["columns"]}
         has_participant_col = client.nocodb.participant_column in titles
-        wanted = [F_INTERNAL, F_NUMBER, F_TITLE, F_STAGE, F_DEADLINE, F_SPEC_LINK, F_DOCS]
+        wanted = [F_INTERNAL, F_NUMBER, F_TITLE, F_STAGE, F_DEADLINE, F_SPEC_LINK, F_DOCS,
+                  F_CUSTOMER, F_PRICE, F_CURRENCY, F_RESULT]          # заказчик, НМЦ, итог — для панели (0.13.0)
         if has_participant_col:
             wanted.append(client.nocodb.participant_column)
         fields = ["Id"] + [f for f in wanted if f in titles]
@@ -278,6 +281,8 @@ async def api_tenders(client_id: str, entity: str | None = None, fresh: bool = F
             "participants": parts,
             "has_spec": bool(spec_table_id(r.get(F_SPEC_LINK))),
             "folder": folder,
+            **tender_list.brief(r.get(F_CUSTOMER), r.get(F_TITLE), r.get(F_STAGE), r.get(F_DEADLINE),
+                                r.get(F_PRICE), r.get(F_CURRENCY), r.get(F_RESULT)),
         })
     for f in folders:
         if f["number"]:
@@ -288,7 +293,7 @@ async def api_tenders(client_id: str, entity: str | None = None, fresh: bool = F
         tenders.append({
             "id": "f:" + f["name"], "source": "folder", "internal": f["number"] or "", "number": "",
             "title": title, "stage": "", "deadline": "", "participants": [], "has_spec": False,
-            "folder": f["name"],
+            "folder": f["name"], **tender_list.brief(None, title, None, None, None, None, None),
         })
     return {"participant_column": client.nocodb.participant_column,
             "participant_column_exists": has_participant_col,
