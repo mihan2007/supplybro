@@ -21,6 +21,7 @@ const state = {
   fresh: false,
   tenders: new Map(),   // id → конкурс из последнего списка
   nextNumber: "",
+  opened: "",           // какой конкурс показан на странице (его разделы загружены)
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
 const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0 };
@@ -190,7 +191,28 @@ async function loadClients() {
   if (!state.clients.some((c) => c.id === state.client)) state.client = state.clients[0] ? state.clients[0].id : "";
   fillSelect($("client"), state.clients.map((c) => ({ value: c.id, label: c.name })), state.client);
   fillEntities();
+  if (state.tender) {
+    // Конкурс по ссылке (вкладка, открытая из панели «Конкурсы»): показать его сразу по одной записи, а весь
+    // список — для выпадающего — догрузить одновременно (0.13.0; реестр «Наша» читается несколько секунд).
+    $("pickers").classList.replace("mode-list", "mode-tender");
+    $("opening").hidden = false;
+    openFast();
+  }
   await loadTenders();
+}
+
+async function openFast() {
+  const id = state.tender;
+  let d;
+  try {
+    d = await api(clientPath("/tender-brief"), { id });
+  } catch (_) {
+    return;                         // не вышло — конкурс откроет полный список
+  }
+  if (state.tender !== id || state.opened === id || state.list) return;   // список успел раньше
+  state.tenders = new Map([[d.tender.id, d.tender]]);
+  fillSelect($("tender"), [{ value: d.tender.id, label: tenderLabel(d.tender) }], d.tender.id);
+  await loadTender();
 }
 
 function fillEntities() {
@@ -230,6 +252,13 @@ async function loadTenders() {
     fillSelect(select, [{ value: "", label: "Не удалось загрузить конкурсы" }]);
     setPickersHint(err.message);
     tlMessage("Не удалось загрузить конкурсы: " + err.message);
+    if (state.tender && state.opened !== state.tender) {
+      $("opening").textContent = "Не удалось открыть конкурс: " + err.message + ". Нажмите «Обновить из NocoDB».";
+    } else if (state.opened && state.tenders.has(state.opened)) {
+      // конкурс уже открыт по ссылке — оставить в выпадающем списке хотя бы его
+      fillSelect(select, [{ value: state.opened, label: tenderLabel(state.tenders.get(state.opened)) }], state.opened);
+      select.disabled = false;
+    }
     return;
   }
   if (my !== seq.tenders) return;
@@ -268,9 +297,15 @@ async function loadTenders() {
   select.disabled = false;
   if (state.tenders.has(state.tender)) {
     select.value = state.tender;
-    await loadTender();
+    // Уже открыт (по ссылке, раньше списка) — не загружать разделы второй раз; «Обновить из NocoDB» и окончание
+    // анализа (fresh) — загрузить заново.
+    if (state.opened !== state.tender || state.fresh) await loadTender();
   } else {
     state.tender = "";
+    state.opened = "";
+    stopDocsPolling();
+    stopAnalysisPolling();
+    stopPricesPolling();
     showTender(null);
     state.fresh = false;
   }
@@ -464,6 +499,7 @@ function blockOff(name) { return document.body.classList.contains("off-" + name)
 function showTender(t) {
   // Конкурс не выбран — панель «Конкурсы» (0.13.0); выбран — его разделы, вверху список для смены и «Все конкурсы».
   $("tlist").hidden = Boolean(t);
+  $("opening").hidden = true;
   $("pickers").classList.toggle("mode-list", !t);
   $("pickers").classList.toggle("mode-tender", Boolean(t));
   $("to-list").href = tlHref(null);
@@ -481,12 +517,13 @@ function showTender(t) {
 
 async function loadTender() {
   const t = currentTender();
+  state.opened = t ? state.tender : "";
   showTender(t);
   saveUrl();
-  if (!t) return;
   stopDocsPolling();
   stopAnalysisPolling();
   stopPricesPolling();
+  if (!t) return;
   anLastJob = null;
   prLastJob = null;
   if (t.source === "nocodb") {

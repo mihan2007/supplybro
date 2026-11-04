@@ -172,16 +172,25 @@ def spec_table_id(link: str | None) -> str | None:
 
 # ---------- страницы ----------
 
+def _page_html() -> str:
+    """index.html со ссылками на app.js / app.css с номером версии (0.13.0): после обновления сайта браузер берёт
+    новые файлы сам, в том числе во вкладках, открытых из панели «Конкурсы», — без Ctrl+F5."""
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "app.css"):
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={APP_VERSION}"')
+    return html
+
+
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    return HTMLResponse(_page_html(), headers={"Cache-Control": "no-cache"})
 
 
 if USER_PAGE:
     @app.get("/user")
     def user_page():
         """Страница сотрудника: та же index.html с пометкой в <body> (app.js прячет выбор моделей и их не отправляет)."""
-        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        html = _page_html()
         html = html.replace("<body>", '<body class="user-mode" data-mode="user">', 1)
         html = html.replace("<title>SupplyBro — конкурсы</title>", "<title>SupplyBro — конкурсы (сотрудник)</title>", 1)
         return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
@@ -241,15 +250,14 @@ async def api_tenders(client_id: str, entity: str | None = None, fresh: bool = F
         if has_participant_col:
             wanted.append(client.nocodb.participant_column)
         fields = ["Id"] + [f for f in wanted if f in titles]
-        rows = await noco.records(reg_id, fields=fields, sort="-Id")
+        # Список хранится 2 мин (кнопка «Обновить из NocoDB» и окончание анализа — fresh): вкладки, открытые из
+        # панели «Конкурсы», не читают реестр заново (0.13.0).
+        rows = await noco.records(reg_id, fields=fields, sort="-Id", cache=True, fresh=fresh)
     except NocoError as exc:
         noco_error = str(exc)  # папки всё равно показываем
 
     folders = list_folders(client)
-    by_number = {}
-    for f in folders:
-        if f["number"] and f["number"] not in by_number:
-            by_number[f["number"]] = f["name"]
+    by_number = _folders_by_number(folders)
     try:
         client_root(client)
         folders_error = ""
@@ -258,49 +266,93 @@ async def api_tenders(client_id: str, entity: str | None = None, fresh: bool = F
 
     tenders, used_folders, numbers = [], set(), set()
     for r in rows:
-        internal, number = clean(r.get(F_INTERNAL)), clean(r.get(F_NUMBER))
-        if not internal and not number:
+        item = _noco_item(r, client, by_number)
+        if not item:
             continue  # пустые строки реестра
-        norm = norm_number(internal)
+        norm = norm_number(item["internal"])
         if norm:
             numbers.add(norm)
-        folder = by_number.get(norm) if norm else None
-        if folder:
-            used_folders.add(folder)
-        parts = participants_of(r, client)
-        if entity and parts and entity not in parts:
+        if item["folder"]:
+            used_folders.add(item["folder"])
+        if entity and item["participants"] and entity not in item["participants"]:
             continue  # конкурс другого юр. лица
-        tenders.append({
-            "id": str(r["Id"]),
-            "source": "nocodb",
-            "internal": internal,
-            "number": number,
-            "title": first_line(r.get(F_TITLE)),
-            "stage": first_line(r.get(F_STAGE)),
-            "deadline": first_line(r.get(F_DEADLINE)),
-            "participants": parts,
-            "has_spec": bool(spec_table_id(r.get(F_SPEC_LINK))),
-            "folder": folder,
-            **tender_list.brief(r.get(F_CUSTOMER), r.get(F_TITLE), r.get(F_STAGE), r.get(F_DEADLINE),
-                                r.get(F_PRICE), r.get(F_CURRENCY), r.get(F_RESULT)),
-        })
+        tenders.append(item)
     for f in folders:
         if f["number"]:
             numbers.add(f["number"])
         if f["name"] in used_folders:
             continue
-        title = f["name"][len(f["number"] or ""):].strip() if f["number"] else f["name"]
-        tenders.append({
-            "id": "f:" + f["name"], "source": "folder", "internal": f["number"] or "", "number": "",
-            "title": title, "stage": "", "deadline": "", "participants": [], "has_spec": False,
-            "folder": f["name"], **tender_list.brief(None, title, None, None, None, None, None),
-        })
+        tenders.append(_folder_item(f))
     return {"participant_column": client.nocodb.participant_column,
             "participant_column_exists": has_participant_col,
             "noco_error": noco_error,
             "folders_error": folders_error,
             "next_number": next_number(numbers),
             "tenders": tenders}
+
+
+def _folders_by_number(folders: list[dict]) -> dict[str, str]:
+    """Внутренний номер → имя папки (первая, если папок с одним номером несколько)."""
+    by_number: dict[str, str] = {}
+    for f in folders:
+        if f["number"] and f["number"] not in by_number:
+            by_number[f["number"]] = f["name"]
+    return by_number
+
+
+def _noco_item(r: dict, client: Client, by_number: dict[str, str]) -> dict | None:
+    """Строка списка конкурсов из записи «Реестра конкурсов» (None — пустая строка реестра)."""
+    internal, number = clean(r.get(F_INTERNAL)), clean(r.get(F_NUMBER))
+    if not internal and not number:
+        return None
+    norm = norm_number(internal)
+    return {
+        "id": str(r["Id"]),
+        "source": "nocodb",
+        "internal": internal,
+        "number": number,
+        "title": first_line(r.get(F_TITLE)),
+        "stage": first_line(r.get(F_STAGE)),
+        "deadline": first_line(r.get(F_DEADLINE)),
+        "participants": participants_of(r, client),
+        "has_spec": bool(spec_table_id(r.get(F_SPEC_LINK))),
+        "folder": by_number.get(norm) if norm else None,
+        **tender_list.brief(r.get(F_CUSTOMER), r.get(F_TITLE), r.get(F_STAGE), r.get(F_DEADLINE),
+                            r.get(F_PRICE), r.get(F_CURRENCY), r.get(F_RESULT)),
+    }
+
+
+def _folder_item(f: dict) -> dict:
+    """Строка списка конкурсов для папки в Dropbox без записи в NocoDB (id «f:<папка>»)."""
+    title = f["name"][len(f["number"] or ""):].strip() if f["number"] else f["name"]
+    return {
+        "id": "f:" + f["name"], "source": "folder", "internal": f["number"] or "", "number": "",
+        "title": title, "stage": "", "deadline": "", "participants": [], "has_spec": False,
+        "folder": f["name"], **tender_list.brief(None, title, None, None, None, None, None),
+    }
+
+
+@app.get("/api/clients/{client_id}/tender-brief")
+async def api_tender_brief(client_id: str, id: str):
+    """Один конкурс в том же виде, что строка списка (0.13.0): вкладка, открытая из панели «Конкурсы», показывает
+    конкурс сразу — одна запись NocoDB вместо всего реестра; полный список (для выпадающего) догружается следом."""
+    client = get_client(client_id)
+    folders = list_folders(client)
+    if id.startswith("f:"):
+        f = next((x for x in folders if x["name"] == id[2:]), None)
+        if not f:
+            raise HTTPException(404, "папка конкурса не найдена")
+        return {"tender": _folder_item(f)}
+    if not id.isdigit():
+        raise HTTPException(400, "неверный номер записи")
+    try:
+        record = await NocoClient(client.nocodb).record(client.nocodb.registry_table_id, int(id))
+    except NocoError as exc:
+        raise HTTPException(502, str(exc))
+    item = _noco_item(record, client, _folders_by_number(folders))
+    if not item:
+        raise HTTPException(404, "запись реестра пустая")
+    return {"tender": item}
 
 
 @app.get("/api/clients/{client_id}/tenders/{record_id}")
