@@ -61,7 +61,7 @@ def _access(user: dict | None) -> dict | None:
         "permissions": [{"key": k, "title": t, "allowed": k in allowed} for k, t in auth.PERMISSIONS.items()],
         "clients": names, "all_clients": all_clients,
         "home": _home(user),
-        "admin_panel": user["role"] == "admin" and access.ADMIN_PANEL,
+        "admin_panel": user["role"] in auth.MANAGER_ROLES and access.ADMIN_PANEL,   # админ клиента — свои сотрудники
         "blocks": [{"key": k, "title": t, "on": k not in auth.blocks_off(user)} for k, t in auth.BLOCKS.items()],
     }
 

@@ -74,9 +74,15 @@ CREATE INDEX IF NOT EXISTS user_events_at ON user_events(at);
 
 # Роли и их права. По правам сайт (app/access.py) решает, какие действия разрешены сотруднику, а админ-панель — кого пускать.
 # view — представление «Реестра конкурсов» NocoDB по умолчанию для роли.
+# 0.12.0 (пользователь 04.11.2026: «в админ-панели мы видим наших клиентов, у клиента могут быть сотрудники, у которых
+# и должны быть эти роли»): сотрудник принадлежит одному клиенту (clients = [id]); со всеми клиентами работает только
+# администратор сайта (clients = ["*"]). Администратор клиента ведёт сотрудников своего клиента в админ-панели.
 ROLES = {
-    "admin": {"title": "Администратор", "view": "Вся таблица",
-              "text": "Всё, что может тендерный специалист, плюс учётные записи сотрудников (эта панель)."},
+    "admin": {"title": "Администратор сайта", "view": "Вся таблица",
+              "text": "Все клиенты и вся админ-панель: клиенты, их сотрудники и администраторы сайта; выбор моделей ИИ."},
+    "client_admin": {"title": "Администратор клиента", "view": "Вся таблица",
+                     "text": "Всё, что тендерный специалист, плюс сотрудники своего клиента в админ-панели: добавить, "
+                             "роль, разделы, пароль, блокировка."},
     "tender": {"title": "Тендерный специалист", "view": "Тендерный специалист",
                "text": "Конкурсы, документы, анализ, запись в NocoDB, поиск цен, чат, отмена и пауза задач."},
     "buyer": {"title": "Закупщик", "view": "Закупщик",
@@ -93,8 +99,10 @@ PERMISSIONS = {
     "analyze": "Запускать анализ и запись в NocoDB",
     "prices": "Искать цены",
     "jobs": "Отменять и приостанавливать задачи",
-    "users": "Учётные записи сотрудников",
+    "staff": "Сотрудники своего клиента (админ-панель)",
+    "users": "Все клиенты и администраторы сайта (админ-панель)",
 }
+MANAGER_ROLES = ("admin", "client_admin")        # кому открыта админ-панель
 # Разделы страницы, которые админ может выключить сотруднику (0.11.0, пользователь 04.11.2026: «у каждого пользователя
 # в админ-панели опция отключать тот или иной блок»). Выключенный раздел не показывается, его адреса отвечают 403
 # (app/access.py), карточка NocoDB — без полей (шапка конкурса остаётся), чат не получает цены / анализ.
@@ -109,6 +117,7 @@ BLOCKS = {
 
 ROLE_PERMISSIONS = {
     "admin": set(PERMISSIONS),
+    "client_admin": {"view", "chat", "upload", "analyze", "prices", "jobs", "staff"},
     "tender": {"view", "chat", "upload", "analyze", "prices", "jobs"},
     "buyer": {"view", "chat", "prices"},
     "logist": {"view", "chat"},
@@ -268,7 +277,7 @@ def _clean(data: dict, known_clients: set[str], creating: bool) -> dict:
         else:
             cl = [str(c) for c in cl if str(c) in known_clients]
             if not cl:
-                raise AuthError("отметьте хотя бы одного клиента (или «все клиенты»)")
+                raise AuthError("выберите клиента сотрудника")
             out["clients"] = sorted(set(cl))
     if "active" in data:
         out["active"] = 1 if data.get("active") else 0
@@ -280,10 +289,27 @@ def _clean(data: dict, known_clients: set[str], creating: bool) -> dict:
     return out
 
 
+def _one_client(role: str, clients: list[str]) -> list[str]:
+    """Администратор сайта — все клиенты; остальные — ровно один клиент (0.12.0)."""
+    if role == "admin":
+        return ["*"]
+    if clients == ["*"] or len(clients) != 1:
+        raise AuthError("выберите клиента сотрудника: сотрудник работает с одним клиентом "
+                        "(со всеми — только администратор сайта)")
+    return clients
+
+
+def client_of(user: dict | None) -> str | None:
+    """Клиент сотрудника (None — администратор сайта или учётная запись без одного клиента, как до 0.12.0)."""
+    cl = (user or {}).get("clients") or []
+    return cl[0] if len(cl) == 1 and cl[0] != "*" else None
+
+
 def create_user(data: dict, actor: dict | None, known_clients: set[str], ip: str = "") -> tuple[dict, str]:
     """Новая учётная запись. Пароль: data['password'] или временный (возвращается один раз, чтобы передать
     сотруднику). Возвращает (учётная запись, временный пароль или '')."""
     fields = _clean(data, known_clients, creating=True)
+    fields["clients"] = _one_client(fields["role"], fields["clients"])
     if find_user(fields["login"]):
         raise AuthError(f"логин «{fields['login']}» уже занят")
     given = str(data.get("password") or "")
@@ -316,6 +342,8 @@ def update_user(user_id: int, data: dict, actor: dict | None, known_clients: set
         other = find_user(fields["login"])
         if other and other["id"] != user_id:
             raise AuthError(f"логин «{fields['login']}» уже занят")
+    if "role" in fields or "clients" in fields:     # роль и клиент — вместе: один клиент или все (админ сайта)
+        fields["clients"] = _one_client(fields.get("role", user["role"]), fields.get("clients", user["clients"]))
     losing_admin = user["role"] == "admin" and user["active"] and (
         fields.get("role", "admin") != "admin" or fields.get("active", 1) == 0)
     if losing_admin and not _active_admins(exclude=user_id):
@@ -476,11 +504,19 @@ def event(actor: dict | None, user: dict | None, action: str, details: str = "",
                      user["id"] if user else None, (user or {}).get("login", ""), action, details[:500], ip))
 
 
-def events(limit: int = 200, user_id: int | None = None) -> list[dict]:
-    q, args = "SELECT * FROM user_events", []
+def events(limit: int = 200, user_id: int | None = None, among: set[int] | None = None) -> list[dict]:
+    """Журнал; among — только о сотрудниках из этого набора или сделанное ими (админ клиента видит своих)."""
+    q, args, where = "SELECT * FROM user_events", [], []
     if user_id:
-        q += " WHERE user_id=?"
+        where.append("user_id=?")
         args.append(user_id)
+    if among is not None:
+        ids = sorted(among) or [-1]
+        marks = ",".join("?" * len(ids))
+        where.append(f"(user_id IN ({marks}) OR actor_id IN ({marks}))")
+        args += ids + ids
+    if where:
+        q += " WHERE " + " AND ".join(where)
     with db.connect() as con:
         return [dict(r) for r in con.execute(q + " ORDER BY id DESC LIMIT ?", (*args, limit))]
 
@@ -506,7 +542,7 @@ def _diff_text(before: dict, changes: dict) -> str:
         if k == "role":
             parts.append(f"роль: {ROLES.get(before['role'], {}).get('title')} → {ROLES[v]['title']}")
         elif k == "clients":
-            parts.append(f"клиенты: {_clients_text(before['clients'])} → {_clients_text(v)}")
+            parts.append(f"клиент: {_clients_text(before['clients'])} → {_clients_text(v)}")
         elif k == "blocks_off":
             names = lambda keys: ", ".join(BLOCKS[b].split(" (")[0] for b in keys) or "нет"
             parts.append(f"выключенные разделы: {names(before.get('blocks_off') or [])} → {names(v)}")
@@ -526,11 +562,12 @@ def _diff_text(before: dict, changes: dict) -> str:
 DEMO_NOTE = "тестовая учётная запись (demo-users); удалить: python -m app.auth demo-users --delete"
 DEMO_USERS = [
     # логин, ФИО, роль, клиенты, временный пароль (сменить при первом входе)
-    ("test.admin", "Тест Администратор", "admin", ["*"], False),
-    ("test.tender", "Тест Тендерный специалист", "tender", ["*"], False),
-    ("test.buyer", "Тест Закупщик", "buyer", ["*"], False),
+    ("test.admin", "Тест Администратор сайта", "admin", ["*"], False),
+    ("test.cladmin", "Тест Администратор клиента", "client_admin", ["main"], False),
+    ("test.tender", "Тест Тендерный специалист", "tender", ["main"], False),
+    ("test.buyer", "Тест Закупщик", "buyer", ["main"], False),
     ("test.logist", "Тест Логист", "logist", ["main"], False),
-    ("test.viewer", "Тест Наблюдатель", "viewer", ["*"], False),
+    ("test.viewer", "Тест Наблюдатель", "viewer", ["main"], False),
     ("test.sargsyan", "Тест Сотрудник ИП Саргсян", "tender", ["sargsyan"], True),
 ]
 
@@ -544,7 +581,8 @@ def demo_users(known_clients: set[str], ip: str = "командная строк
     login, name, role, clients, password, must_change, state ('создана' / 'новый пароль' / 'логин занят')."""
     out = []
     for login_name, name, role, clients, temp in DEMO_USERS:
-        clients = clients if clients == ["*"] else ([c for c in clients if c in known_clients] or ["*"])
+        clients = clients if clients == ["*"] else ([c for c in clients if c in known_clients]
+                                                    or sorted(known_clients)[:1] or ["*"])
         row = {"login": login_name, "name": name, "role": role, "clients": clients, "must_change": temp, "password": ""}
         user = find_user(login_name)
         if user and not _is_demo(user):

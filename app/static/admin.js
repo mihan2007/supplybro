@@ -1,4 +1,6 @@
-// Админ-панель учётных записей (/admin): первый администратор, вход, сотрудники, роли, журнал.
+// Админ-панель учётных записей (/admin): первый администратор, вход, клиенты и их сотрудники, роли, журнал.
+// 0.12.0: сотрудники сгруппированы по клиентам (каждый — в одном клиенте); администратор сайта видит всех клиентов
+// и администраторов сайта, администратор клиента — только сотрудников своего клиента.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -68,12 +70,20 @@ function clientsText(list) {
   return [...known, ...unknown].join(", ");
 }
 
+// Клиент сотрудника: id, если он ровно в одном известном клиенте; иначе "" (заведён до 0.12.0).
+function clientOf(u) {
+  const list = (u && u.clients) || [];
+  return list.length === 1 && list[0] !== "*" && (st.clients || []).some((c) => c.id === list[0]) ? list[0] : "";
+}
+function clientName(id) { return ((st.clients || []).find((c) => c.id === id) || {}).name || id; }
+
 // ---------- какой экран показать ----------
 
 function show(view) {
   for (const v of ["v-setup", "v-login", "v-change", "v-main"]) $(v).hidden = v !== view;
   const me = st && st.me;
-  $("me-name").textContent = me && view === "v-main" ? `${me.name} · ${me.role_title}` : "";
+  const where = st && st.scope ? " · " + clientName(st.scope) : "";
+  $("me-name").textContent = me && view === "v-main" ? `${me.name} · ${me.role_title}${where}` : "";
   $("me-pass").hidden = $("logout").hidden = !(me && view === "v-main");
 }
 
@@ -88,11 +98,20 @@ async function boot() {
   if (!st.has_users) return showSetup();
   if (!st.me) return showLogin();
   if (st.me.must_change) return showChange(true);
-  if (st.me.role !== "admin") {
+  if (!st.site_admin && st.me.role !== "client_admin") {
     showLogin();
     setStatus("l-status", "У этой учётной записи нет прав администратора — войдите администратором.", true);
     return;
   }
+  if (!st.site_admin && !st.scope) {
+    showLogin();
+    setStatus("l-status", "Администратору клиента не назначен клиент — обратитесь к администратору сайта.", true);
+    return;
+  }
+  $("users-tab-title").textContent = st.site_admin ? "Клиенты и сотрудники" : "Сотрудники";
+  $("u-intro").textContent = st.site_admin
+    ? "Клиенты — из списка клиентов сайта (новых добавляет Claude). Каждый сотрудник работает в одном клиенте."
+    : `Сотрудники клиента «${clientName(st.scope)}»: добавляйте, меняйте роль и разделы, сбрасывайте пароль.`;
   show("v-main");
   showTab(tab);
 }
@@ -192,28 +211,71 @@ function statePills(u) {
   return out;
 }
 
+// Группы: «Администраторы сайта» (только администратору сайта), по одной на клиента, «Без клиента» — учётные записи,
+// заведённые до 0.12.0 со всеми / несколькими клиентами (только администратору сайта, если такие есть).
+function groupsOf() {
+  const out = [];
+  if (st.site_admin) {
+    out.push({ key: "@admins", title: "Администраторы сайта", sub: "все клиенты и вся админ-панель", preset: { role: "admin" },
+      add: "+ Администратор сайта", users: users.filter((u) => u.role === "admin") });
+  }
+  for (const c of st.clients || []) {
+    out.push({ key: c.id, title: c.name, sub: c.folder ? `папка конкурсов «${c.folder}»` : "", preset: { client: c.id },
+      add: "+ Сотрудник", users: users.filter((u) => u.role !== "admin" && clientOf(u) === c.id) });
+  }
+  if (st.site_admin) {
+    const rest = users.filter((u) => u.role !== "admin" && !clientOf(u));
+    if (rest.length) {
+      out.push({ key: "@none", title: "Без клиента", legacy: true, users: rest,
+        sub: "заведены до разделения по клиентам — откройте карточку и выберите сотруднику одного клиента" });
+    }
+  }
+  return out;
+}
+
+function userRow(u, legacy) {
+  const tr = el("tr", { title: "Открыть карточку", "data-login": u.login },
+    el("td", {}, el("div", { class: "u-name", text: u.name }), el("div", { class: "u-login", text: u.login + (st.me && u.id === st.me.id ? " · это вы" : "") })),
+    el("td", {}, el("span", { class: "pill" + (u.role === "admin" || u.role === "client_admin" ? " role-admin" : ""), text: u.role_title }),
+      ...(legacy ? [el("div", { class: "u-login", text: "клиенты: " + clientsText(u.clients) })] : []),
+      ...(blocksText(u.blocks_off) ? [el("div", { class: "u-login", text: blocksText(u.blocks_off) })] : [])),
+    el("td", {}, ...statePills(u)),
+    el("td", { text: when(u.last_login_at) }),
+    el("td", { text: [u.email, u.phone].filter(Boolean).join("\n") || "—" }));
+  tr.addEventListener("click", () => openEditor(u));
+  return tr;
+}
+
 function renderUsers() {
   const q = $("u-search").value.trim().toLowerCase();
   const f = $("u-filter").value;
-  const list = users.filter((u) => (f === "all" || (f === "active" ? u.active : !u.active)) &&
-    (!q || [u.name, u.login, u.email, u.phone, u.note].join(" ").toLowerCase().includes(q)));
+  const fit = (u) => (f === "all" || (f === "active" ? u.active : !u.active)) &&
+    (!q || [u.name, u.login, u.email, u.phone, u.note].join(" ").toLowerCase().includes(q));
   $("users-count").textContent = users.length ? `(${users.length})` : "";
-  const head = el("tr", {}, ...["Сотрудник", "Роль", "Клиенты", "Состояние", "Последний вход", "Контакты"].map((t) => el("th", { text: t })));
-  const body = el("tbody");
-  for (const u of list) {
-    const tr = el("tr", { title: "Открыть карточку" },
-      el("td", {}, el("div", { class: "u-name", text: u.name }), el("div", { class: "u-login", text: u.login + (st.me && u.id === st.me.id ? " · это вы" : "") })),
-      el("td", {}, el("span", { class: "pill" + (u.role === "admin" ? " role-admin" : ""), text: u.role_title }),
-        ...(blocksText(u.blocks_off) ? [el("div", { class: "u-login", text: blocksText(u.blocks_off) })] : [])),
-      el("td", { text: clientsText(u.clients) }),
-      el("td", {}, ...statePills(u)),
-      el("td", { text: when(u.last_login_at) }),
-      el("td", { text: [u.email, u.phone].filter(Boolean).join("\n") || "—" }));
-    tr.addEventListener("click", () => openEditor(u));
-    body.append(tr);
+  const blocks = [];
+  for (const g of groupsOf()) {
+    const list = g.users.filter(fit);
+    if ((q || f !== "all") && !list.length) continue;          // при поиске пустые клиенты не показываем
+    const head = el("div", { class: "g-head" },
+      el("div", {}, el("h3", { text: g.title }),
+        el("div", { class: "g-sub", text: [g.sub, `сотрудников: ${g.users.length}`].filter(Boolean).join(" · ") })));
+    if (g.add && st.site_admin) {                            // администратору клиента хватает «+ Новый сотрудник»
+      const b = el("button", { class: "btn small", type: "button", text: g.add, "data-add": g.key });
+      b.addEventListener("click", () => openEditor(null, g.preset));
+      head.append(b);
+    }
+    const box = el("div", { class: "u-group" + (g.legacy ? " legacy" : ""), "data-group": g.key }, head);
+    if (list.length) {
+      const th = el("tr", {}, ...["Сотрудник", "Роль", "Состояние", "Последний вход", "Контакты"].map((t) => el("th", { text: t })));
+      box.append(el("div", { class: "table-wrap" }, el("table", { class: "users" }, el("thead", {}, th),
+        el("tbody", {}, ...list.map((u) => userRow(u, g.legacy))))));
+    } else {
+      box.append(el("div", { class: "g-empty", text: "Сотрудников пока нет." }));
+    }
+    blocks.push(box);
   }
-  if (!list.length) body.append(el("tr", {}, el("td", { colspan: "6", class: "muted", text: users.length ? "Никого не нашлось." : "Сотрудников пока нет." })));
-  $("u-table").replaceChildren(el("thead", {}, head), body);
+  if (!blocks.length) blocks.push(el("div", { class: "g-empty", text: "Никого не нашлось." }));
+  $("u-groups").replaceChildren(...blocks);
 }
 $("u-search").addEventListener("input", renderUsers);
 $("u-filter").addEventListener("change", renderUsers);
@@ -254,24 +316,36 @@ async function loadEvents() {
 
 // ---------- карточка сотрудника ----------
 
-function fillRoles(value) {
-  $("ed-role").replaceChildren(...Object.entries(st.roles).map(([id, r]) => el("option", { value: id, text: r.title })));
+function fillRoles(value, self) {
+  const ids = (st.assignable_roles || Object.keys(st.roles)).filter((id) => st.roles[id]);
+  if (value && !ids.includes(value)) ids.unshift(value);
+  $("ed-role").replaceChildren(...ids.map((id) => el("option", { value: id, text: st.roles[id].title })));
   $("ed-role").value = value || "tender";
+  $("ed-role").disabled = Boolean(self);                    // свою роль не меняют (иначе можно остаться без админа)
+  $("ed-role").title = self ? "Свою роль поменять нельзя — попросите другого администратора" : "";
   roleText();
 }
-function roleText() { $("ed-role-text").textContent = (st.roles[$("ed-role").value] || {}).text || ""; }
+function roleText() {
+  $("ed-role-text").textContent = (st.roles[$("ed-role").value] || {}).text || "";
+  // Администратор сайта работает со всеми клиентами — выбор клиента ему не нужен.
+  const site = $("ed-role").value === "admin";
+  $("ed-client-box").hidden = site;
+  $("ed-client-text").textContent = site ? "Администратор сайта работает со всеми клиентами." :
+    st.site_admin ? "Сотрудник видит конкурсы, документы и NocoDB только этого клиента." : "";
+}
 $("ed-role").addEventListener("change", roleText);
 
-function fillClients(list) {
-  const all = !list || list[0] === "*";
-  $("ed-all").checked = all;
-  $("ed-clients").replaceChildren(...st.clients.map((c) => el("label", { class: "check" },
-    el("input", { type: "checkbox", value: c.id, checked: all || list.includes(c.id) ? "" : null, disabled: all ? "" : null }), c.name)));
+// Клиент сотрудника (0.12.0): один. Администратору клиента — только свой, менять нельзя.
+function fillClient(value, legacyList) {
+  const opts = [];
+  if (st.site_admin && !value) {
+    opts.push(el("option", { value: "", text: legacyList ? `— выберите клиента (сейчас: ${clientsText(legacyList)}) —` : "— выберите клиента —" }));
+  }
+  for (const c of st.clients || []) opts.push(el("option", { value: c.id, text: c.name }));
+  $("ed-client").replaceChildren(...opts);
+  $("ed-client").value = st.site_admin ? (value || "") : (st.scope || "");
+  $("ed-client").disabled = !st.site_admin;
 }
-$("ed-all").addEventListener("change", () => {
-  // «Все» сняли — отметки тоже снимаются: дальше отмечаются только нужные клиенты.
-  for (const cb of $("ed-clients").querySelectorAll("input")) { cb.disabled = $("ed-all").checked; cb.checked = $("ed-all").checked; }
-});
 for (const r of document.querySelectorAll("input[name=pw]")) {
   r.addEventListener("change", () => { $("ed-pass").hidden = document.querySelector("input[name=pw]:checked").value !== "set"; });
 }
@@ -288,16 +362,19 @@ function blocksText(off) {
   return names.length ? "выключено: " + names.join(", ") : "";
 }
 
-function openEditor(u) {
+function openEditor(u, preset) {
   editing = u || null;
-  $("ed-title").textContent = u ? u.name : "Новый сотрудник";
+  preset = preset || {};
+  const self = Boolean(u && st.me && u.id === st.me.id);
+  $("ed-title").textContent = u ? u.name : preset.role === "admin" ? "Новый администратор сайта" :
+    preset.client || !st.site_admin ? `Новый сотрудник · ${clientName(preset.client || st.scope)}` : "Новый сотрудник";
   $("ed-name").value = u ? u.name : "";
   $("ed-login").value = u ? u.login : "";
   $("ed-email").value = u ? u.email : "";
   $("ed-phone").value = u ? u.phone : "";
   $("ed-note").value = u ? u.note : "";
-  fillRoles(u ? u.role : "tender");
-  fillClients(u ? u.clients : ["*"]);
+  fillClient(u ? clientOf(u) : (preset.client || ""), u && !clientOf(u) && u.role !== "admin" ? u.clients : null);
+  fillRoles(u ? u.role : (preset.role || "tender"), self);
   fillBlocks(u ? u.blocks_off : []);
   $("ed-pass-box").hidden = Boolean(u);
   document.querySelector("input[name=pw][value=temp]").checked = true;
@@ -314,16 +391,22 @@ function openEditor(u) {
 }
 
 function formData() {
-  const all = $("ed-all").checked;
-  const clients = all ? ["*"] : [...$("ed-clients").querySelectorAll("input:checked")].map((cb) => cb.value);
+  const role = $("ed-role").value;
+  const client = st.site_admin ? $("ed-client").value : st.scope;
+  const clients = role === "admin" ? ["*"] : client ? [client] : [];
   const blocks_off = [...$("ed-blocks").querySelectorAll("input")].filter((cb) => !cb.checked).map((cb) => cb.value);
   return { name: $("ed-name").value, login: $("ed-login").value, email: $("ed-email").value, phone: $("ed-phone").value,
-    role: $("ed-role").value, clients, note: $("ed-note").value, blocks_off };
+    role, clients, note: $("ed-note").value, blocks_off };
 }
 
 $("ed-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const data = formData();
+  if (!data.clients.length) {
+    setStatus("ed-status", "Выберите клиента: сотрудник работает с одним клиентом (со всеми — только администратор сайта).", true);
+    $("ed-client").focus();
+    return;
+  }
   try {
     if (editing) {
       const r = await guarded(() => api(`/api/admin/users/${editing.id}`, "PATCH", data));
@@ -438,6 +521,6 @@ $("sec-copy").addEventListener("click", async () => {
 });
 $("sec-close").addEventListener("click", () => { $("secret").close(); $("sec-pass").textContent = ""; });
 
-$("u-new").addEventListener("click", () => openEditor(null));
+$("u-new").addEventListener("click", () => openEditor(null, st.site_admin ? {} : { client: st.scope }));
 
 boot();

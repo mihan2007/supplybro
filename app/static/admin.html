@@ -65,7 +65,7 @@
     <!-- Панель -->
     <div id="v-main" class="admin-main" hidden>
       <nav class="tabs" id="tabs">
-        <button type="button" data-tab="users" class="active">Сотрудники <span class="muted" id="users-count"></span></button>
+        <button type="button" data-tab="users" class="active"><span id="users-tab-title">Сотрудники</span> <span class="muted" id="users-count"></span></button>
         <button type="button" data-tab="roles">Роли и права</button>
         <button type="button" data-tab="events">Журнал</button>
       </nav>
@@ -84,13 +84,14 @@
           </div>
           <button class="btn primary" id="u-new" type="button">+ Новый сотрудник</button>
         </div>
-        <div class="table-wrap"><table class="users" id="u-table"></table></div>
+        <p class="muted u-intro" id="u-intro"></p>
+        <div class="u-groups" id="u-groups"></div>
         <p class="status" id="u-status"></p>
       </section>
 
       <section class="panel" id="t-roles" hidden>
-        <p class="muted">Что сможет делать сотрудник каждой роли, когда на сайте будет включён вход. Роль задаётся
-          в карточке сотрудника; «Представление» — какое представление «Реестра конкурсов» NocoDB открывать ему по умолчанию.</p>
+        <p class="muted">Что может делать сотрудник каждой роли. Роль задаётся в карточке сотрудника; «Представление» —
+          какое представление «Реестра конкурсов» NocoDB открывать ему по умолчанию.</p>
         <div class="table-wrap"><table class="roles" id="r-table"></table></div>
       </section>
 
@@ -116,11 +117,8 @@
       </div>
       <label class="field"><span class="label">Роль</span><select id="ed-role"></select></label>
       <p class="muted role-text" id="ed-role-text"></p>
-      <fieldset class="clients">
-        <legend class="label">Доступ к клиентам</legend>
-        <label class="check"><input type="checkbox" id="ed-all"> все клиенты (и новые тоже)</label>
-        <div id="ed-clients"></div>
-      </fieldset>
+      <label class="field" id="ed-client-box"><span class="label">Клиент</span><select id="ed-client"></select></label>
+      <p class="muted role-text" id="ed-client-text"></p>
       <fieldset class="clients">
         <legend class="label">Разделы на странице конкурса</legend>
         <p class="muted role-text">Снимите галочку — раздел у этого сотрудника не показывается, и сайт не отдаёт его данные.</p>
@@ -136,7 +134,7 @@
         </fieldset>
       </div>
       <label class="field"><span class="label">Заметка</span><textarea id="ed-note" rows="2"
-        placeholder="например: отдел закупок, работает с ИП Саргсян"></textarea></label>
+        placeholder="например: отдел закупок, ведёт конкурсы по медицине"></textarea></label>
       <p class="status" id="ed-status"></p>
       <div class="row-actions">
         <button class="btn primary" type="submit" id="ed-save">Создать</button>

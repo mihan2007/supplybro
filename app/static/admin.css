@@ -52,7 +52,21 @@ dialog form { display: grid; gap: 12px; }
 @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
 fieldset.clients { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 10px; margin: 0; display: grid; gap: 6px; }
 fieldset.clients legend { padding: 0 4px; }
-#ed-clients { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px 12px; }
+/* Клиенты и их сотрудники (0.12.0) */
+.u-intro { margin: 0 0 4px; font-size: 13px; }
+.u-intro:empty { display: none; }
+.u-groups { display: grid; gap: 16px; }
+.u-group { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.u-group.legacy { border-color: color-mix(in srgb, var(--warn-text) 35%, var(--line)); }
+.g-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px;
+  background: var(--chip); flex-wrap: wrap; }
+.u-group.legacy .g-head { background: var(--warn-bg); }
+.g-head h3 { margin: 0; font-size: 15px; }
+.g-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.u-group.legacy .g-sub { color: var(--warn-text); }
+.u-group .table-wrap { border: 0; border-radius: 0; margin: 0; }
+.u-group table.users { margin: 0; }
+.g-empty { padding: 10px 14px; font-size: 13px; color: var(--muted); }
 #ed-blocks { display: grid; grid-template-columns: 1fr; gap: 4px; }   /* разделы страницы — столбиком (0.11.0) */
 .role-text { margin: -6px 0 0; font-size: 13px; }
 .ed-state { display: flex; gap: 6px; flex-wrap: wrap; }

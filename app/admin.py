@@ -45,21 +45,55 @@ def _guard(request: Request) -> None:
 
 
 def _admin(request: Request, change: bool = False) -> dict:
+    """Администратор сайта или администратор клиента (0.12.0) — у второго всё только в пределах своего клиента."""
     if change:
         _guard(request)
     me = _me(request)
     if not me:
         raise HTTPException(401, "войдите в админ-панель")
-    if me["role"] != "admin":
+    if me["role"] not in auth.MANAGER_ROLES:
         raise HTTPException(403, "у этой учётной записи нет прав администратора")
     if me["must_change"]:
         raise HTTPException(403, "сначала смените временный пароль")
+    if me["role"] == "client_admin" and not auth.client_of(me):
+        raise HTTPException(403, "администратору клиента не назначен клиент — обратитесь к администратору сайта")
     return me
+
+
+def _scope(me: dict) -> str | None:
+    """Чей клиент: None — администратор сайта (все), иначе id клиента администратора клиента."""
+    return None if me["role"] == "admin" else auth.client_of(me)
+
+
+def _in_scope(me: dict, user: dict | None) -> bool:
+    sc = _scope(me)
+    return bool(user) and (sc is None or (user["role"] != "admin" and user["clients"] == [sc]))
+
+
+def _target(me: dict, user_id: int) -> dict:
+    user = auth.get_user(user_id)
+    if not _in_scope(me, user):
+        raise HTTPException(404, "сотрудник не найден")
+    return user
+
+
+def _scoped_data(me: dict, data: dict, target: dict | None = None) -> dict:
+    """Администратор клиента: клиент — всегда свой, роль «администратор сайта» назначить нельзя, свою роль — менять нельзя."""
+    sc = _scope(me)
+    if target and target["id"] == me["id"] and "role" in data and data["role"] != me["role"]:
+        raise HTTPException(400, "свою роль поменять нельзя — попросите другого администратора")
+    if sc is None:
+        return data
+    if data.get("role") == "admin":
+        raise HTTPException(403, "назначить администратора сайта может только администратор сайта")
+    if "clients" in data or target is None:
+        data["clients"] = [sc]
+    return data
 
 
 def _clients() -> list[dict]:
     try:
-        return [{"id": c.id, "name": c.name} for c in load_clients().values()]
+        return [{"id": c.id, "name": c.name, "folder": c.tenders_folder} for c in load_clients().values()]
     except Exception:
         return []
 
@@ -92,10 +126,18 @@ def admin_page():
 @router.get("/api/admin/state")
 def state(request: Request):
     me = _me(request)
+    site = bool(me) and me["role"] == "admin"
+    sc = auth.client_of(me) if me and me["role"] == "client_admin" else None
+    clients = _clients()
+    if me and not site:
+        clients = [c for c in clients if c["id"] == sc]
     return {"has_users": auth.count_users() > 0, "me": auth.public(me),
             "roles": auth.ROLES, "permissions": auth.PERMISSIONS,
             "role_permissions": {k: sorted(v) for k, v in auth.ROLE_PERMISSIONS.items()}, "blocks": auth.BLOCKS,
-            "clients": _clients(), "min_password": auth.MIN_PASSWORD, "login_required": _login_required()}
+            "clients": clients, "min_password": auth.MIN_PASSWORD, "login_required": _login_required(),
+            # 0.12.0: администратор сайта — все клиенты; администратор клиента — только свой, без админов сайта.
+            "site_admin": site, "scope": sc,
+            "assignable_roles": [r for r in auth.ROLES if site or r != "admin"]}
 
 
 def _login_required() -> bool:
@@ -154,14 +196,16 @@ def my_password(request: Request, data: dict = Body(...)):
 
 @router.get("/api/admin/users")
 def users(request: Request):
-    _admin(request)
+    me = _admin(request)
     sessions = auth.sessions_count()
-    return {"users": [{**auth.public(u), "sessions": sessions.get(u["id"], 0)} for u in auth.list_users()]}
+    return {"users": [{**auth.public(u), "sessions": sessions.get(u["id"], 0)} for u in auth.list_users()
+                      if _in_scope(me, u)]}
 
 
 @router.post("/api/admin/users")
 def create(request: Request, data: dict = Body(...)):
     me = _admin(request, change=True)
+    data = _scoped_data(me, dict(data))
     user, pw = _wrap(lambda: auth.create_user(data, me, _known(), _ip(request)))
     return {"user": auth.public(user), "temp_password": pw}
 
@@ -169,14 +213,17 @@ def create(request: Request, data: dict = Body(...)):
 @router.patch("/api/admin/users/{user_id}")
 def update(request: Request, user_id: int, data: dict = Body(...)):
     me = _admin(request, change=True)
+    target = _target(me, user_id)
     data = {k: v for k, v in data.items()
             if k in ("login", "name", "email", "phone", "role", "clients", "active", "note", "blocks_off")}
+    data = _scoped_data(me, data, target)
     return {"user": auth.public(_wrap(lambda: auth.update_user(user_id, data, me, _known(), _ip(request))))}
 
 
 @router.post("/api/admin/users/{user_id}/reset-password")
 def reset(request: Request, user_id: int):
     me = _admin(request, change=True)
+    _target(me, user_id)
     return {"temp_password": _wrap(lambda: auth.reset_password(user_id, me, _ip(request))),
             "user": auth.public(auth.get_user(user_id))}
 
@@ -184,6 +231,7 @@ def reset(request: Request, user_id: int):
 @router.post("/api/admin/users/{user_id}/end-sessions")
 def end_sessions(request: Request, user_id: int):
     me = _admin(request, change=True)
+    _target(me, user_id)
     keep = _token(request) if user_id == me["id"] else None
     return {"closed": auth.end_sessions(user_id, me, _ip(request), keep_token=keep)}
 
@@ -191,6 +239,7 @@ def end_sessions(request: Request, user_id: int):
 @router.post("/api/admin/users/{user_id}/unlock")
 def unlock(request: Request, user_id: int):
     me = _admin(request, change=True)
+    _target(me, user_id)
     auth.unlock(user_id, me, _ip(request))
     return {"user": auth.public(auth.get_user(user_id))}
 
@@ -198,11 +247,15 @@ def unlock(request: Request, user_id: int):
 @router.delete("/api/admin/users/{user_id}")
 def delete(request: Request, user_id: int):
     me = _admin(request, change=True)
+    _target(me, user_id)
     _wrap(lambda: auth.delete_user(user_id, me, _ip(request)))
     return {"ok": True}
 
 
 @router.get("/api/admin/events")
 def events(request: Request, user_id: int | None = None, limit: int = 200):
-    _admin(request)
-    return {"events": auth.events(min(max(limit, 1), 1000), user_id)}
+    me = _admin(request)
+    if user_id:
+        _target(me, user_id)
+    among = None if _scope(me) is None else {u["id"] for u in auth.list_users() if _in_scope(me, u)}
+    return {"events": auth.events(min(max(limit, 1), 1000), user_id, among)}
