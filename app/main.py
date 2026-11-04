@@ -20,10 +20,11 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import chat, db
+from . import access, chat, db, price_summary, pricelists
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
-from .analysis.run import ANALYSIS_MODELS, CLAUDE_MODEL, load_result
+from .analysis import changes
+from .analysis.run import ANALYSIS_MODELS, CLAUDE_MODEL, MSK, load_result
 from .docs.names import fix_path
 from .docs.pipeline import ARCHIVE_EXT, walk_docs
 from .nocodb import NocoClient, NocoError
@@ -54,26 +55,24 @@ TABLE_ID_RE = re.compile(r"/(m[a-z0-9]{8,})(?:/|$|\?)")
 app = FastAPI(title="SupplyBro", version=APP_VERSION)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
-# Админ-панель учётных записей (/admin) — только при ADMIN_PANEL=1 в .env; по умолчанию выключена,
-# вход на сам сайт пока не требуется (app/admin.py, app/auth.py).
-ADMIN_PANEL = os.environ.get("ADMIN_PANEL", "0").strip().lower() in ("1", "true", "yes", "on")
+# Вход на сайт (0.7.0, app/access.py): при LOGIN_REQUIRED=1 без входа сайт не открывается, сотрудник видит только своих
+# клиентов и делает только то, что разрешает его роль. Тогда админ-панель, страница сотрудника и страница входа включены
+# всегда; при LOGIN_REQUIRED=0 — по своим настройкам, как раньше:
+# - админ-панель учётных записей (/admin) — ADMIN_PANEL (app/admin.py, app/auth.py);
+# - страница сотрудника (/user) — та же страница, что «/» (страница администратора), но без выбора модели анализа,
+#   модели чата и поисковика цен — USER_PAGE (решение пользователя 29.10.2026);
+# - страница входа (/login) — LOGIN_PAGE (app/login.py).
+ADMIN_PANEL, USER_PAGE, LOGIN_PAGE = access.ADMIN_PANEL, access.USER_PAGE, access.LOGIN_PAGE
 if ADMIN_PANEL:
     from . import admin
     app.include_router(admin.router)
-
-# Страница сотрудника (/user) — та же страница, что «/» (страница администратора), но без выбора модели анализа,
-# модели чата и поисковика цен. Только при USER_PAGE=1 в .env; по умолчанию выключена (решение пользователя
-# 29.10.2026 «сгенерируй, но пока не подключай»). Вход по логину ещё не требуется — при подключении входа сотрудникам
-# (не admin) открывать /user, а сервер должен сам не принимать от них model / engine.
-USER_PAGE = os.environ.get("USER_PAGE", "0").strip().lower() in ("1", "true", "yes", "on")
-
-# Страница входа (/login) — проверка логина и пароля сотрудников (те же учётные записи, что в админ-панели).
-# Только при LOGIN_PAGE=1 в .env; по умолчанию выключена (решение пользователя 31.10.2026 «пока не подключай, нужно
-# просто проверить»). Сам сайт вход пока не требует (app/login.py).
-LOGIN_PAGE = os.environ.get("LOGIN_PAGE", "0").strip().lower() in ("1", "true", "yes", "on")
 if LOGIN_PAGE:
     from . import login
     app.include_router(login.router)
+if access.LOGIN_REQUIRED:
+    from . import auth
+    auth.init()
+    app.add_middleware(access.LoginMiddleware)
 
 
 db.init()
@@ -209,12 +208,13 @@ def api_clients():
         clients = load_clients()
     except Exception as exc:
         raise HTTPException(500, f"не удалось прочитать config/clients.json: {exc}")
+    user = access.current_user()
     return {
         "version": APP_VERSION,
         "clients": [
             {"id": c.id, "name": c.name,
              "entities": [{"id": e.id, "name": e.name, "inn": e.inn} for e in c.legal_entities]}
-            for c in clients.values()
+            for c in clients.values() if access.can_client(user, c.id)
         ],
     }
 
@@ -411,13 +411,28 @@ def api_docs(client_id: str, folder: str):
             "has_text": bool((r or {}).get("text_path")),
         })
     job = job_view(db.latest_job(client.id, folder))
+    result = load_result(base)
     return {
         "folder": folder,
         "display_path": f"{TENDERS_DISPLAY}\\{client.tenders_folder}\\{folder}",
         "targets": DOC_SUBFOLDERS,
+        # Конкурс уже разобран (0.9.0): новые файлы — изменения / разъяснения, по умолчанию в «Изменения <сегодня>».
+        "has_analysis": bool(result and result.get("fields")),
+        "changes_target": {"value": changes.UPLOAD_TARGET, "folder": changes.folder_name_for(_today())},
         "files": files,
         "job": job,
     }
+
+
+def _today() -> str:
+    from datetime import datetime
+    return datetime.now(MSK).strftime("%d.%m.%Y")
+
+
+def _changes_flow(client: Client, folder: str, base: Path) -> bool:
+    """Новые документы — изменения уже разобранного конкурса (или анализ ещё идёт: разбор сравнит с его итогом)."""
+    result = load_result(base)
+    return bool(result and result.get("fields")) or bool(db.active_job(client.id, folder, "analyze"))
 
 
 def _unique(path: Path) -> Path:
@@ -436,7 +451,9 @@ async def api_upload(client_id: str, folder: str, target: str = DOC_SUBFOLDERS[0
     """Загрузка файлов в подпапку конкурса и постановка обработки в очередь."""
     client = get_client(client_id)
     base = folder_path(client, folder)
-    if target not in DOC_SUBFOLDERS:
+    if target == changes.UPLOAD_TARGET:
+        target = changes.folder_name_for(_today())         # «Изменения 04.11.2026» — дозагрузка в разобранный конкурс
+    elif target not in DOC_SUBFOLDERS:
         raise FolderError(f"нельзя загружать в «{target}»")
     dest_dir = base / target
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -448,9 +465,16 @@ async def api_upload(client_id: str, folder: str, target: str = DOC_SUBFOLDERS[0
             while chunk := await upload.read(1 << 20):
                 out.write(chunk)
         saved.append(fix_path(dest.relative_to(base).as_posix()))
-    # Загрузка через сайт — полный автомат: подготовка документов, затем анализ и запись в NocoDB.
-    job_id = db.enqueue(client.id, folder, "prepare", {"analyze": True} if AUTO_ANALYZE else None)
-    return {"saved": saved, "job_id": job_id, "auto_analyze": AUTO_ANALYZE}
+    # Загрузка через сайт — полный автомат: подготовка документов, затем анализ и запись в NocoDB. Конкурс уже
+    # разобран — вместо повторного анализа разбор изменений: что поменялось, обновить данные, комментарии (0.9.0).
+    is_changes = _changes_flow(client, folder, base)
+    params = None
+    if AUTO_ANALYZE:
+        user = access.current_user() or {}
+        params = {"changes": True, "by": user.get("login") or ""} if is_changes else {"analyze": True}
+    job_id = db.enqueue(client.id, folder, "prepare", params)
+    return {"saved": saved, "job_id": job_id, "auto_analyze": AUTO_ANALYZE, "changes": is_changes,
+            "target": target}
 
 
 @app.post("/api/clients/{client_id}/docs/process")
@@ -511,7 +535,7 @@ def api_analysis(client_id: str, folder: str):
     base = folder_path(client, folder)
     result = load_result(base)
     fingerprint, docs_with_text = _docs_fingerprint(client.id, folder)
-    job = job_view(db.latest_job(client.id, folder, ("analyze", "noco")))
+    job = job_view(db.latest_job(client.id, folder, ("analyze", "noco", "changes", "noco_changes")))
     if result and result.get("usage"):
         result["usage"].pop("calls", None)  # подробный журнал вызовов — только в файле
     return {
@@ -519,6 +543,11 @@ def api_analysis(client_id: str, folder: str):
         "job": job,
         "docs_with_text": docs_with_text,
         "stale": bool(result) and result.get("corpus_hash") != fingerprint,
+        # Изменения документации (0.9.0): журнал разборов и документы, появившиеся после анализа.
+        "changes": list(reversed(changes.load_log(base)["sets"])) if result else [],
+        "new_docs": changes.new_doc_names(client.id, folder, result),
+        "changes_active": bool(db.active_job(client.id, folder, "changes")),
+        "changes_write_active": bool(db.active_job(client.id, folder, "noco_changes")),
         "prepare_active": bool(db.active_job(client.id, folder, "prepare")),
         "auto_analyze": AUTO_ANALYZE,
         "auto_prices": AUTO_PRICES,
@@ -538,11 +567,44 @@ def api_analysis_run(client_id: str, folder: str, model: str | None = None):
     running = db.active_job(client.id, folder, "analyze")
     if running:       # уже идёт (запущен из другой вкладки или раньше) — второй анализ не ставим
         return {"job_id": running["id"], "already": True}
+    if not access.is_admin():
+        model = None          # сотрудник модель не выбирает — настройка сайта
     params = {"model": model} if model in ANALYSIS_MODELS else {}
     if db.active_job(client.id, folder, "prepare"):
         # Документы ещё готовятся — анализ встанет в очередь сразу после подготовки.
         return {"job_id": db.enqueue(client.id, folder, "prepare", {"analyze": True, **params}), "after_prepare": True}
     return {"job_id": db.enqueue(client.id, folder, "analyze", params)}
+
+
+@app.post("/api/clients/{client_id}/analysis/changes/run")
+def api_changes_run(client_id: str, folder: str):
+    """Разобрать документы, появившиеся после анализа: что изменилось, обновить данные, комментарии (0.9.0)."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    result = load_result(base)
+    if not (result and result.get("fields")):
+        raise HTTPException(400, "анализа ещё нет — запустите анализ, новые документы войдут в него")
+    running = db.active_job(client.id, folder, "changes")
+    if running:
+        return {"job_id": running["id"], "already": True}
+    user = access.current_user() or {}
+    # Сначала подготовка (обрабатывает только новые и изменённые файлы — секунды): файлы могли положить в папку
+    # вручную, мимо сайта; разбор изменений встанет следом.
+    params = {"changes": True, "by": user.get("login") or ""}
+    return {"job_id": db.enqueue(client.id, folder, "prepare", params), "after_prepare": True}
+
+
+@app.post("/api/clients/{client_id}/analysis/changes/write")
+def api_changes_write(client_id: str, folder: str, change: str):
+    """Записать изменения (один разбор) в NocoDB: только изменённые поля и строки спецификации."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    user = access.current_user() or {}
+    try:
+        changes.request_write(base, change, user.get("login") or "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"job_id": db.enqueue(client.id, folder, "noco_changes")}
 
 
 @app.post("/api/clients/{client_id}/analysis/save")
@@ -568,7 +630,7 @@ def api_jobs(client_id: str):
     lanes = db.lanes_state()
     active = db.active_jobs()
     out_lanes = []
-    for lane in ("docs", "nocodb", "prices"):
+    for lane in ("docs", "nocodb", "prices", "pricelists"):
         beat = lanes.get(lane) or {}
         running = next((a for a in active if a["status"] == "running" and db.LANES.get(a["kind"], "docs") == lane), None)
         out_lanes.append({"lane": lane, "title": db.LANE_TITLES[lane],
@@ -675,9 +737,96 @@ def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bo
         return {"job_id": running["id"], "already": True}
     from .prices import run as prices
     params = {"urgent": bool(urgent), "abroad": bool(abroad)}
-    if engine in prices.ENGINES:
+    if engine in prices.ENGINES and access.is_admin():      # сотрудник поисковик не выбирает
         params["engine"] = engine
     return {"job_id": db.enqueue(client.id, folder, "prices", params)}
+
+
+# ---------- прайсы, КП и счета поставщиков (0.8.0, app/pricelists.py) ----------
+
+def _pricelist_job_views(client: Client, folder: str) -> dict:
+    return {"job": job_view(db.latest_job(client.id, folder, ("pricelist",))),
+            "write_job": job_view(db.latest_job(client.id, folder, ("noco_purch",)))}
+
+
+@app.get("/api/clients/{client_id}/pricelists")
+def api_pricelists(client_id: str, folder: str):
+    """Загруженные прайсы конкурса: разбор, найденные позиции и цены, запись в NocoDB."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    result = load_result(base) or {}
+    return {"files": pricelists.load(base)["files"], "has_analysis": bool(result.get("positions")),
+            "positions": len(result.get("positions") or []), "extensions": sorted(pricelists.EXTENSIONS),
+            "model": pricelists.MODEL, **_pricelist_job_views(client, folder)}
+
+
+@app.post("/api/clients/{client_id}/pricelists/upload")
+async def api_pricelists_upload(client_id: str, folder: str, files: list[UploadFile] = File(...)):
+    """Прайс / КП / счёт поставщика из чата: в «Прайсы, счета, КП» конкурса и в очередь на разбор."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    dest_dir = pricelists.price_dir(base)
+    saved = []
+    for upload in files:
+        name = safe_name(Path(upload.filename or "").name) or "прайс"
+        if Path(name).suffix.lower() not in pricelists.EXTENSIONS:
+            raise HTTPException(400, f"«{name}»: такие файлы не читаются — нужен Excel, Word, PDF или картинка")
+        dest = _unique(dest_dir / name)
+        size = 0
+        with open(dest, "wb") as out:
+            while chunk := await upload.read(1 << 20):
+                size += len(chunk)
+                if size > pricelists.MAX_FILE_MB * 1024 * 1024:
+                    out.close()
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(400, f"«{name}»: файл больше {pricelists.MAX_FILE_MB} МБ")
+                out.write(chunk)
+        saved.append(dest.relative_to(base).as_posix())
+    user = access.current_user()
+    added = pricelists.add_files(base, saved, (user or {}).get("login", ""))
+    job_id = db.enqueue(client.id, folder, "pricelist")
+    return {"files": added, "job_id": job_id}
+
+
+@app.post("/api/clients/{client_id}/pricelists/write")
+def api_pricelists_write(client_id: str, folder: str, data: dict = Body(...)):
+    """«Записать в спецификацию»: отмеченные позиции прайса — в колонки «Отдел закупок» спецификации NocoDB."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    user = access.current_user()
+    positions = [str(x) for x in (data.get("positions") or [])]
+    try:
+        entry = pricelists.request_write(base, str(data.get("file") or ""), positions, (user or {}).get("login", ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    job_id = db.enqueue(client.id, folder, "noco_purch")
+    return {"file": entry, "job_id": job_id}
+
+
+@app.post("/api/clients/{client_id}/pricelists/remove")
+def api_pricelists_remove(client_id: str, folder: str, data: dict = Body(...)):
+    """Убрать прайс из списка (файл остаётся в папке конкурса)."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    try:
+        pricelists.remove(base, str(data.get("file") or ""), (access.current_user() or {}).get("login", ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True}
+
+
+@app.get("/api/clients/{client_id}/prices/summary")
+async def api_prices_summary(client_id: str, folder: str, record: int | None = None):
+    """Общая таблица цен по позициям: НМЦ, интернет (проверенные и из выдачи — «не проверено»), поставщики (прайсы
+    и «Отдел закупок»), цены, уже записанные в спецификацию NocoDB (агент, рынки, рыночная цена, доставка), прошлые
+    конкурсы с тем же артикулом (своя база цен), лучшая цена. Анализа на сайте нет — позиции из спецификации NocoDB."""
+    import asyncio
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    spec, noco_error = await price_summary.read_spec(client, folder, record)
+    hist, hist_info = await asyncio.to_thread(price_summary.history_index, client)
+    data = await asyncio.to_thread(price_summary.build, base, spec, hist)
+    return {**data, "noco_error": noco_error, "noco_read": bool(spec), "history": hist_info}
 
 
 # ---------- чат по документации ----------
@@ -696,7 +845,7 @@ def api_chat_status(client_id: str, folder: str, model: str | None = None):
     """Готов ли чат и сколько стоит следующий вопрос: документы в кэше модели (до какого времени) или нет."""
     client = get_client(client_id)
     folder_path(client, folder)
-    return chat.cache_status(client.id, folder, model)
+    return chat.cache_status(client.id, folder, model if access.is_admin() else None)
 
 
 @app.post("/api/clients/{client_id}/chat")
@@ -704,7 +853,8 @@ def api_chat_ask(client_id: str, folder: str, data: dict = Body(...)):
     """Вопрос по документации. Ответ идёт по мере готовности: строки JSON ({"t":"text"…}, в конце {"t":"done"…})."""
     client = get_client(client_id)
     base = folder_path(client, folder)
-    gen = chat.ask(client.id, folder, base, str(data.get("question", "")), data.get("model"))
+    model = data.get("model") if access.is_admin() else None   # сотрудник модель чата не выбирает
+    gen = chat.ask(client.id, folder, base, str(data.get("question", "")), model)
     return StreamingResponse(gen, media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})
 
 

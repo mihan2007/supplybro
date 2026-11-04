@@ -23,7 +23,7 @@ const state = {
   nextNumber: "",
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0 };
 let docsTimer = null;
 let anTimer = null;
 let anLastJob = null;   // последняя увиденная задача анализа — чтобы заметить её окончание
@@ -42,11 +42,17 @@ function saveUrl() {
   history.replaceState(null, "", p.toString() ? "?" + p : location.pathname);
 }
 
+// Вход закончился (сеанс истёк, учётную запись заблокировали) — на страницу входа, потом обратно сюда.
+function toLogin() {
+  location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+}
+
 async function api(path, query = {}, options = {}) {
   const u = new URL(path, location.origin);
   for (const [k, v] of Object.entries(query)) if (v) u.searchParams.set(k, v);
   if (state.fresh) u.searchParams.set("fresh", "1");
   const r = await fetch(u, options);
+  if (r.status === 401) toLogin();
   let body = {};
   try { body = await r.json(); } catch (_) { /* ответ не JSON */ }
   if (!r.ok) throw new Error(body.detail || `ошибка ${r.status}`);
@@ -456,10 +462,17 @@ async function loadDocs() {
   $("docs-process").hidden = false;
   $("docs-path").textContent = "Папка: " + d.display_path;
   const target = $("upload-target");
-  if (!target.options.length || target._folder !== d.folder) {
-    fillSelect(target, d.targets.map((x) => ({ value: x, label: x })), d.targets[0]);
-    target._folder = d.folder;
+  const targetKey = d.folder + "|" + (d.has_analysis ? d.changes_target.folder : "");
+  if (!target.options.length || target._key !== targetKey) {
+    // Конкурс уже разобран (0.9.0): новые файлы — изменения / разъяснения, по умолчанию в «Изменения <сегодня>».
+    const opts = d.targets.map((x) => ({ value: x, label: x }));
+    if (d.has_analysis) opts.unshift({ value: d.changes_target.value, label: d.changes_target.folder + " (изменения)" });
+    fillSelect(target, opts, opts[0].value);
+    target._key = targetKey;
   }
+  $("drop").querySelector(".drop-main").textContent = d.has_analysis
+    ? "Перетащите сюда изменения, разъяснения или недостающие документы — сайт сравнит их с анализом и покажет, что изменилось"
+    : "Перетащите сюда файлы или архив";
   renderDocs(d.files);
   const active = renderJob(d.job);
   // Файлы положили в папку вручную (не через сайт) — запускаем обработку сами, один раз за показ.
@@ -732,7 +745,7 @@ function renderJob(job) {
   return false;
 }
 
-function uploadFiles(fileList, target) {
+function uploadFiles(fileList, target, statusId = "docs-status") {
   const t = currentTender();
   if (!t || !t.folder || !fileList.length) return;
   const form = new FormData();
@@ -742,26 +755,29 @@ function uploadFiles(fileList, target) {
   xhr.open("POST", clientPath("/docs/upload") + "?" + q);
   $("upload-progress").hidden = false;
   $("upload-bar").style.width = "0%";
-  setStatus("docs-status", `Загрузка ${fileList.length} файл(ов)…`);
+  setStatus(statusId, `Загрузка ${fileList.length} файл(ов)…`);
   xhr.upload.onprogress = (e) => {
     if (e.lengthComputable) $("upload-bar").style.width = Math.round((e.loaded / e.total) * 100) + "%";
   };
   xhr.onload = () => {
+    if (xhr.status === 401) return toLogin();
     $("upload-progress").hidden = true;
     let body = {};
     try { body = JSON.parse(xhr.responseText); } catch (_) { /* не JSON */ }
     if (xhr.status >= 200 && xhr.status < 300) {
-      setStatus("docs-status", `Загружено: ${body.saved.length}. Документы поставлены в обработку` +
-        (body.auto_analyze ? ", затем — анализ и запись в NocoDB." : "."));
+      setStatus(statusId, `Загружено: ${body.saved.length}` + (body.target ? ` (папка «${body.target}»)` : "") +
+        ". Документы поставлены в обработку" + (!body.auto_analyze ? "." : body.changes
+          ? ", затем сайт прочитает их и покажет в разделе «Анализ», что изменилось (было → стало), обновит данные и даст комментарии."
+          : ", затем — анализ и запись в NocoDB."));
       loadAnalysis();
     } else {
-      setStatus("docs-status", "Не удалось загрузить: " + (body.detail || xhr.status), true);
+      setStatus(statusId, "Не удалось загрузить: " + (body.detail || xhr.status), true);
     }
     loadDocs();
   };
   xhr.onerror = () => {
     $("upload-progress").hidden = true;
-    setStatus("docs-status", "Не удалось загрузить: нет связи с сайтом", true);
+    setStatus(statusId, "Не удалось загрузить: нет связи с сайтом", true);
   };
   xhr.send(form);
 }
@@ -810,7 +826,12 @@ async function loadAnalysis() {
     ["queued", "running"].includes(anLastJob.status) && !["queued", "running"].includes(d.job.status);
   anLastJob = d.job ? { id: d.job.id, status: d.job.status } : null;
   if (finished) loadPrices();
-  if (finished) {
+  if (finished && d.job.kind === "noco_changes" && d.job.status === "done") {
+    state.fresh = true;
+    await loadTenders();
+    return;
+  }
+  if (finished && ["analyze", "noco"].includes(d.job.kind)) {
     const noco = d.result && d.result.noco;
     if (noco && noco.status === "saved") {
       state.fresh = true;
@@ -829,7 +850,7 @@ function renderAnalysisJob(job) {
   if (!job) { box.hidden = true; return false; }
   box.hidden = false;
   box.classList.remove("error", "done", "paused", "canceled");
-  const what = job.kind === "noco" ? "Запись в NocoDB" : "Анализ";
+  const what = { noco: "Запись в NocoDB", changes: "Разбор изменений", noco_changes: "Запись изменений в NocoDB" }[job.kind] || "Анализ";
   if (job.status === "queued") {
     $("an-bar").style.width = "0%";
     $("an-job-text").textContent = `${what}: ` + queuedText(job);
@@ -880,11 +901,14 @@ function renderAnalysis(d, busy) {
   run.disabled = busy || !d.docs_with_text;
   run.title = d.docs_with_text ? "Анализ документов ИИ (Claude + перепроверка DeepSeek) и запись в NocoDB"
     : "Сначала загрузите документы — анализировать пока нечего";
-  $("an-stale").hidden = !(d.stale && !busy);
+  $("an-changes-upload").hidden = !r;
+  renderNewDocs(d, busy);
+  renderChanges(d.changes || [], busy || d.changes_active || d.changes_write_active, r);
   $("an-info").textContent = r
     ? `· ${r.analyzed_at_text} · ${r.models.claude}` + (r.models.fallback ? ` → ${r.models.fallback}` : "") +
       (r.seconds ? ` · ${Math.max(1, Math.round(r.seconds / 60))} мин` : "") +
-      (r.usage && r.usage.usd !== undefined ? ` · ≈ ${usd(r.usage.usd)}` : "")
+      (r.usage && r.usage.usd !== undefined ? ` · ≈ ${usd(r.usage.usd)}` : "") +
+      (r.changes_at_text ? ` · изменения ${r.changes_at_text}` : "")
     : "";
   if (!r) {
     $("an-body").hidden = true;
@@ -908,6 +932,200 @@ function renderAnalysis(d, busy) {
   $("an-pos-count").textContent = (r.positions || []).length ? `(${r.positions.length})` : "";
   showAnalysisTab(anTab);
   $("an-usage").textContent = usageText(r.usage && r.usage.totals);
+}
+
+// ---------- изменения и разъяснения к разобранному конкурсу (0.9.0) ----------
+
+const CS_ACTION = { changed: "изменена", added: "🆕 добавлена", removed: "❌ исключена" };
+const CS_KIND_ICON = { "изменение": "🔄", "разъяснение": "💬", "новая редакция": "📑", "протокол": "📋" };
+
+function renderNewDocs(d, busy) {
+  const box = $("an-stale");
+  const names = d.new_docs || [];
+  if (busy || !d.result || (!names.length && !d.stale)) { box.hidden = true; return; }
+  box.hidden = false;
+  if (!names.length) {
+    box.replaceChildren("Документы изменились после анализа — запустите анализ заново.");
+    return;
+  }
+  const list = el("ul", {}, ...names.slice(0, 8).map((n) => el("li", { text: n })));
+  if (names.length > 8) list.append(el("li", { text: `и ещё ${names.length - 8}` }));
+  const run = el("button", { class: "btn small primary need-analyze", type: "button", text: "Разобрать изменения" });
+  run.title = "Прочитать только новые документы: что изменилось (было → стало), обновить данные анализа, комментарии. Дёшево — несколько центов.";
+  run.addEventListener("click", () => runChanges(run));
+  const full = el("button", { class: "btn small need-analyze", type: "button", text: "Повторить анализ целиком" });
+  full.addEventListener("click", () => $("an-run").click());
+  box.replaceChildren(el("div", { text: `Появились документы после анализа (${names.length}):` }), list, run, full);
+}
+
+async function runChanges(btn) {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(clientPath("/analysis/changes/run"), { folder: t.folder }, { method: "POST" });
+    if (r.already) setStatus("an-status", "Разбор изменений уже идёт — показываю его ход.");
+  } catch (err) {
+    setStatus("an-status", "Не удалось запустить разбор изменений: " + err.message, true);
+  }
+  loadAnalysis();
+}
+
+function quoteCell(item) {
+  const td = el("td");
+  if (item.file) td.append(el("div", { class: "src-file", text: item.file.split("/").pop() }));
+  if (item.quote) {
+    const q = el("div", { class: "quote clamp", title: "Щёлкните, чтобы развернуть", text: "«" + item.quote + "»" });
+    q.addEventListener("click", () => q.classList.toggle("open"));
+    td.append(q);
+  }
+  return td;
+}
+
+function appliedCell(item) {
+  const td = el("td");
+  if (item.computed) td.append(el("span", { class: "badge muted", text: "собрано из позиций" }));
+  else if (item.applied) td.append(el("span", { class: "badge ok", text: "применено" }));
+  else td.append(el("span", { class: "badge bad", text: "не применено", title: item.problem || "" }),
+    el("div", { class: "src-file", text: item.problem || "" }));
+  if (item.comment && !item.computed) td.append(el("div", { class: "src-file", text: item.comment }));
+  return td;
+}
+
+function changeSetCard(s, open, busy, superseded = false, r = null) {
+  const files = (s.files || []).map((f) => f.split("/").pop());
+  const head = el("div", { class: "cs-head" }, `🔄 Изменения от ${s.at_text}`,
+    el("span", { class: "muted", text: " · " + files.join(", ") + (s.by ? ` · ${s.by}` : "") +
+      (s.usage && s.usage.usd !== undefined ? ` · ≈ ${usd(s.usage.usd)}` : "") }));
+  const box = el(open ? "div" : "details", { class: "change-set" + (open ? "" : " old") });
+  box.append(open ? head : el("summary", {}, head));
+  if (s.summary) box.append(el("div", { class: "cs-summary", text: s.summary }));
+  if ((s.documents || []).length) {
+    box.append(el("ul", { class: "cs-docs" }, ...s.documents.map((x) => el("li", {
+      text: `${CS_KIND_ICON[x.kind] || "📄"} ${(x.file || "").split("/").pop()} — ${x.kind || "документ"}` +
+        (x.date ? `, ${x.date}` : "") + (x.summary ? `: ${x.summary}` : "") }))));
+  }
+  if (s.full_reanalysis && s.full_reanalysis.needed) {
+    const n = el("div", { class: "notice warn", text: "⚠ Документация сильно переделана — точечные изменения могут быть неполными. " +
+      (s.full_reanalysis.reason || "") });
+    const btn = el("button", { class: "btn small need-analyze", type: "button", text: "Повторить анализ целиком" });
+    btn.addEventListener("click", () => $("an-run").click());
+    if (!busy) n.append(el("br"), btn);
+    box.append(n);
+  }
+  const fields = s.fields || [];
+  if (fields.length) {
+    const body = el("tbody");
+    for (const c of fields) {
+      body.append(el("tr", {},
+        el("td", { text: c.label }),
+        el("td", { class: "cs-old" }, longText(c.old || "—")),
+        el("td", { class: "cs-new" }, longText(c.new || "—")),
+        quoteCell(c), appliedCell(c)));
+    }
+    box.append(el("div", { class: "table-wrap" }, el("table", { class: "cs-table" },
+      el("thead", {}, el("tr", {}, ...["Поле", "Было", "Стало", "Источник", ""].map((h) => el("th", { text: h })))), body)));
+  }
+  const poss = s.positions || [];
+  if (poss.length) {
+    const body = el("tbody");
+    for (const c of poss) {
+      const what = el("td");
+      if (c.action === "removed") what.append(el("div", { text: "позиция исключена" }));
+      for (const ch of c.changes || []) {
+        const line = el("div", {}, el("span", { class: "cs-col", text: ch.column + ": " }));
+        if (c.action === "changed" && ch.column !== "Техническое задание") {
+          line.append(el("span", { class: "cs-old", text: ch.old || "—" }), " → ");
+        }
+        line.append(el("b", { text: ch.new }));
+        what.append(line);
+      }
+      body.append(el("tr", {},
+        el("td", { class: "num", text: c.n }),
+        el("td", {}, el("div", { text: c.name || "" }), el("span", { class: "badge " + (c.action === "removed" ? "bad" : c.action === "added" ? "ok" : "ocr"), text: CS_ACTION[c.action] || c.action })),
+        what, quoteCell(c), appliedCell(c)));
+    }
+    box.append(el("div", { class: "table-wrap" }, el("table", { class: "cs-table" },
+      el("thead", {}, el("tr", {}, ...["№", "Позиция", "Что изменилось", "Источник", ""].map((h) => el("th", { text: h })))), body)));
+  }
+  if (!fields.length && !poss.length) {
+    box.append(el("div", { class: "muted", text: "Данные конкурса не изменились." }));
+  }
+  if ((s.comments || []).length) {
+    box.append(el("div", { class: "cs-col", text: "Комментарии и разъяснения:" }),
+      el("ul", { class: "cs-comments" }, ...s.comments.map((c) => {
+        const li = el("li", {}, "💬 " + c.text);
+        if (c.file || c.quote) {
+          const src = el("div", { class: "src-file", text: (c.file || "").split("/").pop() + (c.quote ? " — «" + c.quote + "»" : "") });
+          li.append(src);
+        }
+        return li;
+      })));
+  }
+  if ((s.checks || []).length) {
+    box.append(el("ul", { class: "checks" }, ...s.checks.map((c) => el("li", { class: c.startsWith("✅") ? "" : "warn", text: c }))));
+  }
+  const pr = s.prices || {};
+  if ((pr.positions || []).length) {
+    box.append(el("div", { class: "src-file", text: (pr.queued ? "Цены: поиск по позициям № " : "Цены нужно искать по позициям № ") +
+      pr.positions.join(", ") + (pr.queued ? " поставлен в очередь (раздел «Цены»)." : " — новые или с другим названием / маркой.") }));
+  }
+  if (superseded) {
+    box.append(el("div", { class: "src-file", text: `После этого разбора анализ повторён целиком${r && r.analyzed_at_text ? " (" + r.analyzed_at_text + ")" : ""} — ` +
+      "эти документы в нём уже учтены." + (s.noco && s.noco.status === "saved" ? " В NocoDB изменения были записаны." : "") }));
+  } else {
+    box.append(changeSetNoco(s, busy));
+  }
+  return box;
+}
+
+function changeSetNoco(s, busy) {
+  const n = s.noco;
+  const any = (s.fields || []).concat(s.positions || []).some((c) => c.applied);
+  if (!any) return el("div", { class: "src-file", text: "В NocoDB записывать нечего — изменений в данных нет." });
+  if (n && ["requested", "running"].includes(n.status)) {
+    return el("div", { class: "notice", text: "⏳ Изменения записываются в NocoDB…" });
+  }
+  if (n && n.status === "saved") {
+    const b = el("div", { class: "notice ok" }, `✅ ${n.text || "Записано в NocoDB"}` +
+      (n.finished_at ? ` (${new Date(n.finished_at * 1000).toLocaleString("ru-RU")})` : "") + ". ");
+    if (n.link) b.append(el("a", { href: n.link, target: "_blank", rel: "noopener", text: "Открыть запись ↗" }));
+    if (n.spec_note) b.append(el("div", { text: n.spec_note }));
+    if ((n.issues || []).length) {
+      b.append(el("div", { class: "warn-text", text: "⚠ Проверка записанного нашла расхождения:" }),
+        el("ul", {}, ...n.issues.slice(0, 8).map((i) => el("li", { text: `${i.column || ""}: ${i.problem || ""}` }))));
+    }
+    return b;
+  }
+  const b = el("div", { class: "notice" + (n && n.status === "error" ? " bad" : "") });
+  if (n && n.status === "error") b.append(el("div", { text: "Запись изменений в NocoDB не удалась: " + (n.text || "") }));
+  b.append(el("div", { text: "В NocoDB ещё не записано. Запишется только изменённое: поля в реестре и строки спецификации " +
+    "(изменённые — обновятся, новые — добавятся, исключённые — пометятся в «Примечании», не удаляются)." }));
+  if (!busy) {
+    const btn = el("button", { class: "btn small primary need-analyze", type: "button",
+      text: n && n.status === "error" ? "Повторить запись" : "Записать изменения в NocoDB" });
+    btn.addEventListener("click", async () => {
+      const t = currentTender();
+      if (!t || !t.folder) return;
+      btn.disabled = true;
+      try {
+        await api(clientPath("/analysis/changes/write"), { folder: t.folder, change: s.id }, { method: "POST" });
+      } catch (err) {
+        setStatus("an-status", "Не удалось запустить запись изменений: " + err.message, true);
+      }
+      loadAnalysis();
+    });
+    b.append(btn);
+  }
+  return b;
+}
+
+function renderChanges(sets, busy, r) {
+  const box = $("an-changes");
+  if (!sets.length || !r) { box.replaceChildren(); return; }
+  // Разборы до последнего повторного анализа целиком: их документы уже вошли в анализ — только история.
+  const inResult = new Set((r.changes || []).map((c) => c.id));
+  box.replaceChildren(...sets.map((s, i) => changeSetCard(s, i === 0 && inResult.has(s.id), busy, !inResult.has(s.id), r)));
 }
 
 function renderNoco(r, busy) {
@@ -959,7 +1177,7 @@ function renderNoco(r, busy) {
 }
 
 function saveButton(label, force) {
-  const btn = el("button", { class: "btn small" + (force ? "" : " primary"), type: "button", text: label });
+  const btn = el("button", { class: "btn small need-analyze" + (force ? "" : " primary"), type: "button", text: label });
   btn.addEventListener("click", async () => {
     const t = currentTender();
     if (!t || !t.folder) return;
@@ -1004,7 +1222,11 @@ function renderAnalysisFields(fields) {
     const val = el("td");
     const node = renderValue(f.value, "");
     if (node) val.append(node);
-    body.append(el("tr", {}, el("td", { text: f.label }), val, src, chk));
+    if (f.changed) {
+      val.append(el("div", { class: "changed-badge", text: `🔄 изменено ${f.changed.date || ""}`,
+        title: "Было: " + (f.changed.old || "—") + (f.changed.comment ? "\n" + f.changed.comment : "") }));
+    }
+    body.append(el("tr", { class: f.changed ? "row-changed" : null }, el("td", { text: f.label }), val, src, chk));
   }
   $("an-fields-table").replaceChildren(el("thead", {}, head), body);
 }
@@ -1020,7 +1242,8 @@ function renderAnalysisPositions(rows) {
   const head = el("tr", {}, ...cols.map((c, i) => el("th", { class: i === 0 ? "stick0" : (i === 1 ? "stick1" : null), text: c })));
   const body = el("tbody");
   for (const r of rows) {
-    const tr = el("tr");
+    const note = String(r["Примечание"] || "");
+    const tr = el("tr", { class: /🔄 Изменение|🆕 Добавлена/.test(note) ? "row-changed" : null });
     cols.forEach((c, i) => {
       const v = r[c];
       const cls = [i === 0 ? "stick0" : (i === 1 ? "stick1" : ""), typeof v === "number" ? "num" : ""].filter(Boolean).join(" ") || null;
@@ -1086,6 +1309,7 @@ async function loadPrices() {
   setStatus("pr-status", "");
   const busy = renderPricesJob(d.job);
   renderPrices(d, busy);
+  loadPriceSummary();
   const finished = prLastJob && d.job && prLastJob.id === d.job.id &&
     ["queued", "running"].includes(prLastJob.status) && !["queued", "running"].includes(d.job.status);
   prLastJob = d.job ? { id: d.job.id, status: d.job.status } : null;
@@ -1217,12 +1441,14 @@ function renderPrices(d, busy) {
         (abroadBox.checked ? " (Россия и зарубеж)" : " (Россия)") +
         ", откроет страницы магазинов, проверит артикул и цену и выберет по 3 самые низкие цены со ссылками." +
         (est ? " Оценка: " + est + "." : "")
-      : "Поиск цен станет доступен после анализа документов.");
+      : "Поиск цен в интернете на сайте — после анализа документов. Цены, которые уже есть в спецификации NocoDB " +
+        "(агент, рынки, отдел закупок) и в прошлых конкурсах, — во вкладке «Все цены».");
   } else {
     setStatus("pr-status", "");
   }
   if (!r) {
     $("pr-wrap").hidden = true;
+    applyPriceTab();
     $("pr-noco").replaceChildren();
     $("pr-checks").replaceChildren();
     $("pr-usage").textContent = "";
@@ -1235,8 +1461,14 @@ function renderPrices(d, busy) {
       : n.status === "error" ? "Запись цен в NocoDB не удалась: " + (n.text || "") : "NocoDB: " + (n.text || "не записано"),
   }));
   const sm = r.summary || {};
-  const checks = [`Артикулов: ${sm.groups}; Россия — цены у ${sm.rf_found} (все три — у ${sm.rf_full}); ` +
-    (r.abroad === false ? "зарубеж не искали." : `зарубеж — у ${sm.abroad_found} (все три — у ${sm.abroad_full}).`)];
+  const checks = [];
+  if (r.partial) {
+    // Поиск после изменений документации (0.9.0) — только новые позиции и позиции с другим названием / маркой.
+    checks.push(`Последний поиск — только по позициям № ${(r.partial.positions || []).join(", ")} (после изменений документации)` +
+      (r.partial.previous_at_text ? `; цены остальных позиций — из поиска от ${r.partial.previous_at_text}.` : "."));
+  }
+  checks.push(`Артикулов: ${sm.groups}; Россия — цены у ${sm.rf_found} (все три — у ${sm.rf_full}); ` +
+    (r.abroad === false ? "зарубеж не искали." : `зарубеж — у ${sm.abroad_found} (все три — у ${sm.abroad_full}).`));
   const bs = sm.by_source || {};
   if (Object.keys(bs).length > 1) {
     checks.push("Кто нашёл подтверждённые цены: " + Object.entries(bs).map(([src, v]) =>
@@ -1270,12 +1502,183 @@ function offerList(items, abroad) {
     const line = el("div");
     line.append(el("a", { href: a.url, target: "_blank", rel: "noopener", text: rub(a.price_rub), title: a.note || a.url }));
     const src = (a.sources || []).map((x) => SOURCE_LABEL[x] || x).join(" + ");
-    line.append(el("span", { class: "muted", text: " " + a.domain + (abroad && a.currency && a.currency !== "RUB" ? ` · ${a.price} ${a.currency}` : "") +
+    if (!a.url) line.replaceChildren(el("b", { text: rub(a.price_rub) }));
+    if (a.from_noco) line.title = "Цена из спецификации NocoDB (записал агент или сайт)";
+    line.append(el("span", { class: "muted", text: " " + (a.domain || "") + (a.from_noco ? " · NocoDB" : "") + (abroad && a.currency && a.currency !== "RUB" ? ` · ${a.price} ${a.currency}` : "") +
       (abroad && a.country ? ` · ${a.country}` : "") + (a.original === "no" ? " · аналог" : ""),
       title: src ? "Нашёл: " + src + (a.via === "deepseek" ? "; страницу открыл DeepSeek" : a.via === "browser" ? "; страница открыта встроенным браузером" : "") : null }));
     box.append(line);
   }
   return box;
+}
+
+// Цены из выдачи поиска (страницу не открыли или модель не подтвердила) — только показать, с пометкой (0.8.0).
+function unverifiedList(items) {
+  if (!items || !items.length) return null;
+  const box = el("div", { class: "offers unverified" });
+  for (const a of items) {
+    const line = el("div", { title: "Цена из выдачи поиска: страницу магазина не открывали или модель её не подтвердила. " +
+      "В спецификацию NocoDB такие цены не пишутся." + (a.title ? "\n" + a.title : "") });
+    line.append(el("span", { class: "badge warn", text: "не проверено" }), " ",
+      el("a", { href: a.url, target: "_blank", rel: "noopener", text: rub(a.price_rub) }),
+      el("span", { class: "muted", text: " " + a.domain + (a.currency && a.currency !== "RUB" ? ` · ${a.price} ${a.currency}` : "") }));
+    box.append(line);
+  }
+  return box;
+}
+
+// ---------- все цены (0.8.0): интернет, поставщики, лучшая цена ----------
+
+let psLast = null;          // /prices/summary
+let prTab = "summary";      // вкладка раздела «Цены»: summary — все цены, search — поиск в интернете
+
+function applyPriceTab() {
+  const hasSearch = Boolean(prLast && prLast.report);
+  const hasSummary = Boolean(psLast && (psLast.has_positions || psLast.has_analysis));
+  $("pr-tabs").hidden = !hasSummary;
+  const tab = hasSummary ? prTab : "search";
+  for (const b of $("pr-tabs").querySelectorAll(".tab")) b.classList.toggle("active", b.dataset.ptab === tab);
+  $("ps-wrap").hidden = !(hasSummary && tab === "summary");
+  $("ps-status").hidden = !(hasSummary && tab === "summary") || !$("ps-status").textContent;
+  $("pr-wrap").hidden = !(hasSearch && tab === "search");
+}
+
+async function loadPriceSummary() {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  const my = ++seq.ps;
+  let d;
+  try {
+    d = await api(clientPath("/prices/summary"), { folder: t.folder, record: t.source === "nocodb" ? t.id : "" });
+  } catch (err) {
+    if (my === seq.ps) setStatus("ps-status", "Не удалось загрузить общую таблицу цен: " + err.message, true);
+    return;
+  }
+  if (my !== seq.ps) return;
+  psLast = d;
+  renderPriceSummary(d);
+  applyPriceTab();
+}
+
+function supplierList(items) {
+  const box = el("div", { class: "offers" });
+  const t = currentTender();
+  for (const s of items) {
+    const line = el("div");
+    const label = rub(s.price_rub);
+    line.append(s.file_path && t ? el("a", { href: clientPath("/docs/file") + "?" + new URLSearchParams({ folder: t.folder, path: s.file_path }),
+      target: "_blank", rel: "noopener", text: label, title: "Открыть «" + s.file + "»" }) : el("b", { text: label }));
+    line.append(el("span", { text: " " + s.supplier }));
+    if (s.match !== "exact") line.append(" ", el("span", { class: "badge warn", text: "🔴 не полностью", title: s.note || "Неполное совпадение с позицией" }));
+    if ((s.problems || []).length) line.append(" ", el("span", { class: "badge bad", text: "⚠", title: s.problems.join("; ") }));
+    const tail = [];
+    if (s.currency && s.currency !== "RUB" && s.price) tail.push(`${s.price} ${s.currency}`);
+    if (s.vat && s.vat !== "не указано") tail.push(s.vat);
+    tail.push(s.source === "NocoDB" ? "NocoDB" : s.in_noco || s.written ? "в NocoDB" : "не записано");
+    line.append(el("span", { class: "muted", text: " · " + tail.join(" · ") }));
+    box.append(line);
+  }
+  return box;
+}
+
+function ratioBadge(price, nmc) {
+  if (!price || !nmc) return null;
+  const pct = Math.round((price / nmc - 1) * 100);
+  return el("span", { class: "badge " + (pct <= -15 ? "ok" : pct < 0 ? "warn" : "bad"), text: (pct > 0 ? "+" : "") + pct + " %",
+    title: `${rub(price)} к НМЦ за единицу ${rub(nmc)}` });
+}
+
+function agentList(r) {
+  const box = el("div", { class: "offers" });
+  for (const a of r.agent || []) {
+    const line = el("div", { title: a.comment || "" });
+    line.append(a.url ? el("a", { href: a.url, target: "_blank", rel: "noopener", text: rub(a.price_rub) }) : el("b", { text: rub(a.price_rub) }));
+    // Комментарий агента: «Источник: … / Ссылка: … / Пояснение: …» — коротко источник, целиком — во всплывающей подсказке.
+    const m = /Источник:\s*([^\n]+)/.exec(a.comment || "");
+    let c = (m ? m[1] : (a.comment || "").split("\n")[0]).replace(/\s+/g, " ").trim();
+    if (c) line.append(el("span", { class: "muted", text: " " + (c.length > 45 ? c.slice(0, 45) + "…" : c) }));
+    box.append(line);
+  }
+  if (r.market) {
+    const m = r.market;
+    const line = el("div", { title: [m.text, m.source].filter(Boolean).join("\n") });
+    line.append(el("span", { class: "muted", text: "рыночная: " }),
+      m.url ? el("a", { href: m.url, target: "_blank", rel: "noopener", text: rub(m.price_rub) }) : el("b", { text: rub(m.price_rub) }));
+    box.append(line);
+  }
+  return box;
+}
+
+function historyList(items) {
+  const box = el("div", { class: "offers" });
+  for (const h of items || []) {
+    const line = el("div", { title: (h.name || "") + (h.updated ? "\nОбновлено: " + h.updated : "") });
+    line.append(el("span", { class: "muted", text: `${h.tender} № ${h.n}: ` }));
+    h.prices.slice(0, 3).forEach((p, i) => {
+      if (i) line.append(", ");
+      line.append(el("span", { class: "muted", text: p.kind + " " }),
+        p.url ? el("a", { href: p.url, target: "_blank", rel: "noopener", text: rub(p.price_rub), title: p.who || p.url })
+          : el("b", { text: rub(p.price_rub), title: p.who || "" }));
+    });
+    box.append(line);
+  }
+  return box;
+}
+
+function renderPriceSummary(d) {
+  const rows = d.rows || [];
+  const withPrice = rows.filter((r) => r.best).length;
+  const withSup = rows.filter((r) => (r.suppliers || []).length).length;
+  const showAgent = rows.some((r) => (r.agent || []).length || r.market);
+  const showHist = rows.some((r) => (r.history || []).length);
+  const parts = [`Позиций: ${rows.length}; с ценой — ${withPrice}; с ценами поставщиков — ${withSup}.`];
+  if (d.positions_source === "nocodb") parts.push("Позиции — из спецификации NocoDB (анализа документов на сайте у этого конкурса нет).");
+  parts.push(d.has_report ? `Поиск в интернете на сайте — ${d.report_at}.` : "Поиск в интернете на сайте ещё не запускался.");
+  if (d.noco_read) parts.push("Цены из спецификации NocoDB учтены (агент, рынки РФ / зарубеж, отдел закупок, доставка).");
+  if (d.noco_error) parts.push("⚠ Спецификация NocoDB не прочитана: " + d.noco_error);
+  const h = d.history || {};
+  if (h.at) parts.push(`«Прошлые конкурсы» — тот же артикул в других спецификациях NocoDB (своя база цен от ${h.at}` + (h.building ? ", обновляется" : "") + ").");
+  else if (h.building) parts.push("Своя база цен (прошлые конкурсы) собирается — обновите страницу через минуту.");
+  parts.push("Лучшая — самая низкая из проверенных (интернет, агент, поставщики; 🔴 — с пометкой; «не проверено» и прошлые конкурсы — не учитываются).");
+  setStatus("ps-status", parts.join(" "), Boolean(d.noco_error));
+  const cols = ["№", "Позиция", "Кол-во", "НМЦ за ед.", "Интернет: Россия", "Интернет: зарубеж"];
+  if (showAgent) cols.push("Агент (NocoDB)");
+  cols.push("Поставщики (прайсы, КП, счета, NocoDB)");
+  if (showHist) cols.push("Прошлые конкурсы");
+  cols.push("Лучшая цена", "К НМЦ");
+  const head = el("tr", {}, ...cols.map((h, i) => el("th", { class: i === 0 ? "stick0" : (i === 1 ? "stick1" : null), text: h })));
+  const body = el("tbody");
+  for (const r of rows) {
+    const pos = el("td", { class: "stick1" }, el("div", { text: r.name }));
+    if (r.brand_model) pos.append(el("div", { class: "muted", text: r.brand_model }));
+    const none = (text) => el("span", { class: "empty-val", text });
+    const rfCell = el("td", {}, r.rf.length ? offerList(r.rf, false) : none(r.searched ? "не найдено" : "—"),
+      unverifiedList(r.unverified.filter((a) => a.market === "rf")));
+    const abCell = el("td", {}, r.abroad.length ? offerList(r.abroad, true) : none(r.searched && d.abroad !== false ? "не найдено" : "—"),
+      unverifiedList(r.unverified.filter((a) => a.market === "abroad")));
+    const cells = [el("td", { class: "stick0", text: r.n }), pos,
+      el("td", { class: "num", text: [r.qty, r.unit].filter((x) => x !== null && x !== undefined && x !== "").join(" ") }),
+      el("td", { class: "num", text: r.nmc ? rub(r.nmc) : "" }), rfCell, abCell];
+    if (showAgent) cells.push(el("td", {}, (r.agent || []).length || r.market ? agentList(r) : none("—")));
+    cells.push(el("td", {}, r.suppliers.length ? supplierList(r.suppliers) : none("—")));
+    if (showHist) cells.push(el("td", {}, (r.history || []).length ? historyList(r.history) : none("—")));
+    const best = el("td", { class: "num" });
+    if (r.best) {
+      best.append(r.best.url ? el("a", { href: r.best.url, target: "_blank", rel: "noopener", text: rub(r.best.price_rub) }) : el("b", { text: rub(r.best.price_rub) }),
+        el("div", { class: "muted small", text: r.best.source }));
+    }
+    if (r.delivery) best.append(el("div", { class: "muted small", text: "доставка СДЭК: " + rub(r.delivery) }));
+    cells.push(best, el("td", { class: "num" }, ratioBadge(r.best && r.best.price_rub, r.nmc)));
+    body.append(el("tr", {}, ...cells));
+  }
+  const table = $("ps-table");
+  table.replaceChildren(el("thead", {}, head), body);
+  const first = table.querySelector("th.stick0");
+  if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
+}
+
+for (const b of document.querySelectorAll("#pr-tabs .tab")) {
+  b.addEventListener("click", () => { prTab = b.dataset.ptab; applyPriceTab(); });
 }
 
 function renderPricesTable(r, positions) {
@@ -1321,13 +1724,15 @@ function renderPricesTable(r, positions) {
     body.append(el("tr", {},
       el("td", { class: "stick0", text: (g.positions || []).join(", ") }), pos,
       el("td", { class: "num", text: nmc ? rub(nmc) : "" }),
-      el("td", {}, rf.length ? offerList(rf, false) : el("span", { class: "empty-val", text: "не найдено" })),
-      el("td", {}, ab.length ? offerList(ab, true) : el("span", { class: "empty-val", text: r.abroad === false ? "не искали" : "не найдено" })),
+      el("td", {}, rf.length ? offerList(rf, false) : el("span", { class: "empty-val", text: "не найдено" }),
+        unverifiedList((g.unverified || []).filter((a) => a.market === "rf"))),
+      el("td", {}, ab.length ? offerList(ab, true) : el("span", { class: "empty-val", text: r.abroad === false ? "не искали" : "не найдено" }),
+        unverifiedList((g.unverified || []).filter((a) => a.market === "abroad"))),
       ratio, hist, how));
   }
   const table = $("pr-table");
   table.replaceChildren(el("thead", {}, head), body);
-  $("pr-wrap").hidden = false;
+  applyPriceTab();
   const first = table.querySelector("th.stick0");
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
 }
@@ -1429,12 +1834,219 @@ async function loadChat() {
   if (my !== seq.chat) return;
   const saved = storageGet(CHAT_MODEL_KEY);
   fillSelect($("chat-model"), d.models.map((x) => ({ value: x, label: x })), d.models.includes(saved) ? saved : d.default_model);
-  $("chat-log").replaceChildren(...d.messages.map(renderChatMessage));
-  $("chat-hint").textContent = "Ответы — только по документам этого конкурса, с источниками; цитаты программа сверяет с текстом. " +
-    "Задавать вопросы можно в любое время, как только документы подготовлены, — анализ для этого не нужен.";
+  chatMsgs = d.messages;
+  plData = null;
+  plSel.clear();
+  renderChatLog();
+  $("chat-hint").textContent = "Ответы — только по документам этого конкурса и найденным ценам, с источниками; цитаты программа сверяет с текстом. " +
+    "Задавать вопросы можно в любое время, как только документы подготовлены, — анализ для этого не нужен. " +
+    "Прайс, КП или счёт поставщика — скрепкой 📎 или перетащите файл сюда: сайт найдёт позиции конкурса и цены.";
   scrollChat();
   loadChatStatus();
+  loadPricelists();
 }
+
+// ---------- прайсы, КП и счета поставщиков в чате (0.8.0) ----------
+
+let chatMsgs = [];          // сообщения чата (для общего порядка с карточками прайсов)
+let plData = null;          // /pricelists
+const plSel = new Map();    // id файла → отмеченные к записи позиции (Set)
+const plCards = new Map();  // id файла → карточка в чате
+let plTimer = null;
+const PL_BUSY = (f) => ["queued", "running"].includes(f.status) || ["requested", "running"].includes((f.write || {}).status);
+
+function renderChatLog() {
+  const items = chatMsgs.map((m) => ({ t: m.created_at || 0, node: renderChatMessage(m) }));
+  plCards.clear();
+  for (const f of (plData && plData.files) || []) {
+    const node = pricelistCard(f);
+    plCards.set(f.id, node);
+    items.push({ t: f.uploaded_at || 0, node });
+  }
+  items.sort((a, b) => a.t - b.t);
+  $("chat-log").replaceChildren(...items.map((x) => x.node));
+}
+
+async function loadPricelists() {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  const my = ++seq.pl;
+  clearTimeout(plTimer);
+  let d;
+  try {
+    d = await api(clientPath("/pricelists"), { folder: t.folder });
+  } catch (_) { return; }
+  if (my !== seq.pl || currentTender() !== t) return;
+  const before = new Map(((plData && plData.files) || []).map((f) => [f.id, f]));
+  plData = d;
+  let changedPrices = false, added = false;
+  for (const f of d.files) {
+    const old = before.get(f.id);
+    if (!old) { added = true; continue; }
+    if (JSON.stringify(old) === JSON.stringify(f)) continue;
+    if (old.status !== f.status || (old.write || {}).status !== (f.write || {}).status) changedPrices = true;
+    const card = plCards.get(f.id);
+    if (card) {
+      const fresh = pricelistCard(f);
+      card.replaceWith(fresh);
+      plCards.set(f.id, fresh);
+    }
+  }
+  if (added && chatBusy) {
+    // Идёт ответ чата — ленту не перестраиваем (ответ печатается), новые карточки — в конец.
+    for (const f of d.files) {
+      if (before.has(f.id)) continue;
+      const node = pricelistCard(f);
+      plCards.set(f.id, node);
+      $("chat-log").append(node);
+    }
+  } else if (added || d.files.length !== before.size) {
+    const log = $("chat-log");
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    renderChatLog();
+    if (atBottom || added) scrollChat();
+  }
+  if (changedPrices) loadPriceSummary();
+  if (d.files.some(PL_BUSY)) plTimer = setTimeout(loadPricelists, 3000);
+}
+
+function fmtWhen(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+}
+
+function pricelistCard(f) {
+  const t = currentTender();
+  const box = el("div", { class: "msg pricelist" });
+  const link = t ? el("a", { href: clientPath("/docs/file") + "?" + new URLSearchParams({ folder: t.folder, path: f.file }),
+    target: "_blank", rel: "noopener", text: f.name }) : el("b", { text: f.name });
+  box.append(el("div", { class: "pl-head" }, el("span", { text: "📎 Документ поставщика: " }), link,
+    el("span", { class: "muted", text: " · " + fmtWhen(f.uploaded_at) + (f.by ? " · " + f.by : "") })));
+  const status = (cls, text) => el("div", { class: "pl-status " + cls, text });
+  if (f.status === "queued") box.append(status("wait", "В очереди на разбор…"));
+  if (f.status === "running") box.append(status("wait", "Читаю файл и ищу позиции конкурса… обычно до минуты."));
+  if (f.status === "error") box.append(el("div", { class: "notice bad", text: "Не удалось разобрать: " + (f.error || "ошибка") }));
+  if (f.status === "done") {
+    const ms = f.matches || [];
+    const facts = [f.supplier ? "Поставщик: " + f.supplier + (f.supplier_inn ? ` (ИНН ${f.supplier_inn})` : "") : "Поставщик не указан в документе — запишется именем файла",
+      f.vat && f.vat !== "не указано" ? "цены " + f.vat : "НДС не указан",
+      `найдено позиций: ${ms.length} из ${f.positions_total || (plData && plData.positions) || "?"}`];
+    if (f.doc_date) facts.push("от " + f.doc_date);
+    if (f.usd !== undefined) facts.push("≈ " + usd(f.usd));
+    box.append(el("div", { class: "pl-status ok", text: facts.join(" · ") }));
+    for (const n of f.notes || []) box.append(el("div", { class: "muted small", text: n }));
+    if (!ms.length) {
+      box.append(el("div", { class: "muted", text: "Позиций конкурса в документе не найдено." }));
+    } else {
+      if (!plSel.has(f.id)) plSel.set(f.id, new Set(ms.filter((m) => m.selected).map((m) => m.pos)));
+      const sel = plSel.get(f.id);
+      const w = f.write || {};
+      const locked = ["requested", "running"].includes(w.status);
+      const writeBtn = el("button", { class: "btn small primary need-prices", type: "button" });
+      const updBtn = () => {
+        writeBtn.textContent = `Записать в спецификацию (${sel.size})`;
+        writeBtn.disabled = locked || !sel.size;
+      };
+      const head = el("tr", {}, ...["", "№", "Позиция конкурса", "Строка документа", "Цена за ед.", "К НМЦ", "Совпадение"].map((h) => el("th", { text: h })));
+      const body = el("tbody");
+      for (const m of ms) {
+        const cb = el("input", { type: "checkbox", class: "need-prices" });
+        cb.checked = sel.has(m.pos);
+        cb.disabled = locked;
+        cb.addEventListener("change", () => { if (cb.checked) sel.add(m.pos); else sel.delete(m.pos); updBtn(); });
+        const price = el("td", { class: "num" }, el("b", { text: m.price_rub ? rub(m.price_rub) : "—" }));
+        if (m.currency && m.currency !== "RUB" && m.price) price.append(el("div", { class: "muted small", text: `${m.price} ${m.currency}` }));
+        if (m.price && !m.price_in_line) price.append(el("div", { class: "muted small", text: "пересчитано", title: "Этой суммы нет в строке документа — модель пересчитала (упаковка, сумма за количество). Проверьте." }));
+        const kind = el("td");
+        kind.append(m.match === "exact" ? el("span", { class: "badge ok", text: "точно" }) : el("span", { class: "badge warn", text: "🔴 не полностью" }));
+        if ((m.problems || []).length) kind.append(" ", el("span", { class: "badge bad", text: "⚠ " + m.problems.join("; ") }));
+        if (m.quote === "loose" || m.quote === "none") kind.append(" ", el("span", { class: "badge bad", text: "⚠ фрагмент не найден в документе дословно" }));
+        if (m.note) kind.append(el("div", { class: "muted small", text: m.note }));
+        body.append(el("tr", {}, el("td", {}, cb), el("td", { class: "num", text: m.pos }),
+          el("td", {}, el("div", { text: m.name }), el("div", { class: "muted small", text: [m.qty, m.unit].filter(Boolean).join(" ") + (m.nmc ? " · НМЦ " + rub(m.nmc) : "") })),
+          el("td", { class: "pl-line", title: `Строка ${m.line_no}: ${m.line}` }, m.text || m.line),
+          price, el("td", { class: "num" }, ratioBadge(m.price_rub, m.nmc)), kind));
+      }
+      box.append(el("div", { class: "table-wrap pl-wrap" }, el("table", { class: "pl-table" }, el("thead", {}, head), body)));
+      updBtn();
+      writeBtn.addEventListener("click", async () => {
+        writeBtn.disabled = true;
+        try {
+          await api(clientPath("/pricelists/write"), { folder: currentTender().folder }, { method: "POST",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file: f.id, positions: [...sel] }) });
+          toast("Запись в спецификацию NocoDB поставлена в очередь");
+        } catch (err) { toast("Не удалось: " + err.message, true); }
+        loadPricelists();
+      });
+      const actions = el("div", { class: "pl-actions" }, writeBtn);
+      if (w.status === "requested") actions.append(el("span", { class: "muted", text: "Запись в NocoDB — в очереди…" }));
+      if (w.status === "running") actions.append(el("span", { class: "muted", text: "Записываю в спецификацию NocoDB…" }));
+      box.append(actions);
+      if (w.status === "saved") {
+        box.append(el("div", { class: "notice ok", text: `✅ Записано в спецификацию NocoDB (${fmtWhen(w.finished_at)}${w.by ? ", " + w.by : ""}): ` +
+          (w.text || "") + ((w.skipped || []).length ? ". Не записано: " + w.skipped.join("; ") : "") +
+          ". Неполные совпадения — с 🔴 у имени поставщика." }));
+      }
+      if (w.status === "error") box.append(el("div", { class: "notice bad", text: "Запись в NocoDB не удалась: " + (w.text || "") }));
+    }
+  }
+  if (!PL_BUSY(f)) {
+    const rm = el("button", { class: "btn small ghost need-prices pl-remove", type: "button", text: "Убрать из списка",
+      title: "Убрать карточку (сам файл остаётся в папке «Прайсы, счета, КП»)" });
+    let armed = false;
+    rm.addEventListener("click", async () => {
+      if (!armed) { armed = true; rm.textContent = "Точно убрать?"; return; }
+      try {
+        await api(clientPath("/pricelists/remove"), { folder: currentTender().folder }, { method: "POST",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file: f.id }) });
+      } catch (err) { toast("Не удалось: " + err.message, true); }
+      loadPricelists();
+    });
+    box.append(rm);
+  }
+  return box;
+}
+
+async function uploadPricelists(fileList) {
+  const t = currentTender();
+  const files = [...(fileList || [])];
+  if (!t || !t.folder || !files.length) return;
+  if (document.body.classList.contains("no-prices")) return toast("Загружать прайсы вашей роли недоступно", true);
+  const form = new FormData();
+  for (const f of files) form.append("files", f, f.name);
+  const u = new URL(clientPath("/pricelists/upload"), location.origin);
+  u.searchParams.set("folder", t.folder);
+  toast(files.length === 1 ? `Загружаю «${files[0].name}»…` : `Загружаю файлов: ${files.length}…`);
+  try {
+    const r = await fetch(u, { method: "POST", body: form });
+    if (r.status === 401) return toLogin();
+    let b = {};
+    try { b = await r.json(); } catch (_) { /* не JSON */ }
+    if (!r.ok) throw new Error(b.detail || `ошибка ${r.status}`);
+    toast("Загружено — ищу в документе позиции конкурса и цены");
+  } catch (err) {
+    toast("Не удалось загрузить: " + err.message, true);
+  }
+  $("chat-files").value = "";
+  await loadPricelists();
+  scrollChat();
+}
+
+$("chat-files").addEventListener("change", (e) => uploadPricelists(e.target.files));
+// Перетащить прайс прямо в чат.
+for (const ev of ["dragover", "dragenter"]) {
+  $("chat").addEventListener(ev, (e) => {
+    if (document.body.classList.contains("no-prices") || !e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    $("chat").classList.add("drag-over");
+  });
+}
+$("chat").addEventListener("dragleave", (e) => { if (!$("chat").contains(e.relatedTarget)) $("chat").classList.remove("drag-over"); });
+$("chat").addEventListener("drop", (e) => {
+  $("chat").classList.remove("drag-over");
+  if (document.body.classList.contains("no-prices") || !e.dataTransfer || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  uploadPricelists(e.dataTransfer.files);
+});
 
 // ---------- состояние чата: готов ли и сколько стоит следующий вопрос ----------
 
@@ -1503,6 +2115,7 @@ async function askChat(question) {
   $("chat-send").disabled = true;
   const log = $("chat-log");
   log.append(el("div", { class: "msg user", text: question }));
+  chatMsgs.push({ role: "user", content: question, created_at: Date.now() / 1000 });
   const answer = el("div", { class: "msg assistant" }, el("span", { class: "typing", text: "Думаю…" }));
   log.append(answer);
   scrollChat();
@@ -1513,6 +2126,7 @@ async function askChat(question) {
     u.searchParams.set("folder", t.folder);
     const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, model: USER_MODE ? null : $("chat-model").value }) });
+    if (r.status === 401) toLogin();
     if (!r.ok || !r.body) {
       let detail = "";
       try { detail = (await r.json()).detail; } catch (_) { /* не JSON */ }
@@ -1538,10 +2152,14 @@ async function askChat(question) {
         } else if (ev.t === "notice") {
           answer.replaceChildren(el("span", { class: "typing", text: ev.text }));
         } else if (ev.t === "done") {
-          answer.replaceWith(renderChatMessage({ role: "assistant", content: text, meta: ev.meta }));
+          const m = { role: "assistant", content: text, meta: ev.meta, created_at: Date.now() / 1000 };
+          answer.replaceWith(renderChatMessage(m));
+          chatMsgs.push(m);
           finished = true;
         } else if (ev.t === "error") {
-          answer.replaceWith(renderChatMessage({ role: "error", content: ev.text, meta: { error: ev.text } }));
+          const m = { role: "error", content: ev.text, meta: { error: ev.text }, created_at: Date.now() / 1000 };
+          answer.replaceWith(renderChatMessage(m));
+          chatMsgs.push(m);
           finished = true;
         }
       }
@@ -1807,6 +2425,10 @@ for (const ev of ["dragleave", "drop"]) {
   drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); });
 }
 drop.addEventListener("drop", (e) => uploadFiles(e.dataTransfer.files));
+$("an-changes-files").addEventListener("change", (e) => {
+  uploadFiles(e.target.files, "@changes", "an-status");
+  e.target.value = "";
+});
 $("an-run").addEventListener("click", async () => {
   const t = currentTender();
   if (!t || !t.folder) return;
@@ -1913,10 +2535,12 @@ document.addEventListener("click", (e) => {
     // Панель прилипла к шапке — лёгкая тень, чтобы было видно, что страница уходит под неё.
     wrap.classList.toggle("stuck", window.scrollY > 0 && wrap.getBoundingClientRect().top <= headerHeight() + 0.5);
     if (pinned && !pinned.hidden) return setActive(pinned);
-    const line = stickyHeight() + 40;                       // раздел «текущий», когда его верх выше этой линии
+    // Раздел «текущий», когда его верх выше линии на трети видимой под шапкой высоты (что занимает экран).
+    const sticky = stickyHeight();
+    const line = sticky + Math.max(40, (window.innerHeight - sticky) * 0.3);
     const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
     let current = links[0];
-    for (const a of links) {
+    for (const a of window.scrollY > 0 ? links : []) {      // в самом верху страницы — «Конкурс»
       const s = section(a);
       if (!s || a.hidden) continue;
       if (s.getBoundingClientRect().top <= line) current = a;
@@ -1959,4 +2583,28 @@ document.addEventListener("click", (e) => {
   syncVisibility();
 })();
 
-loadClients().then(pollActivity);
+// ---------- кто вошёл (0.7.0) ----------
+// Если вход на сайт включён: имя и роль в шапке, «Выйти», «Админ-панель» для администратора; кнопки, которых нет
+// в правах роли, скрыты (классы no-* на <body>). Без входа (LOGIN_REQUIRED=0) ничего не меняется.
+async function loadMe() {
+  let d;
+  try {
+    const r = await fetch("/api/auth/state");
+    if (!r.ok) return;                      // страница входа выключена — вход не требуется
+    d = await r.json();
+  } catch (_) { return; }
+  if (!d.required) return;
+  if (!d.me || d.me.must_change) return toLogin();
+  const allowed = new Set(d.access.permissions.filter((p) => p.allowed).map((p) => p.key));
+  for (const k of ["upload", "analyze", "prices", "jobs", "chat"]) document.body.classList.toggle("no-" + k, !allowed.has(k));
+  $("me-name").textContent = d.me.name === d.access.role_title ? d.me.name : `${d.me.name} · ${d.access.role_title}`;
+  $("me-name").title = `Логин: ${d.me.login}`;
+  $("me-admin").hidden = !d.access.admin_panel;
+  $("me-box").hidden = false;
+}
+$("me-logout").addEventListener("click", async () => {
+  try { await fetch("/api/auth/logout", { method: "POST", headers: { "X-SupplyBro": "1" } }); } catch (_) { /* всё равно на вход */ }
+  location.href = "/login";
+});
+
+loadMe().finally(() => loadClients().then(pollActivity));

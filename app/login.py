@@ -1,27 +1,25 @@
 """
 Страница входа на сайт: /login и адреса /api/auth/... (сами учётные записи — app/auth.py, те же, что в админ-панели).
 
-Подключается, только если в .env LOGIN_PAGE=1 (по умолчанию 0: решение пользователя 31.10.2026 — «сделай, но пока
-не подключай, нужно просто проверить»). Сам сайт вход пока НЕ требует: страница проверяет логин и пароль, открывает
-сеанс (cookie sb_session — та же, что у админ-панели: вошли здесь — вошли и в /admin) и показывает, что будет
-доступно сотруднику, когда вход подключим: клиенты, права роли, какая страница откроется.
+Включена при LOGIN_REQUIRED=1 (вход на сайт обязателен, 0.7.0 — app/access.py) или LOGIN_PAGE=1. Сеанс — cookie
+sb_session, та же, что у админ-панели: вошли здесь — вошли и в /admin. При обязательном входе после входа (и смены
+временного пароля) страница сразу ведёт туда, откуда пришли (?next=…), или на свою страницу: администратора — «/»,
+остальных — /user. Без обязательного входа (LOGIN_PAGE=1, 0.6.4) — только проверка логина и пароля и карточка «что
+будет доступно сотруднику».
 
 Таблицы — те же users / sessions / user_events (структура не меняется). Защита — как у админ-панели: изменяющие
 запросы только с заголовком X-SupplyBro: 1, 5 неверных паролей подряд — вход закрыт на 10 минут.
 
-Подключение входа на сайт (следующий шаг, не сделан): «/» и /user без сеанса → /login; после входа — на `home`
-(администратор — «/», остальные — /user); /api/... — проверять сеанс, клиентов и права роли.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 
-from . import auth
+from . import access, auth
 from .admin import COOKIE, _guard, _ip, _me, _set_cookie, _token, _wrap
 from .config import load_clients
 
@@ -31,15 +29,11 @@ router = APIRouter()
 auth.init()
 
 
-def _flag(name: str) -> bool:
-    return os.environ.get(name, "0").strip().lower() in ("1", "true", "yes", "on")
-
-
 def _home(user: dict) -> dict:
-    """Какая страница откроется сотруднику после входа, когда вход будет подключён."""
+    """Какая страница откроется сотруднику после входа."""
     if user["role"] == "admin":
         return {"url": "/", "title": "страница администратора", "open": "Открыть страницу администратора", "on": True}
-    on = _flag("USER_PAGE")
+    on = access.USER_PAGE
     return {"url": "/user" if on else "/", "title": "страница сотрудника",
             "open": "Открыть страницу сотрудника" if on else "Открыть сайт", "on": on}
 
@@ -67,7 +61,7 @@ def _access(user: dict | None) -> dict | None:
         "permissions": [{"key": k, "title": t, "allowed": k in allowed} for k, t in auth.PERMISSIONS.items()],
         "clients": names, "all_clients": all_clients,
         "home": _home(user),
-        "admin_panel": user["role"] == "admin" and _flag("ADMIN_PANEL"),
+        "admin_panel": user["role"] == "admin" and access.ADMIN_PANEL,
     }
 
 
@@ -84,7 +78,8 @@ def login_page():
 def state(request: Request):
     me = _me(request)
     return {"has_users": auth.count_users() > 0, "me": auth.public(me), "access": _access(me),
-            "min_password": auth.MIN_PASSWORD, "connected": False, "admin_panel": _flag("ADMIN_PANEL")}
+            "min_password": auth.MIN_PASSWORD, "connected": access.LOGIN_REQUIRED, "required": access.LOGIN_REQUIRED,
+            "admin_panel": access.ADMIN_PANEL}
 
 
 @router.post("/api/auth/login")

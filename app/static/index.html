@@ -15,6 +15,12 @@
         <div class="activity-panel" id="activity-panel" hidden></div>
       </div>
       <button class="btn ghost" id="refresh" type="button" title="Заново загрузить данные из NocoDB">Обновить из NocoDB</button>
+      <!-- Кто вошёл (если вход на сайт включён) -->
+      <div class="me-box" id="me-box" hidden>
+        <span class="me-name" id="me-name"></span>
+        <a class="btn ghost" id="me-admin" href="/admin" hidden>Админ-панель</a>
+        <button class="btn ghost" id="me-logout" type="button">Выйти</button>
+      </div>
     </div>
   </header>
 
@@ -35,7 +41,7 @@
       </label>
       <div class="field add-field">
         <span class="label">&nbsp;</span>
-        <button class="btn primary" id="new-tender-btn" type="button">+ Новый конкурс</button>
+        <button class="btn primary need-upload" id="new-tender-btn" type="button">+ Новый конкурс</button>
       </div>
       <p class="hint" id="pickers-hint" hidden></p>
 
@@ -105,17 +111,17 @@
       <div class="section-head">
         <h2>Документы <span class="muted" id="docs-count"></span></h2>
         <div class="section-tools">
-          <button class="btn small" id="docs-process" type="button" title="Обработать новые и изменённые файлы">Обработать заново</button>
+          <button class="btn small need-upload" id="docs-process" type="button" title="Обработать новые и изменённые файлы">Обработать заново</button>
         </div>
       </div>
       <div class="path" id="docs-path"></div>
       <div class="status" id="docs-status"></div>
       <div class="nofolder" id="docs-nofolder" hidden>
         <span>Папки этого конкурса в Dropbox нет.</span>
-        <button class="btn small primary" id="docs-create" type="button">Создать папку</button>
+        <button class="btn small primary need-upload" id="docs-create" type="button">Создать папку</button>
       </div>
       <div id="docs-body" hidden>
-        <div class="drop" id="drop">
+        <div class="drop need-upload" id="drop">
           <div class="drop-main">Перетащите сюда файлы или архив</div>
           <div class="drop-sub">
             или <label class="link">выберите на компьютере<input type="file" id="file-input" multiple hidden></label>
@@ -137,8 +143,9 @@
       <div class="section-head">
         <h2>Анализ документов <span class="muted" id="an-info"></span></h2>
         <div class="section-tools">
+          <label class="btn small need-upload" id="an-changes-upload" hidden title="Изменения, новые редакции, разъяснения заказчика к уже разобранному конкурсу: сайт прочитает только их, найдёт, что изменилось, обновит данные и покажет комментарии">📎 Дозагрузить изменения<input type="file" id="an-changes-files" multiple hidden></label>
           <label class="inline admin-only" title="Модель Claude для анализа (выбор запоминается в этом браузере)">Модель <select id="an-model"></select></label>
-          <button class="btn small primary" id="an-run" type="button">Запустить анализ</button>
+          <button class="btn small primary need-analyze" id="an-run" type="button">Запустить анализ</button>
         </div>
       </div>
       <div class="status" id="an-status"></div>
@@ -148,6 +155,8 @@
         <div class="job-ctl" id="an-job-ctl"></div>
       </div>
       <div class="notice warn" id="an-stale" hidden>Документы изменились после анализа — запустите анализ заново.</div>
+      <!-- Изменения и разъяснения к разобранному конкурсу (0.9.0): что изменилось, было → стало, комментарии -->
+      <div id="an-changes"></div>
       <div id="an-noco"></div>
       <ul class="checks" id="an-checks"></ul>
       <div id="an-body" hidden>
@@ -164,12 +173,12 @@
     <!-- Поиск цен: Россия (Яндекс) и зарубеж (Claude), по 3 лучшие цены со ссылками, своя база цен -->
     <section class="panel" id="prices" hidden>
       <div class="section-head">
-        <h2>Поиск цен <span class="muted" id="pr-info"></span></h2>
+        <h2>Цены <span class="muted" id="pr-info"></span></h2>
         <div class="section-tools">
           <label class="inline admin-only" title="Чем искать цены по России (выбор запоминается в этом браузере)">Поиск <select id="pr-engine"></select></label>
           <label class="inline check" title="Искать и за рубежом (Германия, Китай, США и др.) — поиском DeepSeek"><input type="checkbox" id="pr-abroad" checked> за рубежом</label>
           <label class="inline check" id="pr-urgent-box" title="Мгновенный режим Яндекса: ответ сразу, но запрос в 16 раз дороже. Без галочки — отложенный режим: дёшево, ответ обычно за несколько минут"><input type="checkbox" id="pr-urgent"> срочно</label>
-          <button class="btn small primary" id="pr-run" type="button">Искать цены</button>
+          <button class="btn small primary need-prices" id="pr-run" type="button">Искать цены</button>
         </div>
       </div>
       <div class="status" id="pr-status"></div>
@@ -181,6 +190,13 @@
       <div class="notice warn" id="pr-stale" hidden>Анализ документов обновился после поиска цен — цены перенесены, где позиции не изменились; при сомнениях повторите поиск.</div>
       <div id="pr-noco"></div>
       <ul class="checks" id="pr-checks"></ul>
+      <!-- Все цены (0.8.0): интернет, «не проверено» из выдачи, поставщики (прайсы и «Отдел закупок» NocoDB) -->
+      <div class="tabs" id="pr-tabs" role="tablist" hidden>
+        <button class="tab active" type="button" data-ptab="summary">Все цены</button>
+        <button class="tab" type="button" data-ptab="search">Поиск в интернете</button>
+      </div>
+      <div class="status" id="ps-status"></div>
+      <div class="table-wrap an-wrap" id="ps-wrap" hidden><table id="ps-table"></table></div>
       <div class="table-wrap an-wrap" id="pr-wrap" hidden><table id="pr-table"></table></div>
       <div class="usage" id="pr-usage"></div>
     </section>
@@ -221,12 +237,13 @@
         <h2>Вопросы по документации</h2>
         <div class="section-tools">
           <label class="inline admin-only">Модель <select id="chat-model"></select></label>
-          <button class="btn small" id="chat-clear" type="button" title="Удалить историю вопросов по этому конкурсу">Очистить</button>
+          <button class="btn small need-chat" id="chat-clear" type="button" title="Удалить историю вопросов по этому конкурсу">Очистить</button>
         </div>
       </div>
       <div class="chat-log" id="chat-log"></div>
-      <form class="chat-form" id="chat-form">
-        <textarea id="chat-input" rows="2" placeholder="Например: какие документы нужны во второй части заявки? Есть ли аванс? Можно ли предложить аналог?"></textarea>
+      <form class="chat-form need-chat" id="chat-form">
+        <label class="btn attach need-prices" id="chat-attach" title="Прайс, КП или счёт поставщика (Excel, Word, PDF, фото): сайт найдёт в нём позиции конкурса и цены, а записать их в спецификацию можно кнопкой">📎<input type="file" id="chat-files" multiple hidden></label>
+        <textarea id="chat-input" rows="2" placeholder="Например: какие документы нужны во второй части заявки? Есть ли аванс? Сколько стоит позиция 5 и где дешевле? Прайс поставщика — скрепкой 📎 слева"></textarea>
         <button class="btn primary" type="submit" id="chat-send">Спросить</button>
       </form>
       <div class="chat-cache" id="chat-cache"></div>

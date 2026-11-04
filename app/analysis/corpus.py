@@ -49,7 +49,12 @@ _PRIORITY_RULES = [
 
 
 def _priority(name: str) -> int:
-    base = name.lower().replace("ё", "е").split("/")[-1]
+    low = name.lower().replace("ё", "е")
+    base = low.split("/")[-1]
+    # Папки «Изменения ДД.ММ.ГГГГ» (дозагрузка, 0.9.0) и «Разъяснения заказчика» — последняя редакция, сразу после
+    # извещения: при повторном анализе целиком модель видит их раньше исходных документов.
+    if any(re.match(r"изменени|разъяснени", d) for d in low.split("/")[:-1]):
+        return 1
     for prio, pattern in _PRIORITY_RULES:
         if re.search(pattern, base):
             return prio

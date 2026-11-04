@@ -1,10 +1,9 @@
 """
 Учётные записи сотрудников: логины, пароли, роли, доступ к клиентам, сеансы входа и журнал действий.
 
-Пока используется админ-панелью (/admin, включается ADMIN_PANEL=1 в .env) и страницей входа для проверки
-(/login, LOGIN_PAGE=1 — app/login.py). Сам сайт вход ещё не требует —
-это следующий шаг (доступ сотрудникам по VPN): тогда страница будет спрашивать логин, показывать только клиентов из
-доступа сотрудника и разрешать действия по его роли (ROLES ниже).
+Используется админ-панелью (/admin), страницей входа (/login) и проверкой входа на сайт (app/access.py, при
+LOGIN_REQUIRED=1 — с 0.7.0): сайт спрашивает логин, показывает только клиентов из доступа сотрудника и разрешает
+действия по его роли (ROLES ниже).
 
 Пароли хранятся только как хеш scrypt со своей солью для каждого; сеансы — как хеш случайного ключа из cookie
 (украденная база не даёт ни паролей, ни действующих сеансов). Данные — в app.db (папка данных сайта).
@@ -12,6 +11,9 @@
 Забыли пароль администратора — в Ubuntu, в папке проекта:
     docker compose exec web python -m app.auth reset-password <логин>
 (напечатает новый временный пароль).
+
+Учётные записи для начала работы — администратор и по сотруднику на клиента (уже существующие не трогает):
+    docker compose exec web python -m app.auth setup-accounts
 
 Тестовые учётные записи для проверки входа (по одной на роль; настоящие не трогает):
     docker compose exec web python -m app.auth demo-users            (ещё раз — новые пароли)
@@ -70,7 +72,7 @@ CREATE TABLE IF NOT EXISTS user_events (
 CREATE INDEX IF NOT EXISTS user_events_at ON user_events(at);
 """
 
-# Роли. Права — на будущее подключение входа на сайт; сейчас по ним только админ-панель решает, кого пускать.
+# Роли и их права. По правам сайт (app/access.py) решает, какие действия разрешены сотруднику, а админ-панель — кого пускать.
 # view — представление «Реестра конкурсов» NocoDB по умолчанию для роли.
 ROLES = {
     "admin": {"title": "Администратор", "view": "Вся таблица",
@@ -587,12 +589,53 @@ def _cli_demo(delete: bool) -> int:
     return 0
 
 
+# ---------- учётные записи для начала работы (0.7.0) ----------
+
+# Решение пользователя 03.11.2026: администратор и по сотруднику на каждого клиента. ФИО, логины, роли и доступ
+# потом меняются в админ-панели.
+STANDARD_ACCOUNTS = [
+    # логин, ФИО, роль, клиенты
+    ("admin", "Администратор", "admin", ["*"]),
+    ("nasha", "Сотрудник — Наша компания", "tender", ["main"]),
+    ("sargsyan", "Сотрудник — ИП Саргсян", "tender", ["sargsyan"]),
+]
+
+
+def _cli_setup(known_clients: set[str]) -> int:
+    print("Учётные записи (временные пароли показываются только сейчас; при первом входе их нужно сменить):\n")
+    print(f"{'Логин':<12} {'Пароль':<14} {'Роль':<22} Клиенты")
+    for login_name, name, role, clients in STANDARD_ACCOUNTS:
+        if find_user(login_name):
+            print(f"{login_name:<12} {'—':<14} уже есть — не трогаю (новый пароль: python -m app.auth reset-password {login_name})")
+            continue
+        missing = [c for c in clients if c != "*" and c not in known_clients]
+        if missing:
+            print(f"{login_name:<12} {'—':<14} не создана: в config/clients.json нет клиента {', '.join(missing)}")
+            continue
+        user, pw = create_user({"login": login_name, "name": name, "role": role, "clients": clients}, None,
+                               known_clients, "командная строка")
+        print(f"{login_name:<12} {pw:<14} {ROLES[role]['title']:<22} {_clients_text(user['clients'])}")
+    demo = [u for u in list_users() if _is_demo(u)]
+    if demo:
+        print("\n⚠ Есть тестовые учётные записи (" + ", ".join(u["login"] for u in demo) + ") — с включённым входом "
+              "ими тоже можно войти. Удалить: python -m app.auth demo-users --delete")
+    print("\nВход: http://127.0.0.1:8000 (откроется страница входа).")
+    return 0
+
+
 # ---------- командная строка (если забыли пароль администратора) ----------
 
 def _cli(argv: list[str]) -> int:
     init()
     if argv and argv[0] == "demo-users" and argv[1:] in ([], ["--delete"]):
         return _cli_demo(argv[1:] == ["--delete"])
+    if argv == ["setup-accounts"]:
+        try:
+            from .config import load_clients
+            known = {c.id for c in load_clients().values()}
+        except Exception:
+            known = set()
+        return _cli_setup(known)
     if len(argv) == 2 and argv[0] == "reset-password":
         user = find_user(argv[1])
         if not user:
@@ -608,7 +651,7 @@ def _cli(argv: list[str]) -> int:
             print(f"{u['login']:<20} {ROLES.get(u['role'], {}).get('title', u['role']):<22} "
                   f"{'активна' if u['active'] else 'заблокирована'}  {u['name']}")
         return 0
-    print("использование: python -m app.auth reset-password <логин> | list | demo-users [--delete]")
+    print("использование: python -m app.auth setup-accounts | reset-password <логин> | list | demo-users [--delete]")
     return 2
 
 

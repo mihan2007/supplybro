@@ -478,6 +478,7 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
         "models": {"claude": model, "effort": effort_for(model), "deepseek": DEEPSEEK_MODEL,
                    "fallback": claude.fallback or ""},
         "corpus_hash": corpus_hash(docs),
+        "doc_index": {d.rel_path: d.sha256 for d in docs},   # какие документы учтены (0.9.0: разбор изменений)
         "documents": [{"name": d.name, "chars": len(d.text), "used": d in used} for d in docs],
         "internal_number": internal,
         "flat": flat,

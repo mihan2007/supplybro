@@ -42,7 +42,7 @@ from ..analysis.run import DEEPSEEK_MODEL, MSK, OUT_DIR, load_result, save_resul
 from ..analysis.spec_xlsx import write_spec_xlsx
 from . import abroad as abroad_search, dsearch, fetch, history, yandex
 from .articles import brand_of, clean_brand_model, mentions, norm, queries_abroad, queries_rf, recheck_queries, weak
-from .extract import analyze_page
+from .extract import _from_text, analyze_page
 from .fx import rates, to_rub
 from .judge import judge
 
@@ -121,6 +121,7 @@ class Group:
     en: str = ""                                        # английское название детали (для зарубежных запросов)
     brand: str = ""
     rechecked: bool = False
+    unverified: list = field(default_factory=list)      # цены из выдачи поиска — только показать (0.8.0)
 
 
 def _key_ok(path: str) -> bool:
@@ -588,6 +589,50 @@ def _select(g: Group, fx: dict, abroad: bool) -> None:
         g.chosen[mkey] = top
 
 
+def _unverified(g: Group, fx: dict, abroad: bool) -> None:
+    """Цены из выдачи поиска (сниппет: заголовок и текст результата) там, где страницу не открыли или модель её
+    не подтвердила. Только для показа на сайте и в чате с пометкой «не проверено» (решение пользователя
+    04.11.2026); в NocoDB и в xlsx не идут — по правилу Шага 5.1g цена только со страницы. Берутся суммы со знаком
+    валюты; страница должна упоминать артикул (как у всех кандидатов); цена — в 0,15–10× НМЦ; продавцы — разные,
+    кроме тех, чья цена уже подтверждена; не больше трёх, по возрастанию."""
+    nmc = _num(g.rows[0].get("Стоимость НМЦ"))
+    taken = {_seller(a["domain"]) for items in g.chosen.values() for a in items}
+    found = []
+    for c in g.candidates:
+        if (c.get("verdict") or {}).get("match") in ("yes", "no"):
+            continue                    # подтверждённая цена уже в «chosen»; «не тот товар» — не показываем
+        text = " ".join(f"{c.get('title') or ''} {c.get('snippet') or ''}".split())
+        offers = _from_text(text, text) if text else []
+        if not offers:
+            continue
+        o = offers[0]
+        cur = (o.currency or "").upper()
+        if not cur:
+            continue
+        for tld, local in CIS_TLDS.items():
+            if c["domain"].endswith(tld) and cur == "RUB":
+                cur = local
+        mkey = c["hint"] if c["hint"] in ("rf", "abroad") else ("rf" if cur == "RUB" else "abroad")
+        if mkey == "abroad" and not abroad:
+            continue
+        rub = to_rub(float(o.price), cur, fx)
+        if not rub or rub < 1 or (nmc and not (nmc * MIN_RATIO <= rub <= nmc * MAX_RATIO)):
+            continue
+        found.append({"price_rub": round(rub, 2), "price": float(o.price), "currency": cur, "market": mkey,
+                      "url": c.get("url", ""), "domain": c["domain"], "title": (c.get("title") or "")[:160],
+                      "opened": bool(c.get("opened"))})
+    found.sort(key=lambda x: x["price_rub"])
+    out = []
+    for a in found:
+        if _seller(a["domain"]) in taken:
+            continue
+        taken.add(_seller(a["domain"]))
+        out.append(a)
+        if len(out) == 3:
+            break
+    g.unverified = out
+
+
 def _offer_marks(g: Group, abroad: bool) -> list[str]:
     """Пометки проверки предложений (Шаг 5.1g): пересчёт цены на 1 единицу и сомнительные предложения."""
     marks = []
@@ -613,9 +658,12 @@ def _offer_marks(g: Group, abroad: bool) -> list[str]:
 
 
 def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool = False, abroad: bool = True,
-                engine: str | None = None, cache_dir: Path | None = None) -> tuple[str, dict]:
+                engine: str | None = None, cache_dir: Path | None = None,
+                only: list[str] | None = None) -> tuple[str, dict]:
     """Поиск цен по позициям анализа. engine — deepseek / yandex / both (Россия); urgent — Яндекс мгновенным режимом;
-    abroad — искать и за рубежом. Второй проход (Шаг 5.1i) — по артикулам, где меньше трёх цен."""
+    abroad — искать и за рубежом. Второй проход (Шаг 5.1i) — по артикулам, где меньше трёх цен.
+    only — только эти позиции (№): после разбора изменений документации (0.9.0) — новые позиции и позиции с другим
+    названием / маркой; цены остальных и их строки отчёта остаются как были."""
     started = time.time()
     result = load_result(folder)
     if not result or not result.get("positions"):
@@ -625,7 +673,10 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     abroad = abroad and ABROAD_ON
     engines = {"deepseek", "yandex"} if engine == "both" else {engine}
     rows = result["positions"]
-    groups = _groups(rows)
+    only_set = {str(n).strip() for n in only} if only else None
+    groups = _groups([r for r in rows if str(r.get("№") or "").strip() in only_set] if only_set else rows)
+    if only_set and not groups:
+        return "Позиций для поиска цен нет (их убрали следующими изменениями)", load_report(folder) or {}
     usage = Usage()
     checker = DeepSeek(JUDGE_MODEL, usage) if JUDGE_MODEL.startswith("deepseek") else Claude(JUDGE_MODEL, usage, "low")
     if cache_dir:       # ответы проверки после паузы / отмены / ошибки повторно не оплачиваются (app/jobctl.py)
@@ -746,6 +797,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     # 4. Запись в позиции.
     step("Запись цен", 0.9)
     for g in groups:
+        _unverified(g, fx, abroad)
         g.unopened = [c["domain"] for c in g.candidates if not c.get("opened")]
         for c in g.candidates:
             if c.get("excluded"):
@@ -816,6 +868,7 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
 
     found_rf = sum(1 for g in groups if g.chosen.get("rf"))
     found_ab = sum(1 for g in groups if g.chosen.get("abroad"))
+    run_found = (len(groups), found_rf, found_ab)
     by_source = {}
     for g in groups:
         for s, m in g.found_by.items():
@@ -845,20 +898,38 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
             "positions": [r.get("№") for r in g.rows], "name": g.name, "brand_model": g.brand_model, "arts": g.arts,
             "en": g.en, "rf_queries": g.rf_queries, "abroad_queries": g.abroad_queries if abroad else [],
             "chosen": g.chosen, "history": g.history[:5], "unopened": g.unopened, "notes": g.notes,
-            "found_by": g.found_by, "rechecked": g.rechecked,
+            "found_by": g.found_by, "rechecked": g.rechecked, "unverified": g.unverified,
             "candidates": [{k: c.get(k) for k in ("market", "hint", "sources", "url", "domain", "title", "price", "currency",
                                                    "method", "via", "has_article", "opened", "fetch", "ds_fetch",
                                                    "verdict", "excluded", "reported_price", "reported_currency")}
                            for c in g.candidates],
         } for g in groups],
     }
+    if only_set:
+        # Поиск только по части позиций: строки отчёта остальных позиций — из прошлого отчёта (их цены не менялись).
+        old = load_report(folder) or {}
+        now_n = {str(r.get("№") or "").strip() for r in rows}
+        kept = [g for g in old.get("groups") or []
+                if not ({str(n).strip() for n in g.get("positions") or []} & only_set)
+                and {str(n).strip() for n in g.get("positions") or []} & now_n]
+        report["groups"] = kept + report["groups"]
+        merged = report["groups"]
+        report["summary"].update(
+            groups=len(merged), rf_found=sum(1 for g in merged if (g.get("chosen") or {}).get("rf")),
+            abroad_found=sum(1 for g in merged if (g.get("chosen") or {}).get("abroad")),
+            rf_full=sum(1 for g in merged if len((g.get("chosen") or {}).get("rf") or []) == 3),
+            abroad_full=sum(1 for g in merged if len((g.get("chosen") or {}).get("abroad") or []) == 3))
+        report["partial"] = {"positions": sorted(only_set, key=lambda x: (len(x), x)),
+                             "previous_at_text": old.get("at_text", "")}
     (folder / OUT_DIR).mkdir(parents=True, exist_ok=True)
     report_path(folder).write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     cost = [f"DeepSeek ≈ {money(dstats.usd)}"] if dstats.searches or dstats.fetches else []
     cost += [f"проверка ≈ {money(claude_usd)}"]
     if ystats.sync or ystats.async_:
         cost.append(f"Яндекс ≈ {ystats.rub:.2f} ₽")
-    summary = (f"Артикулов: {len(groups)}; цены РФ — у {found_rf}" + (f", зарубеж — у {found_ab}" if abroad else "")
+    summary = ((f"Только позиции № {', '.join(sorted(only_set, key=lambda x: (len(x), x)))} (после изменений документации). "
+                if only_set else "")
+               + f"Артикулов: {run_found[0]}; цены РФ — у {run_found[1]}" + (f", зарубеж — у {run_found[2]}" if abroad else "")
                + (f"; перепроверено {recheck['groups']}, добавлено цен {recheck['added']}" if recheck["groups"] else "")
                + "; " + ", ".join(cost) + (f"; {_noco_text(noco)}" if noco else ""))
     return summary, report

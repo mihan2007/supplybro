@@ -1,9 +1,17 @@
-// Страница входа (/login): вход, смена временного пароля, «что будет доступно сотруднику», выход.
-// Вход на сам сайт пока не подключён — страница только проверяет логин и пароль (app/login.py).
+// Страница входа (/login): вход, смена временного пароля, «что доступно сотруднику», выход.
+// Если вход на сайт обязателен (LOGIN_REQUIRED=1, app/access.py), после входа сразу ведёт туда, откуда пришли
+// (?next=…), или на свою страницу; иначе только проверяет логин и пароль (app/login.py).
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-let st = null;          // /api/auth/state: has_users, me, access, min_password
+let st = null;          // /api/auth/state: has_users, me, access, min_password, required
+let justEntered = false; // только что вошли / сменили пароль — пора на сайт
+
+// Куда вернуться после входа: только свой сайт (не //чужой.сайт) и не сама страница входа.
+function safeNext() {
+  const v = new URLSearchParams(location.search).get("next") || "";
+  return v.startsWith("/") && !v.startsWith("//") && !v.includes("\\") && !v.startsWith("/login") ? v : "";
+}
 
 async function api(path, method = "GET", body) {
   const opt = { method, headers: { "X-SupplyBro": "1" } };
@@ -59,6 +67,11 @@ async function boot() {
   if (!st.me && !st.has_users) return show("v-empty");
   if (!st.me) return showLogin();
   if (st.me.must_change) return showChange(true);
+  // Вход обязателен: после входа — сразу на сайт (туда, откуда пришли, или на свою страницу).
+  if (st.required && (justEntered || safeNext())) {
+    location.replace(safeNext() || st.access.home.url);
+    return;
+  }
   showMe();
 }
 
@@ -80,6 +93,7 @@ $("v-login").addEventListener("submit", async (e) => {
   setStatus("l-status", "Проверяю…");
   try {
     await api("/api/auth/login", "POST", { login: $("l-login").value, password: $("l-pass").value });
+    justEntered = true;
     setStatus("l-status", "");
     $("toast").hidden = true;
     $("l-pass").value = "";
@@ -113,6 +127,7 @@ $("v-change").addEventListener("submit", async (e) => {
   if ($("c-new").value !== $("c-new2").value) return setStatus("c-status", "новые пароли не совпадают", true);
   try {
     await api("/api/auth/password", "POST", { old: $("c-old").value, new: $("c-new").value });
+    justEntered = true;
     toast("Пароль изменён");
     boot();
   } catch (err) {
@@ -152,6 +167,8 @@ function showMe() {
   open.href = a.home.url;
   open.textContent = a.home.open;
   $("m-admin").hidden = !a.admin_panel;
+  // Вход обязателен — это уже не «проверка»: подсказку убираем.
+  $("m-notice").hidden = Boolean(st.required);
 }
 
 $("m-pass").addEventListener("click", () => showChange(false));

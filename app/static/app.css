@@ -62,6 +62,12 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
 }
 .brand { font-weight: 700; letter-spacing: .2px; }
 
+/* Кто вошёл (0.7.0) и кнопки, недоступные роли сотрудника, — их скрывает класс на <body> (сервер всё равно не пустит). */
+.me-box { display: flex; align-items: center; gap: 8px; }
+.me-name { font-size: 13px; color: var(--muted); white-space: nowrap; max-width: 34vw; overflow: hidden; text-overflow: ellipsis; }
+body.no-upload .need-upload, body.no-analyze .need-analyze, body.no-prices .need-prices,
+body.no-chat .need-chat, body.no-jobs .job-ctl { display: none !important; }
+
 /* Вкладки-переходы: панель под выбором конкурса (как остальные блоки), при прокрутке закреплена под шапкой.
    Нажатие прокручивает к разделу этой же страницы. Подложка цвета фона закрывает щели между панелями. */
 .jump-wrap {
@@ -170,7 +176,8 @@ td .clamp { -webkit-line-clamp: 3; }
 @media (max-width: 760px) {
   main { padding: 12px 12px 32px; }
   .topbar { padding: 10px 12px; }
-  .topbar { flex-wrap: wrap; row-gap: 8px; }       /* кнопки шапки — второй строкой, а не за край экрана */
+  .topbar { flex-wrap: wrap; row-gap: 8px; }
+  .topbar-tools { flex-wrap: wrap; row-gap: 6px; }       /* кнопки шапки — второй строкой, а не за край экрана */
   .jump-wrap { margin: -7px -12px; padding: 7px 12px; }
   /* Узкий экран: все вкладки видны сразу (в две строки), а не уезжают за край. */
   .jump-nav { flex-wrap: wrap; overflow-x: visible; }
@@ -256,6 +263,28 @@ input[type="text"], input:not([type]), .newtender input {
 .notice .btn { margin-top: 8px; margin-right: 8px; }
 .notice ul { margin: 6px 0 0; padding-left: 18px; }
 .checks { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap: 4px; font-size: 13px; }
+/* Изменения документации (0.9.0) */
+#an-changes { display: grid; gap: 10px; margin-bottom: 12px; }
+#an-changes:empty { display: none; }
+.change-set { border: 1px solid var(--line-strong); border-left: 4px solid var(--accent); border-radius: 8px;
+  padding: 10px 12px; background: var(--panel); display: grid; gap: 8px; font-size: 13px; }
+.change-set.old { border-left-color: var(--line-strong); }
+.change-set > summary { cursor: pointer; }
+.change-set > summary .cs-head { display: inline; }
+.cs-head { font-weight: 600; font-size: 14px; }
+.cs-head .muted { font-size: 12px; }
+.cs-summary { font-size: 14px; }
+.cs-docs { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+.cs-table { font-size: 13px; }
+.cs-table td { vertical-align: top; }
+.cs-table td.cs-old { color: var(--muted); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 60%, transparent); }
+.cs-table td.cs-new { font-weight: 500; }
+.cs-table .cs-col { color: var(--muted); font-size: 12px; }
+.cs-comments { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
+.cs-comments li { background: var(--chip); border-radius: 6px; padding: 6px 10px; }
+.change-set .notice { margin: 0; }
+.changed-badge { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--accent); cursor: help; }
+tr.row-changed td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .checks li { padding: 4px 10px; border-radius: 6px; background: var(--chip); }
 .checks li.warn { background: var(--warn-bg); color: var(--warn-text); }
 .tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -292,6 +321,26 @@ td.block-row { background: var(--chip) !important; font-weight: 600; }
 }
 .chat-form .btn { padding: 9px 16px; font-size: 14px; }
 .chat-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+/* Прайсы, КП и счета поставщиков в чате (0.8.0) */
+.chat-form .btn.attach { padding: 9px 12px; font-size: 16px; line-height: 1; cursor: pointer; }
+#chat.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.msg.pricelist { background: var(--panel); border: 1px solid var(--line); display: grid; gap: 8px; }
+.pl-head { font-weight: 600; }
+.pl-head .muted { font-weight: 400; font-size: 12px; }
+.pl-status { font-size: 13px; }
+.pl-status.wait { color: var(--accent); }
+.pl-status.ok { color: var(--text); }
+.pl-wrap { max-height: 420px; }
+.pl-table { font-size: 13px; }
+.pl-table td { vertical-align: top; }
+.pl-table td.pl-line { max-width: 360px; color: var(--muted); font-size: 12px; }
+.pl-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pl-remove { justify-self: start; font-size: 12px; }
+.msg.pricelist .notice { margin: 0; }
+.offers.unverified { margin-top: 4px; }
+.offers.unverified .badge { font-size: 11px; padding: 0 6px; }
+.muted.small, .small { font-size: 12px; }
 /* Состояние чата: готов ли, в кэше ли документы и сколько стоит следующий вопрос */
 .chat-cache { font-size: 13px; margin-top: 8px; color: var(--muted); }
 .chat-cache:empty { display: none; }

@@ -87,10 +87,19 @@ def inside(base: Path, rel: str) -> Path:
     return target
 
 
+# Папки дозагруженных изменений (0.9.0): «Изменения 04.11.2026», «Изменения №1» — тоже документы конкурса.
+CHANGES_FOLDER_RE = re.compile(r"^изменени", re.IGNORECASE)
+
+
 def doc_roots(folder: Path) -> list[Path]:
-    """Где лежат документы конкурса: стандартные подпапки, а если их нет — вся папка."""
+    """Где лежат документы конкурса: стандартные подпапки и папки «Изменения …», а если их нет — вся папка."""
     roots = [folder / s for s in DOC_SUBFOLDERS if (folder / s).is_dir()]
-    return roots or [folder]
+    if roots:
+        try:
+            roots += sorted(p for p in folder.iterdir() if p.is_dir() and CHANGES_FOLDER_RE.match(p.name))
+        except OSError:
+            pass
+    return roots or [folder]           # старая папка без подпапок — обходится вся (и «Изменения …» в ней)
 
 
 def safe_name(text: str, limit: int = 120) -> str:

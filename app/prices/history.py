@@ -74,7 +74,10 @@ def load_index(client, progress=None) -> dict[str, list[dict]]:
             for a in articles(item["brand_model"], item["name"]):
                 index.setdefault(norm(a), []).append(item)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    # Целиком и разом (сайт читает этот файл для «Все цены», пока обработчик его пишет, — 0.10.0).
+    tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, cache)
     return index
 
 

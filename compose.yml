@@ -29,7 +29,9 @@ services:
       NOCODB_WRITE: ${NOCODB_WRITE:-1}
       NOCODB_DUPLICATES: ${NOCODB_DUPLICATES:-separate}
       AUTO_PRICES: ${AUTO_PRICES:-1}
-      # Админ-панель учётных записей (http://127.0.0.1:8000/admin): 1 — включена; вход на сам сайт пока не требуется.
+      # Вход на сайт по логину и паролю: 1 — обязателен (тогда /admin, /user и /login включены всегда), 0 — сайт без входа.
+      LOGIN_REQUIRED: ${LOGIN_REQUIRED:-1}
+      # Админ-панель учётных записей (http://127.0.0.1:8000/admin): 1 — включена (при LOGIN_REQUIRED=1 — всегда).
       ADMIN_PANEL: ${ADMIN_PANEL:-0}
       # Страница сотрудника (http://127.0.0.1:8000/user) — без выбора моделей: 1 — включена.
       USER_PAGE: ${USER_PAGE:-0}
@@ -66,6 +68,8 @@ services:
       PRICES_HISTORY_HOURS: ${PRICES_HISTORY_HOURS:-12}
       DEEPSEEK_SEARCH_COUNT: ${DEEPSEEK_SEARCH_COUNT:-50}
       YANDEX_RESULTS_PER_QUERY: ${YANDEX_RESULTS_PER_QUERY:-20}
+      PRICELIST_MODEL: ${PRICELIST_MODEL:-claude-haiku-5-5}
+      CHANGES_MODEL: ${CHANGES_MODEL:-}
     volumes:
       # Папка данных (база сайта, очередь задач) — внутри Ubuntu, из DATA_DIR в .env.
       - "${DATA_DIR:?Укажите DATA_DIR в файле .env}:/data"

@@ -118,10 +118,14 @@ def init() -> None:
 
 
 # Какая очередь обработчика выполняет какую задачу (app/worker.py) и как это называть на странице.
-LANES = {"prepare": "docs", "analyze": "docs", "noco": "nocodb", "noco_prices": "nocodb", "prices": "prices"}
-LANE_TITLES = {"docs": "подготовка и анализ документов", "nocodb": "запись в NocoDB", "prices": "поиск цен"}
+LANES = {"prepare": "docs", "analyze": "docs", "noco": "nocodb", "noco_prices": "nocodb", "prices": "prices",
+         "pricelist": "pricelists", "noco_purch": "nocodb", "changes": "docs", "noco_changes": "nocodb"}
+LANE_TITLES = {"docs": "подготовка и анализ документов", "nocodb": "запись в NocoDB", "prices": "поиск цен",
+               "pricelists": "прайсы поставщиков"}
 KIND_TITLES = {"prepare": "подготовка документов", "analyze": "анализ документов", "noco": "запись в NocoDB",
-               "noco_prices": "запись цен в NocoDB", "prices": "поиск цен"}
+               "noco_prices": "запись цен в NocoDB", "prices": "поиск цен", "pricelist": "разбор прайсов поставщиков",
+               "noco_purch": "запись цен поставщиков в NocoDB", "changes": "разбор изменений документации",
+               "noco_changes": "запись изменений в NocoDB"}
 
 
 def heartbeat(lane: str, job_id: int | None = None) -> None:

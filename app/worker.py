@@ -115,6 +115,32 @@ def run_job(job) -> str:
         if params.get("analyze"):
             ok = _chain(client.id, job["folder"], "analyze", {"model": params["model"]} if params.get("model") else None)
             summary += ". Анализ поставлен в очередь" if ok else ". Анализ" + PAUSED_NOTE
+        if params.get("changes"):
+            # Документы дозагрузили в уже разобранный конкурс (0.9.0): разбор изменений — следом, в этой же очереди
+            # (если ещё идёт анализ — после него, и разбор сравнит с его результатом).
+            ok = _chain(client.id, job["folder"], "changes", {"by": params.get("by") or ""})
+            summary += ". Разбор изменений поставлен в очередь" if ok else ". Разбор изменений" + PAUSED_NOTE
+        return summary
+
+    if job["kind"] == "changes":
+        from .analysis.changes import mark_prices_queued, process
+        summary, entry = process(client.id, job["folder"], folder, progress, by=params.get("by") or "",
+                                 cache_dir=cache)
+        need = (entry or {}).get("prices", {}).get("positions") or []
+        if need and AUTO_PRICES:
+            from .prices.run import load_report
+            if load_report(folder):
+                # Цены уже искали — ищем только по новым позициям и позициям с другим названием / маркой.
+                active = db.active_job(client.id, job["folder"], "prices")
+                if active and not (active["status"] == "queued" and db.job_params(active).get("only")):
+                    summary += ". Цены по изменённым позициям найдёт поиск цен, который уже стоит в очереди"
+                else:
+                    only = list(dict.fromkeys((db.job_params(active).get("only") if active else []) + need))
+                    if _chain(client.id, job["folder"], "prices", {"only": only}):
+                        mark_prices_queued(folder, entry["id"])
+                        summary += f". Поиск цен по позициям № {', '.join(need[:15])} поставлен в очередь"
+            else:
+                summary += ". Цены ещё не искали — «Искать цены» найдёт и для новых позиций"
         return summary
 
     if job["kind"] == "analyze":
@@ -164,24 +190,40 @@ def run_job(job) -> str:
                 summary += ". Цены допишутся в спецификацию следом"
         return summary
 
+    if job["kind"] == "noco_changes":
+        # Изменения документации — по кнопке «Записать изменения в NocoDB» (0.9.0).
+        from .analysis.changes import write_noco
+        return write_noco(client, job["folder"], folder, progress)
+
     if job["kind"] == "noco_prices":
         # Цены нашлись, пока анализ ещё записывался в NocoDB: эта задача стоит в той же очереди после записи
         # и дописывает цены в готовую спецификацию.
         from .prices.run import write_prices_noco
         return write_prices_noco(client, job["folder"], folder)
 
+    if job["kind"] == "pricelist":
+        # Прайсы, КП, счета поставщиков (0.8.0): все файлы в очереди этого конкурса — по одному.
+        from .pricelists import process
+        return process(client.id, job["folder"], folder, progress, cache_dir=cache)
+
+    if job["kind"] == "noco_purch":
+        # Цены поставщиков по кнопке «Записать в спецификацию» — в колонки «Отдел закупок».
+        from .pricelists import write_noco
+        return write_noco(client, job["folder"], folder, progress)
+
     if job["kind"] == "prices":
         from .prices.run import find_prices
         summary, _report = find_prices(client, job["folder"], folder, progress, urgent=bool(params.get("urgent")),
                                        abroad=params.get("abroad", True) is not False, engine=params.get("engine"),
-                                       cache_dir=cache)
+                                       cache_dir=cache, only=params.get("only") or None)
         return summary
 
     raise RuntimeError(f"неизвестный вид задачи: {job['kind']}")
 
 
 PRICE_KINDS = ("prices",)
-NOCO_KINDS = ("noco", "noco_prices")
+NOCO_KINDS = ("noco", "noco_prices", "noco_purch", "noco_changes")
+PRICELIST_KINDS = ("pricelist",)          # прайсы поставщиков — своя очередь: не ждут долгий поиск цен в интернете
 
 
 _current: dict[str, int | None] = {}     # очередь → выполняемая задача (для сигнала «обработчик жив»)
@@ -248,14 +290,17 @@ def main() -> None:
     restored = db.recover_interrupted()
     print(f"Обработчик запущен. Возвращено в очередь прерванных задач: {restored}", flush=True)
     jobctl.prune_cache()
-    # Три очереди: подготовка и анализ; запись в NocoDB (долгая у новых конкурсов); поиск цен (ждёт ответов поиска).
-    for name in ("docs", "nocodb", "prices"):
+    # Четыре очереди: подготовка и анализ; запись в NocoDB (долгая у новых конкурсов); поиск цен (ждёт ответов поиска);
+    # прайсы поставщиков (0.8.0).
+    for name in ("docs", "nocodb", "prices", "pricelists"):
         _current[name] = None
         db.heartbeat(name, None)
     threading.Thread(target=heartbeats, name="heartbeat", daemon=True).start()
     threading.Thread(target=lane, args=("prices",), kwargs={"only": PRICE_KINDS}, name="prices", daemon=True).start()
     threading.Thread(target=lane, args=("nocodb",), kwargs={"only": NOCO_KINDS}, name="nocodb", daemon=True).start()
-    lane("docs", skip=PRICE_KINDS + NOCO_KINDS)
+    threading.Thread(target=lane, args=("pricelists",), kwargs={"only": PRICELIST_KINDS}, name="pricelists",
+                     daemon=True).start()
+    lane("docs", skip=PRICE_KINDS + NOCO_KINDS + PRICELIST_KINDS)
 
 
 if __name__ == "__main__":

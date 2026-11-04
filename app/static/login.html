@@ -20,9 +20,9 @@
     <!-- Учётных записей нет -->
     <section class="panel auth-box" id="v-empty" hidden>
       <h1>Учётных записей ещё нет</h1>
-      <p class="muted">Заведите первого администратора в админ-панели (<a href="/admin">/admin</a>, включается
-        <code>ADMIN_PANEL=1</code>) или создайте тестовые учётные записи — в Ubuntu, в папке проекта:</p>
-      <p><code>docker compose exec web python -m app.auth demo-users</code></p>
+      <p class="muted">Создайте учётные записи — в Ubuntu, в папке проекта (логины и временные пароли появятся на экране):</p>
+      <p><code>docker compose exec web python -m app.auth setup-accounts</code></p>
+      <p class="muted">Или заведите первого администратора в админ-панели: <a href="/admin">/admin</a>.</p>
       <button class="btn" type="button" id="e-retry">Проверить ещё раз</button>
     </section>
 
