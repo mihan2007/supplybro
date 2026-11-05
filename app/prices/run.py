@@ -40,6 +40,7 @@ from ..analysis.llm import Claude, DeepSeek, LLMError, Usage
 from ..analysis.pricing import money
 from ..analysis.run import DEEPSEEK_MODEL, MSK, OUT_DIR, load_result, save_result
 from ..analysis.spec_xlsx import write_spec_xlsx
+from ..tenders import norm_number
 from . import abroad as abroad_search, dsearch, fetch, history, yandex
 from .articles import brand_of, clean_brand_model, mentions, norm, queries_abroad, queries_rf, recheck_queries, weak
 from .extract import _from_text, analyze_page
@@ -153,6 +154,31 @@ def estimate(result: dict) -> dict:
             "judge_usd": round(len(groups) * 0.004, 2),
             "claude_abroad_usd": round(len(groups) * (abroad_search.SEARCHES * abroad_search.SEARCH_USD + 0.01), 2)
             if CLAUDE_ABROAD else 0}
+
+
+# Конкурс без анализа на сайте (его разбирал агент): позиции — из спецификации NocoDB (0.14.0). Файл с ценами — под
+# своим именем: «Позиции_и_цены.xlsx» в AIExtract у таких конкурсов — файл агента, его не трогаем.
+NOCO_XLSX = "Цены_поиск_сайта.xlsx"
+
+
+def noco_positions(client, folder_name: str) -> list[dict]:
+    """Позиции из спецификации NocoDB конкурса (таблица — из noco_links или по внутреннему номеру), в том же виде,
+    что позиции анализа: №, Наименование позиции, Марка/модель, Кол-во, Ед. изм., Стоимость НМЦ."""
+    import asyncio
+    from ..price_summary import read_spec
+    spec, err = asyncio.run(read_spec(client, folder_name, ttl=0))
+    if err:
+        raise RuntimeError("спецификация NocoDB не прочиталась: " + err)
+    return positions_from_spec(spec)
+
+
+def positions_from_spec(spec: dict | None) -> list[dict]:
+    """Строки спецификации (price_summary.read_spec) → позиции для поиска цен; без наименования — пропуск."""
+    out = [{"№": s["n"], "Наименование позиции": s["name"], "Марка/модель": s["brand_model"], "Кол-во": s["qty"],
+            "Ед. изм.": s["unit"], "Стоимость НМЦ": s["nmc"]}
+           for s in ((spec or {}).get("rows") or {}).values() if s.get("n") and (s.get("name") or s.get("brand_model"))]
+    return sorted(out, key=lambda r: [(0, int(x), "") if x.isdigit() else (1, 0, x)
+                                      for x in re.split(r"(\d+)", str(r["№"])) if x])
 
 
 def report_path(folder: Path) -> Path:
@@ -666,8 +692,15 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     названием / маркой; цены остальных и их строки отчёта остаются как были."""
     started = time.time()
     result = load_result(folder)
+    source = "analysis"
     if not result or not result.get("positions"):
-        raise RuntimeError("сначала нужен анализ документов — цены ищутся по его позициям")
+        # Анализа на сайте нет (конкурс разбирал агент) — позиции из спецификации NocoDB (0.14.0, пользователь
+        # 04.11.2026: «искать цены всегда, даже если позиции были извлечены ранее»).
+        source = "nocodb"
+        result = {"positions": noco_positions(client, folder_name), "internal_number": norm_number(folder_name) or ""}
+        if not result["positions"]:
+            raise RuntimeError("позиций нет: анализа документов на сайте нет, а в спецификации NocoDB этого конкурса "
+                               "нет строк с наименованием")
     analyzed_at = result.get("analyzed_at")
     engine = engine if engine in ENGINES else ENGINE
     abroad = abroad and ABROAD_ON
@@ -832,14 +865,18 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
             base = _clean_note(r.get("Примечание"))
             r["Примечание"] = "; ".join(x for x in [base, *marks] if x)
 
-    current = load_result(folder) or {}
-    if current.get("analyzed_at") != analyzed_at:
-        raise RuntimeError("пока искались цены, анализ документов обновился — запустите поиск цен ещё раз")
-    result = current                              # свежая версия (с отметкой о записи в NocoDB) + найденные цены
-    result["positions"] = rows
-    result["prices_at"] = time.time()
-    save_result(folder, result)
-    spec_name = (result.get("outputs") or {}).get("spec_xlsx") or "Позиции_и_цены.xlsx"
+    if source == "analysis":
+        current = load_result(folder) or {}
+        if current.get("analyzed_at") != analyzed_at:
+            raise RuntimeError("пока искались цены, анализ документов обновился — запустите поиск цен ещё раз")
+        result = current                          # свежая версия (с отметкой о записи в NocoDB) + найденные цены
+        result["positions"] = rows
+        result["prices_at"] = time.time()
+        save_result(folder, result)
+        spec_name = (result.get("outputs") or {}).get("spec_xlsx") or "Позиции_и_цены.xlsx"
+    else:
+        spec_name = NOCO_XLSX                     # позиции из NocoDB: анализа нет, файл агента не трогаем
+        (folder / OUT_DIR).mkdir(parents=True, exist_ok=True)
     spec_path = folder / OUT_DIR / spec_name
     write_spec_xlsx(spec_path, rows)
 
@@ -859,7 +896,10 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
     lap("запись в файлы")
     # 5. NocoDB — только колонки рынков и «Примечание», только в спецификации, созданной сайтом. Если анализ ещё
     # записывается в NocoDB (у нового конкурса — минуты), цены допишет задача noco_prices в той же очереди следом.
-    if db.active_job(client.id, folder_name, "noco"):
+    if source == "nocodb":
+        noco = {"status": "skipped", "text": "спецификацию заполнял агент — цены в неё не записаны; они на сайте "
+                                             f"(«Поиск в интернете», «Все цены») и в {NOCO_XLSX}"}
+    elif db.active_job(client.id, folder_name, "noco"):
         db.enqueue(client.id, folder_name, "noco_prices", auto=True)
         noco = {"status": "pending", "text": "цены запишутся в спецификацию сразу после записи анализа в NocoDB"}
     else:
@@ -893,6 +933,10 @@ def find_prices(client, folder_name: str, folder: Path, progress, urgent: bool =
                     "abroad_full": sum(1 for g in groups if len(g.chosen.get("abroad", [])) == 3),
                     "by_source": by_source, "recheck": recheck},
         "checks": checks, "errors": errors, "noco": noco,
+        # откуда позиции (0.14.0): analysis — анализ на сайте; nocodb — спецификация NocoDB (их строки — тут же)
+        "source": source, "xlsx": spec_name,
+        "positions": [{k: r.get(k) for k in ("№", "Наименование позиции", "Марка/модель", "Кол-во", "Ед. изм.",
+                                              "Стоимость НМЦ")} for r in rows] if source == "nocodb" else None,
         "timing": {k: round(v) for k, v in timing.items()},
         "groups": [{
             "positions": [r.get("№") for r in g.rows], "name": g.name, "brand_model": g.brand_model, "arts": g.arts,

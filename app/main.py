@@ -767,36 +767,64 @@ def api_prices(client_id: str, folder: str):
             cands = g.pop("candidates", []) or []
             g["checked"] = sum(1 for c in cands if c.get("opened"))
             g["found"] = len(cands)
+    has_analysis = bool(result and result.get("positions"))
+    # Без анализа на сайте позиции — из спецификации NocoDB (0.14.0): сколько их — по прочитанной «Всеми ценами»
+    # спецификации (None — ещё не прочитана; кнопка всё равно доступна, сайт проверит при запуске).
+    spec = None if has_analysis else price_summary.cached_spec(client.id, folder)
+    spec_positions = None if spec is None else prices.positions_from_spec(spec)
+    if has_analysis:
+        positions = result["positions"]
+    else:
+        positions = (report or {}).get("positions") or spec_positions or []
     return {
         "report": report,
         "job": job,
-        "has_analysis": bool(result and result.get("positions")),
+        "has_analysis": has_analysis,
+        "noco_positions": None if spec_positions is None else len(spec_positions),
         "positions": [{k: r.get(k) for k in ("№", "Наименование позиции", "Марка/модель", "Кол-во", "Ед. изм.",
-                                              "Стоимость НМЦ")} for r in (result or {}).get("positions") or []],
+                                              "Стоимость НМЦ")} for r in positions],
         "stale": bool(report and result and (result.get("analyzed_at") or 0) > (report.get("at") or 0)),
         "analysis_active": bool(db.active_job(client.id, folder, "analyze") or db.active_job(client.id, folder, "prepare")),
+        "analysis_pending": _analysis_pending(client.id, folder),
         "noco_active": bool(db.active_job(client.id, folder, "noco") or db.active_job(client.id, folder, "noco_prices")),
-        "estimate": prices.estimate(result) if result else None,
+        "estimate": prices.estimate({"positions": positions}) if positions else None,
         "auto_prices": AUTO_PRICES,
         "settings": prices.settings(),
     }
 
 
+def _analysis_pending(client_id: str, folder: str) -> bool:
+    """Позиции вот-вот изменятся: идёт анализ или подготовка, после которой будет анализ."""
+    if db.active_job(client_id, folder, "analyze"):
+        return True
+    prep = db.active_job(client_id, folder, "prepare")
+    return bool(prep and db.job_params(prep).get("analyze"))
+
+
 @app.post("/api/clients/{client_id}/prices/run")
-def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bool = True, engine: str = ""):
-    """Запустить поиск цен по позициям анализа. engine — deepseek / yandex / both (чем искать по России)."""
+async def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bool = True, engine: str = ""):
+    """Запустить поиск цен — в любой момент (0.14.0, пользователь 04.11.2026: «искать цены всегда, даже если они были
+    извлечены ранее»). Позиции — из анализа на сайте, а без него — из спецификации NocoDB. Идёт анализ — поиск
+    запустится сам сразу после него (AUTO_PRICES). engine — deepseek / yandex / both (чем искать по России)."""
+    from .prices import run as prices
     client = get_client(client_id)
     base = folder_path(client, folder)
-    result = load_result(base)
-    if not (result and result.get("positions")):
-        raise HTTPException(400, "сначала нужен анализ документов — цены ищутся по его позициям")
-    if db.active_job(client.id, folder, "analyze") or db.active_job(client.id, folder, "prepare"):
-        raise HTTPException(409, "идёт подготовка или анализ документов — поиск цен можно запустить после них")
     running = db.active_job(client.id, folder, "prices")
     if running:       # уже идёт (из другой вкладки или сам после анализа) — второй поиск не ставим
         return {"job_id": running["id"], "already": True}
-    from .prices import run as prices
+    if _analysis_pending(client.id, folder):
+        if AUTO_PRICES:
+            return {"after_analysis": True}
+        raise HTTPException(409, "идёт анализ документов — позиции ещё меняются; поиск цен можно запустить после него")
+    result = load_result(base)
+    if not (result and result.get("positions")):
+        spec, err = await price_summary.read_spec(client, folder)
+        if not prices.positions_from_spec(spec):
+            raise HTTPException(400, "позиций нет: анализа документов на сайте нет, а в спецификации NocoDB этого "
+                                     "конкурса нет строк с наименованием" + (f" ({err})" if err else ""))
     params = {"urgent": bool(urgent), "abroad": bool(abroad)}
+    if not (result and result.get("positions")):
+        params["source"] = "nocodb"                           # для журнала и страницы; позиции обработчик прочитает сам
     if engine in prices.ENGINES and access.is_admin():      # сотрудник поисковик не выбирает
         params["engine"] = engine
     return {"job_id": db.enqueue(client.id, folder, "prices", params)}

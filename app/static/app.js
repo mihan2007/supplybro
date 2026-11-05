@@ -1594,30 +1594,42 @@ function renderPrices(d, busy) {
   const needDeepseek = engine !== "yandex" || abroadBox.checked;
   const run = $("pr-run");
   run.textContent = r ? "Искать заново" : "Искать цены";
-  const blocker = !d.has_analysis ? "Сначала нужен анализ документов — цены ищутся по его позициям"
-    : d.analysis_active ? "Идёт подготовка, анализ или запись в NocoDB — поиск цен после них"
+  // 0.14.0 (пользователь 04.11.2026: «искать цены всегда, даже если они были извлечены ранее»): кнопка доступна
+  // всегда, кроме: поиск уже идёт; позиций нет совсем (ни анализа на сайте, ни строк в спецификации NocoDB); нет ключа.
+  // Без анализа на сайте — позиции из спецификации NocoDB; идёт анализ — поиск запустится сам после него.
+  const t = currentTender();
+  const summaryHere = psLast && t && psLast.folder === t.folder;     // «Все цены» этого конкурса уже прочитаны
+  const noPositions = !d.has_analysis && !d.analysis_pending &&
+    (d.noco_positions === 0 || (summaryHere && !psLast.has_positions));
+  const blocker = noPositions ? "Позиций нет: анализа документов на сайте нет, а в спецификации NocoDB нет строк — " +
+      "запустите анализ документов"
+    : d.analysis_pending && !d.auto_prices ? "Идёт анализ документов — позиции ещё меняются; поиск цен — после него"
     : needYandex && !s.yandex_key ? "Нет ключа Яндекса (secrets/API_key_Yandex.txt) — выберите поиск DeepSeek"
     : needDeepseek && !s.deepseek_key ? "Нет ключа DeepSeek (secrets/API_key_DeepSeek.txt)" : "";
   run.disabled = busy || Boolean(blocker);
   const est = priceEstimate(d);
-  run.title = blocker || (est ? "Оценка: " + est : "");
+  run.title = blocker || (d.analysis_pending ? "Идёт анализ — поиск цен запустится сам сразу после него"
+    : !d.has_analysis ? "Позиции — из спецификации NocoDB (анализа документов на сайте нет)" + (est ? ". Оценка: " + est : "")
+    : est ? "Оценка: " + est : "");
   $("pr-stale").hidden = !(d.stale && !busy);
   if (r) {
     const c = r.cost || {};
     const total = c.usd !== undefined ? c.usd : (c.claude_usd || 0);
     $("pr-info").textContent = `· ${r.at_text} · ${Math.max(1, Math.round((r.seconds || 0) / 60))} мин · ≈ ${usd(total)}` +
-      (c.yandex_rub ? ` + ${fmtRub.format(c.yandex_rub)} ₽` : "");
+      (c.yandex_rub ? ` + ${fmtRub.format(c.yandex_rub)} ₽` : "") + (r.source === "nocodb" ? " · позиции из NocoDB" : "");
   } else {
     $("pr-info").textContent = "";
   }
-  if (blocker && d.has_analysis && !d.analysis_active) {
+  if (blocker) {
     setStatus("pr-status", blocker + ".", true);
-  } else if (!busy && d.analysis_active) {
-    setStatus("pr-status", (d.has_analysis
-      ? "Анализ готов, идёт запись в NocoDB."
-      : "Идёт подготовка и анализ документов.") +
-      (d.auto_prices ? " Поиск цен запустится сам сразу после этого; найденные цены попадут в спецификацию NocoDB."
-        : " После этого можно будет искать цены."));
+  } else if (!busy && d.analysis_pending) {
+    setStatus("pr-status", "Идёт анализ документов." +
+      (d.auto_prices ? " Поиск цен запустится сам сразу после него; найденные цены попадут в спецификацию NocoDB."
+        : " После него можно будет искать цены."));
+  } else if (!r && !busy && !d.has_analysis) {
+    setStatus("pr-status", "Анализа документов на сайте нет — «Искать цены» найдёт цены по позициям из спецификации " +
+      "NocoDB" + (d.noco_positions ? ` (${d.noco_positions} поз.)` : "") + ". Найденное — здесь и во «Всех ценах»; " +
+      "в спецификацию, которую заполнял агент, сайт цены не пишет." + (est ? " Оценка: " + est + "." : ""));
   } else if (!r && !busy) {
     setStatus("pr-status", d.has_analysis
       ? "Цен ещё нет. «Искать цены» — программа найдёт товар поиском " + (engine === "deepseek" ? "DeepSeek" : engine === "yandex" ? "Яндекса" : "DeepSeek и Яндекса") +
@@ -1738,9 +1750,15 @@ async function loadPriceSummary() {
     return;
   }
   if (my !== seq.ps) return;
-  psLast = d;
+  psLast = { ...d, folder: t.folder };
   renderPriceSummary(d);
   applyPriceTab();
+  // Конкурс без анализа на сайте: теперь известно, есть ли позиции в спецификации NocoDB, — обновить кнопку поиска
+  // (а /prices — сколько их, для подсказки и оценки стоимости).
+  if (prLast && !prLast.has_analysis) {
+    if (prLast.noco_positions == null && d.positions_source === "nocodb") loadPrices();
+    else renderPrices(prLast, prBusy);
+  }
 }
 
 function supplierList(items) {
@@ -2641,6 +2659,7 @@ $("pr-run").addEventListener("click", async () => {
       urgent: !USER_MODE && engine !== "deepseek" && $("pr-urgent").checked ? "1" : "",
       abroad: $("pr-abroad").checked ? "1" : "0" }, { method: "POST" });
     if (r.already) setStatus("pr-status", "Поиск цен уже идёт (запущен сам после анализа или в другой вкладке) — показываю его ход.");
+    if (r.after_analysis) toast("Идёт анализ документов — поиск цен запустится сам сразу после него.");
     $("pr-urgent").checked = false;
   } catch (err) {
     setStatus("pr-status", "Не удалось запустить поиск цен: " + err.message, true);
