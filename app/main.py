@@ -690,7 +690,7 @@ def api_jobs(client_id: str):
     lanes = db.lanes_state()
     active = db.active_jobs()
     out_lanes = []
-    for lane in ("docs", "nocodb", "prices", "pricelists"):
+    for lane in ("docs", "nocodb", "prices", "pricelists", "bid"):
         beat = lanes.get(lane) or {}
         running = next((a for a in active if a["status"] == "running" and db.LANES.get(a["kind"], "docs") == lane), None)
         out_lanes.append({"lane": lane, "title": db.LANE_TITLES[lane],
@@ -915,6 +915,177 @@ async def api_prices_summary(client_id: str, folder: str, record: int | None = N
     hist, hist_info = await asyncio.to_thread(price_summary.history_index, client)
     data = await asyncio.to_thread(price_summary.build, base, spec, hist)
     return {**data, "noco_error": noco_error, "noco_read": bool(spec), "history": hist_info}
+
+
+# ---------- подготовка заявки (0.15.0, app/bid) ----------
+# Пользователь 05.11.2026: «кнопка подготовка документов должна быть на сайте далее идет полная подготовка, с минимум
+# вопросов». Одна кнопка — весь пакет; от пользователя — только цена (по желанию) и недостающие сведения.
+
+BID_FILE_DIRS = ("AIExtract/Заявка/", "AIExtract/Поставщикам")
+
+
+def _bid_view(report: dict | None, base: Path) -> dict | None:
+    """Отчёт подготовки заявки для страницы — без правок модели и служебных подробностей."""
+    if not report:
+        return None
+    from .bid import forms as bid_forms
+    from .bid.run import BID_DIR
+    plan = report.get("plan") or {}
+    files = []
+    root = base / BID_DIR
+    if root.is_dir():
+        for p in sorted(root.rglob("*")):
+            if p.is_file() and not p.name.startswith("~$"):
+                rel = p.relative_to(base).as_posix()
+                files.append({"path": rel, "name": p.relative_to(root).as_posix(), "size": p.stat().st_size,
+                              "marks": bid_forms.count_marks(p) if p.suffix.lower() == ".docx" else 0})
+    keys = ("structure", "documents", "checks", "errors", "gaps", "summary", "participant", "price", "price_values",
+            "supplier_files", "noco", "at", "at_text", "model", "usd", "seconds", "backup", "reapplied", "positions_source",
+            "skipped_docs")
+    view = {k: report.get(k) for k in keys}
+    view["requirements"] = plan.get("requirements") or []
+    view["notes"] = plan.get("notes") or []
+    view["forms"] = [{k: f.get(k) for k in ("doc_n", "title", "source", "file", "marks", "error", "problems")}
+                     for f in (report.get("forms") or []) + (report.get("inventory_forms") or [])]
+    view["files"] = files
+    view["usage_totals"] = (report.get("usage") or {}).get("totals") if isinstance(report.get("usage"), dict) else None
+    return view
+
+
+@app.get("/api/clients/{client_id}/bid")
+def api_bid(client_id: str, folder: str):
+    """Подготовленная заявка (AIExtract/bid.json, папка AIExtract/Заявка), задача подготовки, участники на выбор."""
+    from .bid.run import BID_MODEL, BID_MODELS, load_report
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    result = load_result(base)
+    _fp, docs_with_text = _docs_fingerprint(client.id, folder)
+    report = load_report(base)
+    latest = db.latest_job(client.id, folder, ("bid",))
+    job = job_view(latest)
+    if job:
+        job["reapply"] = bool(db.job_params(latest).get("reapply"))     # пересчёт цены — без модели
+    return {
+        "report": _bid_view(report, base),
+        "job": job,
+        "noco_job": job_view(db.latest_job(client.id, folder, ("noco_bid",))),
+        "entities": [{"id": e.id, "name": e.name, "inn": e.inn, "materials": bool(e.materials)}
+                     for e in client.legal_entities],
+        "entity": (report or {}).get("entity") or (client.legal_entities[0].id if client.legal_entities else None),
+        "docs_with_text": docs_with_text,
+        "has_analysis": bool(result),
+        "positions": len((result or {}).get("positions") or []),
+        "analysis_pending": _analysis_pending(client.id, folder),
+        "stale": bool(report and result and float(result.get("analyzed_at") or 0) > float(report.get("at") or 0)),
+        "models": BID_MODELS if access.is_admin() else [],
+        "default_model": BID_MODEL,
+    }
+
+
+@app.post("/api/clients/{client_id}/bid/run")
+def api_bid_run(client_id: str, folder: str, entity: str | None = None, model: str | None = None):
+    """Подготовить документы заявки: модель читает документацию и сведения участника, сайт собирает пакет."""
+    client = get_client(client_id)
+    folder_path(client, folder)
+    running = db.active_job(client.id, folder, "bid")
+    if running:
+        return {"job_id": running["id"], "already": True}
+    if _analysis_pending(client.id, folder) or db.active_job(client.id, folder, "prepare"):
+        raise HTTPException(409, "документы конкурса ещё обрабатываются (идёт подготовка или анализ) — "
+                                 "запустите подготовку заявки после этого")
+    _fp, docs_with_text = _docs_fingerprint(client.id, folder)
+    if not docs_with_text:
+        raise HTTPException(400, "нет документов с извлечённым текстом — сначала загрузите и обработайте документацию")
+    if entity and not client.entity(entity):
+        raise HTTPException(400, "такого участника у клиента нет")
+    params = {"entity": entity} if entity else {}
+    from .bid.run import BID_MODELS
+    if model in BID_MODELS and access.is_admin():      # сотрудник модель не выбирает — настройка сайта
+        params["model"] = model
+    return {"job_id": db.enqueue(client.id, folder, "bid", params)}
+
+
+@app.post("/api/clients/{client_id}/bid/price")
+def api_bid_price(client_id: str, folder: str, body: dict = Body(...)):
+    """Цена заявки: {"mode": "percent", "value": 5} — снижение от НМЦ, %; {"mode": "total", "value": 1000000,
+    "vat": "with"|"without"} — общая сумма; {"mode": "none"} — убрать. Формы пересчитываются без модели."""
+    from .bid.run import load_report, set_price
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    report = load_report(base)
+    if not report or not report.get("documents"):
+        raise HTTPException(400, "документы заявки ещё не готовились — нажмите «Подготовить документы заявки»")
+    if db.active_job(client.id, folder, "bid"):
+        raise HTTPException(409, "идёт подготовка заявки — цену можно задать после неё")
+    mode = str(body.get("mode") or "")
+    if mode == "none":
+        price = None
+    elif mode in ("percent", "total"):
+        try:
+            value = float(str(body.get("value")).replace(" ", "").replace(",", "."))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "цена: нужно число")
+        if mode == "percent" and not (0 <= value < 100):
+            raise HTTPException(400, "снижение — от 0 до 100 %")
+        if mode == "total" and value <= 0:
+            raise HTTPException(400, "сумма должна быть больше нуля")
+        price = {"mode": mode, "value": value}
+        if mode == "total":
+            price["vat"] = "without" if body.get("vat") == "without" else "with"
+    else:
+        raise HTTPException(400, "неизвестный способ задать цену")
+    set_price(base, price)
+    return {"job_id": db.enqueue(client.id, folder, "bid", {"reapply": True})}
+
+
+@app.post("/api/clients/{client_id}/bid/noco")
+def api_bid_noco(client_id: str, folder: str):
+    """Записать перечень документов и формы заявки в NocoDB — только по этой кнопке."""
+    from .bid.run import load_report
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    if not (load_report(base) or {}).get("documents"):
+        raise HTTPException(400, "документы заявки ещё не готовились")
+    running = db.active_job(client.id, folder, "noco_bid")
+    if running:
+        return {"job_id": running["id"], "already": True}
+    return {"job_id": db.enqueue(client.id, folder, "noco_bid")}
+
+
+@app.get("/api/clients/{client_id}/bid/file")
+def api_bid_file(client_id: str, folder: str, path: str):
+    """Файл пакета заявки или файл поставщику (скачать)."""
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    if not path.startswith(BID_FILE_DIRS):
+        raise HTTPException(404, "файл не найден")
+    target = inside(base, path)
+    if not target.is_file():
+        raise HTTPException(404, "файл не найден")
+    return FileResponse(target, filename=target.name)
+
+
+@app.get("/api/clients/{client_id}/bid/zip")
+def api_bid_zip(client_id: str, folder: str):
+    """Весь пакет заявки одним архивом (папки частей сохраняются)."""
+    import io
+    import zipfile
+    from urllib.parse import quote
+    from .bid.run import BID_DIR
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    root = base / BID_DIR
+    if not root.is_dir():
+        raise HTTPException(404, "пакета заявки ещё нет")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(root.rglob("*")):
+            if p.is_file() and not p.name.startswith("~$"):
+                z.write(p, p.relative_to(root).as_posix())
+    from .tenders import norm_number
+    name = f"Заявка {norm_number(folder) or folder}.zip"
+    return StreamingResponse(iter([buf.getvalue()]), media_type="application/zip",
+                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
 
 
 # ---------- чат по документации ----------

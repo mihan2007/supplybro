@@ -90,6 +90,7 @@
         <a class="jump" href="#docs" data-target="docs">Документы</a>
         <a class="jump" href="#analysis" data-target="analysis">Анализ</a>
         <a class="jump" href="#prices" data-target="prices">Цены</a>
+        <a class="jump" href="#bid" data-target="bid">Заявка</a>
         <a class="jump" href="#card" data-target="card">NocoDB</a>
         <a class="jump" href="#spec" data-target="spec">Спецификация</a>
         <a class="jump" href="#chat" data-target="chat">Чат</a>
@@ -224,6 +225,57 @@
       <div class="table-wrap an-wrap" id="ps-wrap" hidden><table id="ps-table"></table></div>
       <div class="table-wrap an-wrap" id="pr-wrap" hidden><table id="pr-table"></table></div>
       <div class="usage" id="pr-usage"></div>
+    </section>
+
+    <!-- Подготовка заявки (0.15.0): одна кнопка — требования, состав заявки, заполненные формы, копии документов -->
+    <section class="panel" id="bid" hidden>
+      <div class="section-head">
+        <h2>Заявка <span class="muted" id="bid-info"></span></h2>
+        <div class="section-tools">
+          <label class="inline" title="Юр. лицо, от которого подаётся заявка">Участник <select id="bid-entity"></select></label>
+          <label class="inline admin-only" title="Модель для подготовки заявки: DeepSeek — дешевле в 15–30 раз, Claude — дороже (выбор запоминается в этом браузере)">Модель <select id="bid-model"></select></label>
+          <button class="btn small primary need-analyze" id="bid-run" type="button">Подготовить документы заявки</button>
+        </div>
+      </div>
+      <div class="status" id="bid-status"></div>
+      <div class="job" id="bid-job" hidden>
+        <div class="progress"><span id="bid-bar"></span></div>
+        <div class="job-text" id="bid-job-text"></div>
+        <div class="job-ctl" id="bid-job-ctl"></div>
+      </div>
+      <div class="notice warn" id="bid-stale" hidden>Анализ документов обновился после подготовки заявки — подготовьте документы заново.</div>
+      <div id="bid-body" hidden>
+        <div class="bid-summary" id="bid-summary"></div>
+        <form class="bid-price need-analyze" id="bid-price" autocomplete="off">
+          <span class="bid-price-label">Цена заявки</span>
+          <select id="bid-price-mode" aria-label="Как задать цену">
+            <option value="percent">снижение от НМЦ, %</option>
+            <option value="total">общая сумма, руб.</option>
+            <option value="none">не задавать</option>
+          </select>
+          <input id="bid-price-value" inputmode="decimal" placeholder="например, 5" aria-label="Значение">
+          <select id="bid-price-vat" aria-label="Сумма с НДС или без" hidden>
+            <option value="with">с НДС</option>
+            <option value="without">без НДС</option>
+          </select>
+          <button class="btn small" id="bid-price-apply" type="submit">Применить цену</button>
+          <span class="muted bid-price-now" id="bid-price-now"></span>
+        </form>
+        <ul class="checks" id="bid-checks"></ul>
+        <div class="tabs" role="tablist">
+          <button class="tab active" type="button" data-btab="docs">Документы <span class="muted" id="bid-docs-count"></span></button>
+          <button class="tab" type="button" data-btab="need">Нужно от вас <span class="muted" id="bid-need-count"></span></button>
+          <button class="tab" type="button" data-btab="req">Требования к участнику <span class="muted" id="bid-req-count"></span></button>
+          <button class="tab" type="button" data-btab="files">Файлы пакета <span class="muted" id="bid-files-count"></span></button>
+          <button class="tab" type="button" data-btab="notes">Замечания <span class="muted" id="bid-notes-count"></span></button>
+        </div>
+        <div class="table-wrap an-wrap" id="bid-docs"><table id="bid-docs-table"></table></div>
+        <div id="bid-need" hidden></div>
+        <div class="table-wrap an-wrap" id="bid-req" hidden><table id="bid-req-table"></table></div>
+        <div id="bid-files" hidden></div>
+        <div id="bid-notes" hidden></div>
+        <div class="usage" id="bid-usage"></div>
+      </div>
     </section>
 
     <!-- Данные из «Реестра конкурсов» -->

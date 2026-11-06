@@ -59,6 +59,9 @@ RULES = [
     (re.compile(r"^/analysis/save$"), "analyze", "запустил запись в NocoDB"),
     (re.compile(r"^/analysis/changes/run$"), "analyze", "запустил разбор изменений документации"),
     (re.compile(r"^/analysis/changes/write$"), "analyze", "записал изменения документации в NocoDB"),
+    (re.compile(r"^/bid/run$"), "analyze", "запустил подготовку документов заявки"),
+    (re.compile(r"^/bid/price$"), "analyze", "задал цену заявки"),
+    (re.compile(r"^/bid/noco$"), "analyze", "записал заявку в NocoDB"),
     (re.compile(r"^/prices/run$"), "prices", "запустил поиск цен"),
     (re.compile(r"^/jobs/\d+/cancel$"), "jobs", "отменил задачу"),
     (re.compile(r"^/jobs/\d+/pause$"), "jobs", "приостановил задачу"),
@@ -75,6 +78,7 @@ CLIENT_PATH = re.compile(r"^/api/clients/([^/]+)(/.*)?$")
 BLOCK_PATHS = [
     (re.compile(r"^/docs(/|$)"), "docs"),
     (re.compile(r"^/analysis(/|$)"), "analysis"),
+    (re.compile(r"^/bid(/|$)"), "bid"),
     (re.compile(r"^/(prices|pricelists)(/|$)"), "prices"),
     (re.compile(r"^/tenders/[^/]+/spec$"), "spec"),
     (re.compile(r"^/chat(/|$)"), "chat"),

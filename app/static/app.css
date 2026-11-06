@@ -457,3 +457,33 @@ table.tl-table { width: 100%; }
   .tl-table td .tl-empty-val:only-child { display: none; }
   .tl-table tbody tr td[colspan] { grid-column: 1 / -1; }
 }
+
+/* Заявка (0.15.0): итог готовности, цена заявки, таблица документов, «Нужно от вас». */
+.bid-summary { margin: 4px 0 12px; display: grid; gap: 4px; font-size: 13px; }
+.bid-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.bid-ready { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; }
+.bid-tools { display: flex; gap: 8px; flex-wrap: wrap; }
+.bid-facts { color: var(--text); }
+.bid-price { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.bid-price-label { font-weight: 600; }
+.bid-price select { width: auto; max-width: 100%; padding: 5px 8px; }
+.bid-price input { padding: 5px 8px; }
+.bid-price input { width: 140px; }
+.bid-note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; }
+.bid-notes li { line-height: 1.45; }
+.bid-price-now { flex-basis: 100%; }
+#bid-docs-table td.bid-files div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+#bid-docs-table td.bid-files .badge { margin-left: 6px; }
+#bid-docs-table tr.muted td { color: var(--muted); }
+#bid-req-table td.quote { font-style: italic; }
+.bid-list { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
+.bid-list .badge { margin-right: 2px; }
+#bid-need h3, #bid-files h3 { font-size: 14px; margin: 10px 0 6px; }
+@media (max-width: 760px) {
+  .bid-price input { width: 110px; }
+  #bid-docs-table td.bid-files div { max-width: 200px; }
+  #bid-docs-table td:nth-child(2) { min-width: 180px; }
+}
+/* Длинные сообщения об ошибках (JSON ответа API, ссылки) переносятся — страница не шире экрана телефона (0.15.1). */
+.job-text, .status { overflow-wrap: anywhere; }

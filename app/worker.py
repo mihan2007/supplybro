@@ -9,6 +9,8 @@
   analyze — анализ документов ИИ (этап 3); после него в очереди ставятся запись в NocoDB (NOCODB_WRITE=1) и поиск
             цен (AUTO_PRICES=1);
   noco    — запись анализа в NocoDB (после анализа — сама, или «Записать всё равно» при конфликте); своя очередь;
+  bid     — подготовка документов заявки (app/bid, 0.15.0): своя очередь; reapply — пересчёт цен без модели;
+  noco_bid — перечень документов и формы заявки в NocoDB (по кнопке, очередь NocoDB);
   noco_prices — дописать найденные цены в спецификацию NocoDB после записи анализа (та же очередь, следом);
   prices  — поиск цен по позициям анализа (app/prices): DeepSeek (Россия и зарубеж; Яндекс — на выбор), запись
             в xlsx и NocoDB.
@@ -218,11 +220,24 @@ def run_job(job) -> str:
                                        cache_dir=cache, only=params.get("only") or None)
         return summary
 
+    if job["kind"] == "bid":
+        # Подготовка документов заявки (0.15.0) — по кнопке; reapply — только пересчёт цен в формах, без модели.
+        from .bid.run import prepare_bid
+        summary, _report = prepare_bid(client, job["folder"], folder, progress, entity=params.get("entity"),
+                                       model=params.get("model"), cache_dir=cache, reapply=bool(params.get("reapply")))
+        return summary
+
+    if job["kind"] == "noco_bid":
+        # Перечень документов и формы заявки — в NocoDB, только по кнопке «Записать в NocoDB».
+        from .bid.noco import write
+        return write(client, job["folder"], folder, progress)
+
     raise RuntimeError(f"неизвестный вид задачи: {job['kind']}")
 
 
 PRICE_KINDS = ("prices",)
-NOCO_KINDS = ("noco", "noco_prices", "noco_purch", "noco_changes")
+NOCO_KINDS = ("noco", "noco_prices", "noco_purch", "noco_changes", "noco_bid")
+BID_KINDS = ("bid",)                      # подготовка заявки — своя очередь: не задерживает анализ других конкурсов
 PRICELIST_KINDS = ("pricelist",)          # прайсы поставщиков — своя очередь: не ждут долгий поиск цен в интернете
 
 
@@ -300,7 +315,8 @@ def main() -> None:
     threading.Thread(target=lane, args=("nocodb",), kwargs={"only": NOCO_KINDS}, name="nocodb", daemon=True).start()
     threading.Thread(target=lane, args=("pricelists",), kwargs={"only": PRICELIST_KINDS}, name="pricelists",
                      daemon=True).start()
-    lane("docs", skip=PRICE_KINDS + NOCO_KINDS + PRICELIST_KINDS)
+    threading.Thread(target=lane, args=("bid",), kwargs={"only": BID_KINDS}, name="bid", daemon=True).start()
+    lane("docs", skip=PRICE_KINDS + NOCO_KINDS + PRICELIST_KINDS + BID_KINDS)
 
 
 if __name__ == "__main__":

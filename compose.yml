@@ -70,6 +70,11 @@ services:
       YANDEX_RESULTS_PER_QUERY: ${YANDEX_RESULTS_PER_QUERY:-20}
       PRICELIST_MODEL: ${PRICELIST_MODEL:-claude-haiku-5-5}
       CHANGES_MODEL: ${CHANGES_MODEL:-}
+      # Подготовка заявки (0.15.0) — см. .env.
+      BID_MODEL: ${BID_MODEL:-deepseek-flash}
+      BID_MODELS: ${BID_MODELS:-deepseek-flash,deepseek-v4-pro,claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5}
+      BID_PARALLEL: ${BID_PARALLEL:-4}
+      BID_MAX_FORMS: ${BID_MAX_FORMS:-30}
     volumes:
       # Папка данных (база сайта, очередь задач) — внутри Ubuntu, из DATA_DIR в .env.
       - "${DATA_DIR:?Укажите DATA_DIR в файле .env}:/data"

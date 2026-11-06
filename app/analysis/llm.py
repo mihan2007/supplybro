@@ -301,6 +301,70 @@ def conform(value, schema: dict, path: str = "ответ"):
     return value
 
 
+def json_task(prompt: str, schema: dict) -> str:
+    """Задание вызова: текст + требование ответить одним JSON-объектом по схеме (одинаково для Claude и DeepSeek)."""
+    return (prompt + "\n\nФормат ответа: только один JSON-объект — без пояснений до и после, без ```. "
+            "Схема (JSON Schema):\n" + json.dumps(schema, ensure_ascii=False))
+
+
+def deepseek_json(model: str, usage: "Usage", system: str, documents: str | None, task: str, schema: dict,
+              label: str, max_tokens: int, timeout: float) -> dict:
+    """Вызов DeepSeek с ответом JSON по схеме (запасной путь Claude и подготовка заявки). Документы — в системном
+    сообщении: начало у всех вызовов одинаковое, и кэш DeepSeek срабатывает сам."""
+    key = read_key(DEEPSEEK_KEY_FILE, "DeepSeek")
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    sys_text = system + ("\n\n" + documents if documents else "")
+    for attempt in (1, 2):
+        body = {"model": model, "temperature": 0, "max_tokens": min(max_tokens * 2, 64000),
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": sys_text}, {"role": "user", "content": task}]}
+        t0 = time.monotonic()
+        data = _post(DEEPSEEK_URL, headers, body, timeout, "DeepSeek")
+        u = data.get("usage") or {}
+        usage.add(model=model, label=label + (" (повтор)" if attempt == 2 else ""),
+                  input=u.get("prompt_tokens"), cache_read=u.get("prompt_cache_hit_tokens"),
+                  output=u.get("completion_tokens"), seconds=round(time.monotonic() - t0, 1))
+        if ((data.get("choices") or [{}])[0]).get("finish_reason") == "length":
+            raise TruncatedError(f"{label}: ответ DeepSeek обрезан (не хватило max_tokens)")
+        try:
+            text = data["choices"][0]["message"]["content"]
+            return conform(_extract_json(text), schema)
+        except (KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
+            if attempt == 2:
+                raise LLMError(f"{label}: ответ DeepSeek не по схеме ({exc})") from exc
+            task += f"\n\nВНИМАНИЕ: предыдущий ответ не удалось разобрать ({exc}). Ответь строго одним JSON-объектом."
+    raise LLMError(f"{label}: нет ответа")
+
+
+class DeepSeekJSON:
+    """Как Claude.json_call, но всегда DeepSeek (подготовка заявки на DeepSeek, 0.15.1 — дешевле Claude в 15–30 раз).
+    Документы — в системном сообщении: у вызовов одной задачи начало одинаковое, кэш DeepSeek срабатывает сам."""
+
+    def __init__(self, model: str, usage: Usage):
+        self.model = model
+        self.usage = usage
+        self.effort = ""
+        self.fallback = ""                 # для совместимости с Claude (запасного пути у DeepSeek нет)
+        self.fallback_reason = ""
+        read_key(DEEPSEEK_KEY_FILE, "DeepSeek")   # нет ключа — сразу понятная ошибка
+        self.cache = None
+
+    def json_call(self, *, system: str, documents: str | None, prompt: str, schema: dict, label: str,
+                  max_tokens: int = 16000, timeout: float = 900) -> dict:
+        task = json_task(prompt, schema)
+        key = None
+        if self.cache is not None:
+            key = self.cache.key("deepseek-json", self.model, system, documents, task, max_tokens)
+            hit = self.cache.get(key)
+            if hit is not None:
+                self.usage.add(model=self.model, label=label + " (готовый ответ — не оплачен)", usd=0.0, cached=True)
+                return hit
+        answer = deepseek_json(self.model, self.usage, system, documents, task, schema, label, max_tokens, timeout)
+        if key:
+            self.cache.put(key, answer)
+        return answer
+
+
 class Claude:
     def __init__(self, model: str, usage: Usage, effort: str = ""):
         self.model = model
@@ -325,31 +389,8 @@ class Claude:
 
     def _deepseek_json(self, system: str, documents: str | None, task: str, schema: dict, label: str,
                        max_tokens: int, timeout: float) -> dict:
-        """Тот же вызов через DeepSeek (запасной путь). Документы — в системном сообщении: начало у всех вызовов
-        одинаковое, и кэш DeepSeek срабатывает сам."""
-        key = read_key(DEEPSEEK_KEY_FILE, "DeepSeek")
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        sys_text = system + ("\n\n" + documents if documents else "")
-        for attempt in (1, 2):
-            body = {"model": self.fallback, "temperature": 0, "max_tokens": min(max_tokens * 2, 64000),
-                    "response_format": {"type": "json_object"},
-                    "messages": [{"role": "system", "content": sys_text}, {"role": "user", "content": task}]}
-            t0 = time.monotonic()
-            data = _post(DEEPSEEK_URL, headers, body, timeout, "DeepSeek")
-            u = data.get("usage") or {}
-            self.usage.add(model=self.fallback, label=label + (" (повтор)" if attempt == 2 else ""),
-                           input=u.get("prompt_tokens"), cache_read=u.get("prompt_cache_hit_tokens"),
-                           output=u.get("completion_tokens"), seconds=round(time.monotonic() - t0, 1))
-            if ((data.get("choices") or [{}])[0]).get("finish_reason") == "length":
-                raise TruncatedError(f"{label}: ответ DeepSeek обрезан (не хватило max_tokens)")
-            try:
-                text = data["choices"][0]["message"]["content"]
-                return conform(_extract_json(text), schema)
-            except (KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
-                if attempt == 2:
-                    raise LLMError(f"{label}: ответ DeepSeek не по схеме ({exc})") from exc
-                task += f"\n\nВНИМАНИЕ: предыдущий ответ не удалось разобрать ({exc}). Ответь строго одним JSON-объектом."
-        raise LLMError(f"{label}: нет ответа")
+        """Тот же вызов через DeepSeek (запасной путь, когда на счёте Anthropic нет денег)."""
+        return deepseek_json(self.fallback, self.usage, system, documents, task, schema, label, max_tokens, timeout)
 
     def json_call(self, *, system: str, documents: str | None, prompt: str, schema: dict, label: str,
                   max_tokens: int = 16000, timeout: float = 900) -> dict:
@@ -358,8 +399,7 @@ class Claude:
         documents — текст документов (кэшируется: должен быть одинаковым у всех вызовов одного анализа).
         prompt — задание этого вызова (после документов, не кэшируется); схема ответа дописывается к нему.
         """
-        task = (prompt + "\n\nФормат ответа: только один JSON-объект — без пояснений до и после, без ```. "
-                "Схема (JSON Schema):\n" + json.dumps(schema, ensure_ascii=False))
+        task = json_task(prompt, schema)
         key = None
         if self.cache is not None:
             key = self.cache.key("claude", self.model, self.effort, system, documents, task, max_tokens)

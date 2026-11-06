@@ -24,7 +24,7 @@ const state = {
   opened: "",           // какой конкурс показан на странице (его разделы загружены)
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0, bid: 0 };
 let docsTimer = null;
 let anTimer = null;
 let anLastJob = null;   // последняя увиденная задача анализа — чтобы заметить её окончание
@@ -510,6 +510,7 @@ function showTender(t) {
   $("docs").hidden = !t || blockOff("docs");
   $("analysis").hidden = !(t && t.folder) || blockOff("analysis");
   $("prices").hidden = !(t && t.folder) || blockOff("prices");
+  $("bid").hidden = !(t && t.folder) || blockOff("bid");
   $("chat").hidden = !(t && t.folder) || blockOff("chat");
   $("card").hidden = !(t && t.source === "nocodb") || blockOff("card");
   $("spec").hidden = !(t && t.source === "nocodb") || blockOff("spec");
@@ -523,14 +524,19 @@ async function loadTender() {
   stopDocsPolling();
   stopAnalysisPolling();
   stopPricesPolling();
+  stopBidPolling();
   if (!t) return;
   anLastJob = null;
   prLastJob = null;
+  bidLastJob = null;
+  bidShowAll = false;
+  delete $("bid-price").dataset.touched;
+  delete $("bid-entity").dataset.touched;
   if (t.source === "nocodb") {
-    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadChat()]);
+    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat()]);
   } else {
     renderFolderHead(t);
-    await Promise.all([loadDocs(), loadAnalysis(), loadPrices(), loadChat()]);
+    await Promise.all([loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat()]);
   }
   state.fresh = false;
 }
@@ -877,6 +883,7 @@ async function jobAction(j, action) {
     clearTimeout(docsTimer); docsTimer = null; loadDocs();
     clearTimeout(anTimer); anTimer = null; loadAnalysis();
     clearTimeout(prTimer); prTimer = null; loadPrices();
+    clearTimeout(bidTimer); bidTimer = null; loadBid();
   }
 }
 
@@ -1940,6 +1947,331 @@ function renderPricesTable(r, positions) {
 
 // ---------- чат по документации ----------
 
+// ---------- подготовка заявки (0.15.0) ----------
+// Одна кнопка «Подготовить документы заявки» — дальше всё само: требования к участнику, состав заявки, формы из
+// документации заполнены сведениями участника, документы из его библиотеки скопированы. От пользователя — цена
+// (по желанию) и то, чего нет в сведениях («Нужно от вас»).
+
+let bidTimer = null;
+let bidLastJob = null;
+let bidTab = "docs";
+let bidLast = null;
+const BID_MODEL_KEY = "supplybro.bidModel2";   // 0.15.1: новый ключ — прежний выбор Sonnet не держится
+const BID_STATUS = {
+  ready: ["✅ готово", "ok"], copied: ["🟢 из библиотеки", "ok"], draft: ["черновик", "warn"],
+  update: ["⚠ обновить", "warn"], urgent: ["🚩 запросить", "bad"], manual: ["⚠ подготовить вручную", "warn"],
+  third_party: ["🚩 у производителя / поставщика", "bad"], accountant: ["бухгалтер", "warn"],
+  user: ["готовит участник", "warn"], not_needed: ["не требуется", "muted"], conditional: ["при условии", "muted"],
+};
+const BID_PART = { single: "", "1": "1-я часть", "2": "2-я часть", price: "ценовое предложение", after_win: "после победы" };
+const BID_REQ = { ok: ["✅ соответствует", "ok"], fail: ["❌ не соответствует", "bad"], no_data: ["нет данных", "warn"],
+  declared: ["декларируется", "muted"] };
+// Модели подготовки заявки (0.15.1): DeepSeek — по умолчанию, в 15–30 раз дешевле Claude (оценки — по К933).
+const BID_MODEL_LABEL = {
+  "deepseek-flash": "DeepSeek Flash · ≈ $0,1",
+  "deepseek-v4-pro": "DeepSeek Pro · ≈ $0,3–0,5",
+  "claude-haiku-5-5": "Claude Haiku",
+  "claude-sonnet-5-5": "Claude Sonnet · ≈ $1,5–2",
+  "claude-opus-5-5": "Claude Opus · дороже всего",
+};
+const BID_PARTS_TEXT = { single: "одна часть", two_parts: "две части", three_parts: "три части (с ценовым предложением)" };
+
+function stopBidPolling() {
+  if (bidTimer) { clearTimeout(bidTimer); bidTimer = null; }
+}
+
+function bidFileLink(path, text) {
+  const t = currentTender();
+  return el("a", { href: clientPath("/bid/file") + "?" + new URLSearchParams({ folder: t.folder, path }),
+    text, title: "Скачать" });
+}
+
+async function loadBid() {
+  const t = currentTender();
+  const my = ++seq.bid;
+  stopBidPolling();
+  if (!t || !t.folder || blockOff("bid")) { $("bid").hidden = true; return; }
+  $("bid").hidden = false;
+  let d;
+  try {
+    d = await api(clientPath("/bid"), { folder: t.folder });
+  } catch (err) {
+    if (my === seq.bid) setStatus("bid-status", "Не удалось загрузить заявку: " + err.message, true);
+    return;
+  }
+  if (my !== seq.bid) return;
+  setStatus("bid-status", "");
+  const busy = renderBidJob(d.job, d.noco_job);
+  renderBid(d, busy);
+  bidLast = d;
+  if (busy || d.analysis_pending) bidTimer = setTimeout(loadBid, busy ? 2500 : 5000);
+}
+
+function renderBidJob(job, nocoJob) {
+  // Показываем последнюю из двух задач: подготовку (или пересчёт цены) или запись в NocoDB.
+  const j = nocoJob && (!job || (nocoJob.created_at || 0) > (job.created_at || 0)) ? nocoJob : job;
+  const box = $("bid-job");
+  lastJobs["bid-job-ctl"] = j;
+  renderJobControls($("bid-job-ctl"), j);
+  if (!j) { box.hidden = true; return false; }
+  box.hidden = false;
+  box.classList.remove("error", "done", "paused", "canceled");
+  const what = j.kind === "noco_bid" ? "Запись заявки в NocoDB"
+    : (j.reapply ? "Пересчёт цены в формах" : "Подготовка документов заявки");
+  if (j.status === "queued") {
+    $("bid-bar").style.width = "0%";
+    $("bid-job-text").textContent = `${what}: ` + queuedText(j);
+    return true;
+  }
+  if (j.status === "running") {
+    $("bid-bar").style.width = Math.round((j.progress || 0) * 100) + "%";
+    $("bid-job-text").textContent = `${what}: ${j.step || "…"}` + stoppingText(j) +
+      (j.kind === "bid" && !j.reapply && !j.control ? ". Обычно 3–8 минут — можно уйти и вернуться позже" : "");
+    return true;
+  }
+  if (j.status === "paused" || j.status === "canceled") {
+    box.classList.add(j.status);
+    $("bid-bar").style.width = Math.round((j.progress || 0) * 100) + "%";
+    $("bid-job-text").textContent = `${what}: ` + stoppedText(j);
+    return false;
+  }
+  $("bid-bar").style.width = "100%";
+  const when = j.finished_at ? new Date(j.finished_at * 1000).toLocaleString("ru-RU") : "";
+  box.classList.add(j.status === "error" ? "error" : "done");
+  $("bid-job-text").textContent = j.status === "error" ? `${what} — ошибка (${when}): ${j.message}`
+    : `${what} — готово (${when}). ${j.message}`;
+  const finished = bidLastJob && bidLastJob.id === j.id && ["queued", "running"].includes(bidLastJob.status);
+  bidLastJob = { id: j.id, status: j.status };
+  if (finished && j.status === "done") toast(j.kind === "noco_bid" ? "Заявка записана в NocoDB" : "Документы заявки готовы");
+  return false;
+}
+
+function renderBid(d, busy) {
+  const r = d.report;
+  if (!$("bid-entity").dataset.touched || !d.entities.some((e) => e.id === $("bid-entity").value)) {
+    fillSelect($("bid-entity"), d.entities.map((e) => ({ value: e.id, label: e.name + (e.materials ? "" : " (нет сведений)") })), d.entity);
+  }
+  if (d.models && d.models.length) {
+    const saved = storageGet(BID_MODEL_KEY);
+    fillSelect($("bid-model"), d.models.map((x) => ({ value: x, label: BID_MODEL_LABEL[x] || x })),
+      d.models.includes(saved) ? saved : d.default_model);
+  }
+  const run = $("bid-run");
+  run.textContent = r ? "Подготовить заново" : "Подготовить документы заявки";
+  run.disabled = busy || !d.docs_with_text || d.analysis_pending;
+  run.title = !d.docs_with_text ? "Сначала загрузите документацию конкурса"
+    : d.analysis_pending ? "Идёт анализ документов — подготовка заявки после него"
+    : "Модель прочитает документацию и сведения участника; сайт заполнит формы, скопирует документы из библиотеки " +
+      "участника и соберёт пакет в папку AIExtract/Заявка" + (r ? ". Прежний пакет сохранится в AIExtract/history" : "");
+  $("bid-stale").hidden = !d.stale;
+  if (!r) {
+    $("bid-body").hidden = true;
+    $("bid-info").textContent = "";
+    if (!busy) {
+      setStatus("bid-status", !d.docs_with_text ? "Подготовка заявки — после загрузки документации."
+        : (d.has_analysis ? "" : "Анализа документов ещё нет — позиции для технического предложения возьмутся из спецификации NocoDB (если есть). ") +
+          "«Подготовить документы заявки» — сайт найдёт требования к участнику и состав заявки, заполнит формы из " +
+          "документации сведениями участника, скопирует документы из его библиотеки и скажет, что нужно от вас.");
+    }
+    return;
+  }
+  const p = r.participant || {};
+  $("bid-info").textContent = `· ${p.name || ""} · ${r.at_text || ""}` + (r.model ? ` · ${r.model}` : "") +
+    (r.usd ? ` · ≈ ${usd(r.usd)}` : "") + (r.seconds ? ` · ${Math.max(1, Math.round(r.seconds / 60))} мин` : "");
+  $("bid-body").hidden = false;
+  renderBidSummary(r, busy);
+  renderBidPrice(r, busy);
+  const checks = [...(p.problems || []).map((x) => "⚠ " + x), ...(r.checks || []), ...(r.errors || []).map((x) => "⚠ " + x)];
+  $("bid-checks").replaceChildren(...checks.map((c) => el("li", { class: c.startsWith("✅") ? "" : "warn", text: c })));
+  renderBidDocs(r);
+  renderBidNeed(r);
+  renderBidReq(r);
+  renderBidFiles(r);
+  renderBidNotes(r);
+  showBidTab(bidTab);
+  $("bid-usage").textContent = r.usage_totals ? usageText(r.usage_totals) : "";
+}
+
+function renderBidSummary(r, busy) {
+  const s = r.summary || {};
+  const st = r.structure || {};
+  const box = $("bid-summary");
+  const line = el("div", { class: "bid-ready" },
+    el("strong", { text: `Готово ${s.ready || 0} из ${s.total || 0}` }),
+    s.drafts ? el("span", { class: "badge warn", text: `черновиков: ${s.drafts}` }) : null,
+    (s.urgent || []).length ? el("span", { class: "badge bad", text: `🚩 запросить: ${s.urgent.length}` }) : null,
+    el("span", { class: "muted", text: `файлов в пакете: ${s.files || 0}` }));
+  const tools = el("div", { class: "bid-tools" });
+  if (s.files) {
+    const t = currentTender();
+    tools.append(el("a", { class: "btn small", href: clientPath("/bid/zip") + "?" + new URLSearchParams({ folder: t.folder }),
+      text: "⤓ Скачать архив", title: "Весь пакет заявки одним архивом (папки частей сохранятся)" }));
+  }
+  const noco = el("button", { class: "btn small need-analyze", type: "button", text: "Записать в NocoDB",
+    title: "Перечень документов — в колонку «Перечень документов заявки», формы Word — в «ДС: декларативные формы» " +
+      "(прежние файлы ячейки остаются, кроме файлов с теми же именами)" });
+  noco.disabled = busy;
+  noco.addEventListener("click", async () => {
+    noco.disabled = true;
+    const t = currentTender();
+    try {
+      const x = await api(clientPath("/bid/noco"), { folder: t.folder }, { method: "POST" });
+      if (x.already) toast("Запись в NocoDB уже идёт.");
+    } catch (err) { setStatus("bid-status", "Не удалось записать в NocoDB: " + err.message, true); }
+    loadBid();
+  });
+  tools.append(noco);
+  const facts = [];
+  if (st.parts) facts.push("заявка: " + (BID_PARTS_TEXT[st.parts] || st.parts) + (st.part1_anonymous ? ", первая часть — без сведений об участнике" : ""));
+  if (st.deadline) facts.push("подача до " + st.deadline);
+  if (st.bid_security) facts.push("обеспечение заявки: " + st.bid_security);
+  if (st.price_basis && st.price_basis !== "не указано") facts.push("цена " + st.price_basis);
+  const extra = [];
+  if (r.noco && r.noco.status) {
+    extra.push(el("div", { class: "muted", text: `NocoDB (${r.noco.at_text || ""}): ` +
+      ([...(r.noco.done || []), ...(r.noco.notes || [])].join("; ") || "ничего не записано") }));
+  }
+  if (r.backup) extra.push(el("div", { class: "muted", text: "Прежний пакет сохранён: " + r.backup }));
+  box.replaceChildren(el("div", { class: "bid-head" }, line, tools),
+    facts.length ? el("div", { class: "bid-facts", text: facts.join(" · ") }) : null, ...extra);
+}
+
+function renderBidPrice(r, busy) {
+  const price = r.price || null;
+  const mode = $("bid-price-mode");
+  if (!$("bid-price").dataset.touched) {
+    mode.value = price ? price.mode : "percent";
+    $("bid-price-value").value = price ? String(price.value).replace(".", ",") : "";
+    $("bid-price-vat").value = price && price.vat === "without" ? "without" : "with";
+  }
+  $("bid-price-vat").hidden = mode.value !== "total";
+  $("bid-price-value").hidden = mode.value === "none";
+  $("bid-price-value").placeholder = mode.value === "total" ? "например, 1 250 000" : "например, 5";
+  $("bid-price-apply").disabled = busy;
+  const v = r.price_values || {};
+  const parts = [];
+  if (v["ЦЕНА_С_НДС"]) parts.push(`без НДС ${v["ЦЕНА_БЕЗ_НДС"]} · НДС ${v["НДС"]} · с НДС ${v["ЦЕНА_С_НДС"]} руб.`);
+  else if (!price) parts.push("цена не задана — в формах цены отмечены «<нет данных>»");
+  if (v["СТАВКА_НДС"]) parts.push("ставка: " + v["СТАВКА_НДС"]);
+  $("bid-price-now").textContent = parts.join(" · ");
+}
+
+let bidShowAll = false;     // показывать документы «не требуется»
+
+function renderBidDocs(r) {
+  const all = r.documents || [];
+  const hiddenCount = all.filter((x) => x.status === "not_needed").length;
+  const docs = bidShowAll ? all : all.filter((x) => x.status !== "not_needed");
+  $("bid-docs-count").textContent = all.length ? `(${all.length - hiddenCount})` : "";
+  const parts = all.some((x) => x.part && x.part !== "single");
+  const cols = ["№", "Документ", ...(parts ? ["Часть"] : []), "Состояние", "Файлы", "Что сделать"];
+  const head = el("tr", {}, ...cols.map((h) => el("th", { text: h })));
+  const rows = docs.map((x) => {
+    const [label, cls] = BID_STATUS[x.status] || [x.status, "muted"];
+    const files = el("td", { class: "bid-files" });
+    for (const f of x.files || []) {
+      files.append(el("div", {}, bidFileLink(f.file, f.file.split("/").pop()),
+        f.marks ? el("span", { class: "badge warn", text: `<нет данных> ×${f.marks}`, title: "Пометки — сведения, которых нет" }) : null));
+    }
+    const title = el("td", {}, el("div", { text: x.title + (x.form ? ` (${x.form})` : "") }));
+    if (x.required === "conditional" && x.condition && x.status !== "conditional") title.append(el("div", { class: "muted", text: "если: " + x.condition }));
+    if (x.note) title.append(el("div", { class: "muted bid-note", text: x.note, title: x.note }));
+    const todo = x.status === "draft" ? "дописать сведения — «Нужно от вас»" : (x.todo || "");
+    return el("tr", { class: x.status === "not_needed" ? "muted" : "" },
+      el("td", { text: x.n || "" }), title,
+      parts ? el("td", { text: BID_PART[x.part] || "" }) : null,
+      el("td", {}, el("span", { class: "badge " + cls, text: label })),
+      files, el("td", { text: todo }));
+  });
+  const foot = [];
+  if (hiddenCount) {
+    const a = el("button", { class: "btn small ghost", type: "button",
+      text: bidShowAll ? "Скрыть документы, которые не требуются" : `Показать документы, которые не требуются (${hiddenCount})` });
+    a.addEventListener("click", () => { bidShowAll = !bidShowAll; renderBidDocs(r); });
+    foot.push(el("tr", {}, el("td", { colspan: String(cols.length) }, a)));
+  }
+  $("bid-docs-table").replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows, ...foot));
+}
+
+function renderBidNotes(r) {
+  const st = r.structure || {};
+  const items = [];
+  if (st.submission) items.push(["Как подаётся", st.submission]);
+  if (st.naming) items.push(["Имена и формат файлов", st.naming]);
+  if (st.offer_validity) items.push(["Срок действия заявки", st.offer_validity]);
+  for (const n of r.notes || []) items.push(["", n]);
+  $("bid-notes-count").textContent = items.length ? `(${items.length})` : "";
+  $("bid-notes").replaceChildren(items.length
+    ? el("ul", { class: "bid-list bid-notes" }, ...items.map(([k, v]) => el("li", {}, k ? el("strong", { text: k + ": " }) : null, v)))
+    : el("p", { class: "muted", text: "Замечаний нет." }));
+}
+
+function renderBidNeed(r) {
+  const gaps = r.gaps || [];
+  const docs = (r.documents || []).filter((x) => ["urgent", "update", "third_party", "accountant", "user", "manual"].includes(x.status)
+    && x.required !== "not_needed");
+  const files = new Set(gaps.map((g) => g.file));
+  $("bid-need-count").textContent = files.size + docs.length ? `(${files.size + docs.length})` : "";
+  const box = $("bid-need");
+  const parts = [];
+  if (docs.length) {
+    parts.push(el("h3", { text: "Документы, которые нужно получить или подготовить" }),
+      el("ul", { class: "bid-list" }, ...docs.map((x) => el("li", {},
+        el("span", { class: "badge " + (BID_STATUS[x.status] || ["", "warn"])[1], text: (BID_STATUS[x.status] || [x.status])[0] }),
+        " " + x.title + (x.todo ? ` — ${x.todo}` : "") + (x.note ? `. ${x.note}` : "")))));
+  }
+  if (gaps.length) {
+    const byFile = new Map();
+    for (const g of gaps) { if (!byFile.has(g.file)) byFile.set(g.file, []); byFile.get(g.file).push(g.need); }
+    parts.push(el("h3", { text: "Сведения, которых нет (в формах — «<нет данных>», жёлтым)" }),
+      el("ul", { class: "bid-list" }, ...[...byFile].map(([file, needs]) => el("li", {},
+        el("strong", { text: file }), ": " + [...new Set(needs)].join("; ")))));
+    parts.push(el("p", { class: "muted", text: "Впишите сведения прямо в файлы Word (их можно скачать на вкладке «Документы») " +
+      "и уберите из имени «ЧЕРНОВИК ». Если сведения стоит запомнить для следующих заявок — добавьте их в «Выжимку» участника." }));
+  }
+  if (!parts.length) parts.push(el("p", { class: "muted", text: "Всё, что нужно для заявки, есть — проверьте файлы и подпишите." }));
+  box.replaceChildren(...parts);
+}
+
+function renderBidReq(r) {
+  const reqs = r.requirements || [];
+  $("bid-req-count").textContent = reqs.length ? `(${reqs.length})` : "";
+  const head = el("tr", {}, ...["Требование", "Участник", "Основание", "Цитата"].map((h) => el("th", { text: h })));
+  const rows = reqs.map((x) => {
+    const [label, cls] = BID_REQ[x.status] || [x.status, "muted"];
+    const q = el("td", { class: "quote" });
+    if (x.quote) {
+      q.append(el("div", { text: "«" + x.quote + "»" }));
+      q.append(el("div", { class: "muted", text: (x.file || "") + (x.quote_status && !["found", "found_other"].includes(x.quote_status) ? " · ⚠ цитата не найдена" : "") }));
+    }
+    return el("tr", {}, el("td", { text: x.text }), el("td", {}, el("span", { class: "badge " + cls, text: label })),
+      el("td", { text: x.basis || "" }), q);
+  });
+  $("bid-req-table").replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
+}
+
+function renderBidFiles(r) {
+  const files = r.files || [];
+  $("bid-files-count").textContent = files.length ? `(${files.length})` : "";
+  const sup = (r.supplier_files || {}).files || [];
+  const parts = [el("ul", { class: "bid-list" }, ...files.map((f) => el("li", {}, bidFileLink(f.path, f.name),
+    el("span", { class: "muted", text: " · " + fmtSize(f.size) }),
+    f.marks ? el("span", { class: "badge warn", text: `<нет данных> ×${f.marks}` }) : null)))];
+  if (sup.length) {
+    parts.push(el("h3", { text: "Запросы поставщикам (по производителям)" }),
+      el("ul", { class: "bid-list" }, ...sup.map((p) => el("li", {}, bidFileLink(p, p.split("/").pop())))));
+  } else if ((r.supplier_files || {}).note) {
+    parts.push(el("p", { class: "muted", text: r.supplier_files.note }));
+  }
+  $("bid-files").replaceChildren(...parts);
+}
+
+function showBidTab(tab) {
+  bidTab = tab;
+  for (const b of document.querySelectorAll("[data-btab]")) b.classList.toggle("active", b.dataset.btab === tab);
+  for (const k of ["docs", "need", "req", "files", "notes"]) $("bid-" + k).hidden = k !== tab;
+}
+
 const CHAT_MODEL_KEY = "supplybro.chatModel";
 let chatBusy = false;
 
@@ -2466,6 +2798,7 @@ async function pollActivity() {
     if (!docsTimer) loadDocs();
     if (!anTimer) loadAnalysis();
     if (!prTimer) loadPrices();
+    if (!bidTimer) loadBid();
     loadChatStatus();     // документы подготовились — чат готов
   }
   actSignature = sig;
@@ -2665,6 +2998,47 @@ $("pr-run").addEventListener("click", async () => {
     setStatus("pr-status", "Не удалось запустить поиск цен: " + err.message, true);
   }
   loadPrices();
+});
+$("bid-run").addEventListener("click", async () => {
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  $("bid-run").disabled = true;
+  try {
+    const r = await api(clientPath("/bid/run"), { folder: t.folder, entity: $("bid-entity").value,
+      model: USER_MODE ? "" : $("bid-model").value }, { method: "POST" });
+    if (r.already) setStatus("bid-status", "Подготовка уже идёт (запущена раньше или в другой вкладке) — показываю её ход.");
+  } catch (err) {
+    setStatus("bid-status", "Не удалось запустить подготовку заявки: " + err.message, true);
+  }
+  loadBid();
+});
+$("bid-entity").addEventListener("change", () => { $("bid-entity").dataset.touched = "1"; });
+$("bid-model").addEventListener("change", (e) => storageSet(BID_MODEL_KEY, e.target.value));
+for (const b of document.querySelectorAll("[data-btab]")) b.addEventListener("click", () => showBidTab(b.dataset.btab));
+for (const id of ["bid-price-mode", "bid-price-value", "bid-price-vat"]) {
+  $(id).addEventListener("input", () => {
+    $("bid-price").dataset.touched = "1";
+    $("bid-price-vat").hidden = $("bid-price-mode").value !== "total";
+    $("bid-price-value").hidden = $("bid-price-mode").value === "none";
+  });
+}
+$("bid-price").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  const mode = $("bid-price-mode").value;
+  const value = $("bid-price-value").value.trim();
+  if (mode !== "none" && !value) { setStatus("bid-status", "Впишите снижение в процентах или сумму заявки.", true); return; }
+  $("bid-price-apply").disabled = true;
+  try {
+    await api(clientPath("/bid/price"), { folder: t.folder }, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, value, vat: $("bid-price-vat").value }) });
+    delete $("bid-price").dataset.touched;
+    setStatus("bid-status", "");
+  } catch (err) {
+    setStatus("bid-status", "Цена не применена: " + err.message, true);
+  }
+  loadBid();
 });
 $("pr-abroad").addEventListener("change", (e) => { storageSet(PR_ABROAD_KEY, e.target.checked ? "1" : "0"); if (prLast) renderPrices(prLast, prBusy); });
 $("pr-engine").addEventListener("change", (e) => { storageSet(PR_ENGINE_KEY, e.target.value); if (prLast) renderPrices(prLast, prBusy); });

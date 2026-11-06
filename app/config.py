@@ -23,6 +23,8 @@ class LegalEntity:
     inn: str = ""
     # Другие написания, по которым юр. лицо узнаётся в данных NocoDB («Простор», «ИП Строк»).
     aliases: list[str] = field(default_factory=list)
+    # Материалы участника для подготовки заявки (0.15.0, app/bid/participant.py): папка, сведения, реквизиты, опись.
+    materials: dict = field(default_factory=dict)
 
     def matches(self, text: str) -> bool:
         """Упоминается ли это юр. лицо в тексте (по ИНН, названию или другому написанию)."""
