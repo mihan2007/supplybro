@@ -8,7 +8,8 @@
 LOGIN_REQUIRED=0 — сайт как раньше, без входа (только для своего компьютера, не для сервера).
 
 0.16.0 — сайт открывается в интернет (сервер, Caddy с HTTPS): без входа открыты ТОЛЬКО страница входа (/login, её
-оформление и скрипт), её адреса /api/auth/... и /health. Админ-панель (/admin, /api/admin/...) тоже только после
+оформление и скрипт), её адреса /api/auth/... и /health (0.17.0 — и страница-приветствие /start: гость на «/» попадает
+туда, ссылки на страницы с параметрами — сразу на вход). Админ-панель (/admin, /api/admin/...) тоже только после
 входа (первого администратора через сайт больше не создать — только командой setup-accounts), остальные файлы
 /static/ и описание адресов (/docs, /openapi.json) закрыты.
 
@@ -63,7 +64,7 @@ CURRENT_USER: contextvars.ContextVar[dict | None] = contextvars.ContextVar("supp
 
 # Открыто без входа (0.16.0): только страница входа — сама, её оформление и скрипт, её адреса /api/auth/... — и
 # проверка «сайт жив». Админ-панель, страница сайта, остальные файлы /static/ — только после входа.
-OPEN_EXACT = {"/login", "/health", "/favicon.ico"}
+OPEN_EXACT = {"/login", "/start", "/health", "/favicon.ico"}   # /start — страница-приветствие (0.17.0)
 OPEN_STATIC = {"/static/app.css", "/static/admin.css", "/static/login.css", "/static/login.js"}
 OPEN_PREFIXES = ("/api/auth/",)
 # Админ-панель: нужен вход, а кому что можно — проверяет сама панель (app/admin.py: администратор сайта / клиента).
@@ -213,6 +214,9 @@ class LoginMiddleware:
             return await self.app(scope, receive, send)
 
         user = user_from_request(request)
+        if not user and path == "/" and not request.url.query:
+            # Гость на главной (0.17.0) — страница-приветствие с кнопкой «Войти»; ссылки на конкурсы — сразу на вход.
+            return await RedirectResponse("/start", status_code=303)(scope, receive, send)
         if not user or user["must_change"]:
             return await _deny(request, 401, "войдите на сайт")(scope, receive, send)
         if method in MUTATING and _foreign_origin(request):

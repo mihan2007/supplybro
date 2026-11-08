@@ -201,6 +201,12 @@ def _page_html() -> str:
     return html
 
 
+@app.get("/start")
+def start_page():
+    """Страница-приветствие (0.17.0): что умеет сайт и кнопка «Войти». Открыта без входа, данных не показывает."""
+    return FileResponse(ROOT / "static" / "start.html", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/")
 def index():
     return HTMLResponse(_page_html(), headers={"Cache-Control": "no-cache"})

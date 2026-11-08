@@ -129,7 +129,13 @@ ROLE_PERMISSIONS = {
     "viewer": {"view"},
 }
 
-SESSION_DAYS = 14
+# Сеанс (0.17.0, пользователь 08.11.2026: «чтобы не надо было постоянно [входить] при посещении сайта»):
+# «Не выходить на этом компьютере» (по умолчанию) — сеанс продлевается при каждом посещении: выход только после
+# SESSION_DAYS дней без посещений или через SESSION_MAX_DAYS после входа (украденный ключ сеанса не вечен);
+# без галочки — до закрытия браузера и не дольше SHORT_SESSION_HOURS.
+SESSION_DAYS = 30
+SESSION_MAX_DAYS = 365
+SHORT_SESSION_HOURS = 12
 # Защита от подбора паролей (0.16.0, сайт в интернете). Адрес — настоящий адрес посетителя: за Caddy его передаёт
 # X-Forwarded-For (uvicorn доверяет ему при FORWARDED_ALLOW_IPS).
 # - MAX_FAILED неверных паролей подряд к учётной записи С ОДНОГО АДРЕСА — с этого адреса вход в неё закрыт на
@@ -165,6 +171,11 @@ def init() -> None:
             try:
                 con.execute("ALTER TABLE users ADD COLUMN blocks_off TEXT NOT NULL DEFAULT '[]'")
             except Exception:                        # сайт и админ-панель добавили одновременно
+                pass
+        if "remember" not in {r[1] for r in con.execute("PRAGMA table_info(sessions)")}:   # 0.17.0
+            try:
+                con.execute("ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 1")
+            except Exception:
                 pass
 
 
@@ -484,13 +495,19 @@ def _minutes(seconds: float) -> int:
     return max(1, round(seconds / 60))
 
 
-def login(login_name: str, password: str, ip: str = "", agent: str = "") -> tuple[dict, str]:
-    """Проверка логина и пароля. Возвращает (учётная запись, ключ сеанса для cookie). Попытки — по одной."""
+def session_window(remember: bool) -> float:
+    """На сколько секунд вперёд продлевается сеанс при посещении."""
+    return SESSION_DAYS * 86400 if remember else SHORT_SESSION_HOURS * 3600
+
+
+def login(login_name: str, password: str, ip: str = "", agent: str = "", remember: bool = True) -> tuple[dict, str]:
+    """Проверка логина и пароля. Возвращает (учётная запись, ключ сеанса для cookie). Попытки — по одной.
+    remember — «Не выходить на этом компьютере» (SESSION_DAYS с продлением), иначе — SHORT_SESSION_HOURS."""
     with _LOGIN_LOCK:
-        return _login(login_name, password, ip, agent)
+        return _login(login_name, password, ip, agent, remember)
 
 
-def _login(login_name: str, password: str, ip: str, agent: str) -> tuple[dict, str]:
+def _login(login_name: str, password: str, ip: str, agent: str, remember: bool = True) -> tuple[dict, str]:
     wait = ip_wait(ip)
     if wait:                                                    # пароль даже не проверяем (и не пишем в журнал)
         raise AuthError(f"слишком много неудачных попыток входа с вашего адреса — попробуйте через {_minutes(wait)} мин")
@@ -519,9 +536,10 @@ def _login(login_name: str, password: str, ip: str, agent: str) -> tuple[dict, s
     token = secrets.token_urlsafe(32)
     with db.connect() as con:
         con.execute("UPDATE users SET failed=0, locked_until=0, last_login_at=? WHERE id=?", (now, user["id"]))
-        con.execute("INSERT INTO sessions(token_hash, user_id, created_at, seen_at, expires_at, ip, agent) "
-                    "VALUES (?,?,?,?,?,?,?)", (_token_hash(token), user["id"], now, now, now + SESSION_DAYS * 86400,
-                                               ip, (agent or "")[:200]))
+        con.execute("INSERT INTO sessions(token_hash, user_id, created_at, seen_at, expires_at, ip, agent, remember) "
+                    "VALUES (?,?,?,?,?,?,?,?)", (_token_hash(token), user["id"], now, now,
+                                                 now + session_window(remember), ip, (agent or "")[:200],
+                                                 1 if remember else 0))
         con.execute("DELETE FROM sessions WHERE expires_at<?", (now,))
     event(user, user, "вход", "", ip)
     return get_user(user["id"]), token
@@ -536,8 +554,14 @@ def session_user(token: str | None) -> dict | None:
         s = con.execute("SELECT * FROM sessions WHERE token_hash=?", (_token_hash(token),)).fetchone()
         if not s or s["expires_at"] < now:
             return None
+        hard = (s["created_at"] or now) + SESSION_MAX_DAYS * 86400        # не дольше года после входа
+        if hard < now:
+            return None
         if now - (s["seen_at"] or 0) > 300:
-            con.execute("UPDATE sessions SET seen_at=? WHERE token_hash=?", (now, s["token_hash"]))
+            # Посещение продлевает сеанс (0.17.0): выход — только после долгого перерыва.
+            remember = bool(s["remember"]) if "remember" in s.keys() else True
+            con.execute("UPDATE sessions SET seen_at=?, expires_at=? WHERE token_hash=?",
+                        (now, min(hard, max(s["expires_at"], now + session_window(remember))), s["token_hash"]))
     user = get_user(s["user_id"])
     return user if user and user["active"] else None
 

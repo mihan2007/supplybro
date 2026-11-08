@@ -101,7 +101,8 @@ $("v-login").addEventListener("submit", async (e) => {
   btn.disabled = true;
   setStatus("l-status", "Проверяю…");
   try {
-    await api("/api/auth/login", "POST", { login: $("l-login").value, password: $("l-pass").value });
+    await api("/api/auth/login", "POST", { login: $("l-login").value, password: $("l-pass").value,
+      remember: $("l-remember").checked });
     justEntered = true;
     setStatus("l-status", "");
     $("toast").hidden = true;

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SupplyBro — документация конкурса в карточку, цены и заявку</title>
+  <meta name="description" content="SupplyBro читает документацию конкурса, выписывает сроки, цены и требования с цитатами, ищет цены и готовит заявку.">
+  <style>
+    /* Страница-приветствие (/start, 0.17.0) — открыта без входа. Всё в одном файле, без внешних шрифтов и библиотек.
+       Документ — шрифтом официальных документов (Times New Roman), интерфейс — системным. Акцент — маркер, которым
+       тендерный специалист выделяет в документации главное, и синие чернила печати. */
+    :root {
+      --desk: #e9ecf1;
+      --paper: #ffffff;
+      --ink: #1d2533;
+      --pencil: #677084;
+      --stamp: #2148b8;
+      --stamp-hover: #183a99;
+      --marker: #fff07a;
+      --rule: #d5dae2;
+      --doc: "Times New Roman", Times, "Liberation Serif", "Nimbus Roman", serif;
+      --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --desk: #111419;
+        --paper: #1b1f26;
+        --ink: #e6e9ee;
+        --pencil: #9aa3b2;
+        --stamp: #8fb0ff;
+        --stamp-hover: #b3c9ff;
+        --marker: rgba(255, 226, 74, .30);
+        --rule: #2c323c;
+      }
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { margin: 0; background: var(--desk); color: var(--ink); font: 16px/1.5 var(--ui); }
+    a { color: var(--stamp); }
+    a:focus-visible, .btn:focus-visible { outline: 3px solid var(--stamp); outline-offset: 3px; border-radius: 6px; }
+
+    .bar { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+           max-width: 1160px; margin: 0 auto; padding: 22px 28px; }
+    .brand { font-weight: 700; font-size: 19px; letter-spacing: -.01em; color: var(--ink); text-decoration: none; }
+    .bar .btn { padding: 8px 16px; font-size: 15px; }
+
+    .btn { display: inline-block; font: 600 16px/1.2 var(--ui); text-decoration: none; border-radius: 8px;
+           padding: 13px 22px; border: 1.5px solid var(--stamp); color: var(--stamp); background: transparent; }
+    .btn:hover { color: var(--stamp-hover); border-color: var(--stamp-hover); }
+    .btn.primary { background: var(--stamp); color: var(--paper); }
+    .btn.primary:hover { background: var(--stamp-hover); color: var(--paper); }
+
+    .hero { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center;
+            max-width: 1160px; margin: 0 auto; padding: 40px 28px 72px; }
+    h1 { font-size: clamp(34px, 4.6vw, 56px); line-height: 1.06; letter-spacing: -.025em; font-weight: 750;
+         margin: 0 0 22px; max-width: 13ch; }
+    .lead { font-size: 18px; line-height: 1.55; color: var(--ink); margin: 0 0 30px; max-width: 34em; }
+    .act { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 20px; }
+    .note { color: var(--pencil); font-size: 14.5px; }
+
+    /* Лист документации: слева бумага, справа — пометки на полях напротив выделенного. */
+    .sheet { display: grid; grid-template-columns: minmax(0, 1fr) 150px; column-gap: 18px; position: relative; }
+    .sheet::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; right: calc(150px + 18px);
+                     background: var(--paper); border-radius: 3px;
+                     box-shadow: 0 1px 0 var(--rule), 0 18px 40px -22px rgba(20, 30, 60, .35); }
+    .sheet > * { grid-column: 1; position: relative; }
+    .sheet .doc-head { padding: 30px 34px 8px; font: 700 14px/1.45 var(--doc); text-align: center; letter-spacing: .02em; }
+    .sheet .doc-sub { padding: 0 34px 14px; font: 14px/1.45 var(--doc); text-align: center; color: var(--pencil); }
+    .sheet p { margin: 0; padding: 7px 34px; font: 16px/1.6 var(--doc); text-align: justify; hyphens: auto; }
+    .sheet p:last-of-type { padding-bottom: 32px; }
+    .sheet .margin { grid-column: 2; align-self: start; padding-top: 9px; font-size: 13.5px; line-height: 1.3;
+                     color: var(--stamp); border-left: 2px solid var(--stamp); padding-left: 10px; margin-top: 7px; }
+    .sheet .margin b { display: block; font-weight: 650; }
+    .sheet .margin span { color: var(--pencil); }
+
+    mark { color: inherit; background: linear-gradient(var(--marker), var(--marker)) no-repeat 0 70% / 100% 72%;
+           -webkit-box-decoration-break: clone; box-decoration-break: clone; padding: 0 2px; }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .sheet mark { background-size: 0% 72%; animation: sweep .5s cubic-bezier(.3, .7, .3, 1) forwards;
+                    animation-delay: calc(.5s + var(--i) * .42s); }
+      .sheet .margin { opacity: 0; animation: show .35s ease-out forwards; animation-delay: calc(.8s + var(--i) * .42s); }
+    }
+    @keyframes sweep { to { background-size: 100% 72%; } }
+    @keyframes show { to { opacity: 1; } }
+
+    /* Как идёт работа — четыре шага по порядку (так же идут разделы страницы конкурса). */
+    .flow { max-width: 1160px; margin: 0 auto; padding: 0 28px 64px; }
+    .flow h2 { font-size: 24px; letter-spacing: -.015em; margin: 0 0 24px; font-weight: 700; }
+    .flow ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+               gap: 28px; counter-reset: step; }
+    .flow li { counter-increment: step; border-top: 2px solid var(--ink); padding-top: 14px; }
+    .flow li::before { content: counter(step); display: inline-block; font-weight: 700; color: var(--stamp);
+                       margin-right: 8px; }
+    .flow li b { font-size: 17px; }
+    .flow li p { margin: 8px 0 0; color: var(--pencil); font-size: 15px; line-height: 1.5; max-width: 30em; }
+    .chat { margin: 28px 0 0; font-size: 15.5px; max-width: 46em; }
+
+    footer { max-width: 1160px; margin: 0 auto; padding: 22px 28px 40px; border-top: 1px solid var(--rule);
+             color: var(--pencil); font-size: 14px; }
+
+    @media (max-width: 920px) {
+      .hero { grid-template-columns: 1fr; gap: 40px; padding-top: 16px; }
+      .flow ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 560px) {
+      .bar, .hero, .flow, footer { padding-left: 18px; padding-right: 18px; }
+      .lead { font-size: 17px; }
+      .sheet { grid-template-columns: minmax(0, 1fr); }
+      .sheet::before { right: 0; }
+      .sheet p:last-of-type { padding-bottom: 7px; }
+      .sheet .margin:last-child { margin-bottom: 26px; }
+      .sheet .margin { grid-column: 1; margin: 0 22px 6px; padding-top: 0; }
+      .sheet p { padding-left: 22px; padding-right: 22px; text-align: left; }
+      .sheet .doc-head, .sheet .doc-sub { padding-left: 22px; padding-right: 22px; }
+      .flow ol { grid-template-columns: 1fr; gap: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="/start">SupplyBro</a>
+    <a class="btn" id="top-login" href="/login">Войти</a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <h1>Документация конкурса&nbsp;— в&nbsp;карточку, цены и&nbsp;заявку</h1>
+        <p class="lead">SupplyBro читает извещение, техническое задание и проект договора, выписывает сроки, цены
+          и требования с цитатой из документа, ищет цены у поставщиков и готовит документы заявки.</p>
+        <div class="act">
+          <a class="btn primary" id="main-login" href="/login">Войти</a>
+          <span class="note" id="main-note">Логин и пароль выдаёт администратор вашей компании.</span>
+        </div>
+      </div>
+
+      <div class="sheet" aria-label="Пример: что сайт находит в документации">
+        <div class="doc-head">ИЗВЕЩЕНИЕ О ПРОВЕДЕНИИ ЗАПРОСА КОТИРОВОК<br>В ЭЛЕКТРОННОЙ ФОРМЕ</div>
+        <div class="doc-sub">пример</div>
+        <p>1. Предмет договора: <mark style="--i:0">поставка комплектующих для насосного оборудования</mark>
+          в соответствии с Техническим заданием (Приложение №&nbsp;1 к&nbsp;извещению).</p>
+        <div class="margin" style="--i:0"><b>Предмет закупки</b><span>п. 1 извещения</span></div>
+        <p>4.2. Начальная (максимальная) цена договора: <mark style="--i:1">1&nbsp;240&nbsp;000,00 (один миллион двести сорок
+          тысяч) рублей 00&nbsp;копеек</mark>, включая НДС.</p>
+        <div class="margin" style="--i:1"><b>НМЦ 1&nbsp;240&nbsp;000&nbsp;₽</b><span>с НДС, п. 4.2</span></div>
+        <p>6.1. Дата и время окончания срока подачи заявок: <mark style="--i:2">17.11.2026 в&nbsp;10:00 по московскому
+          времени</mark>.</p>
+        <div class="margin" style="--i:2"><b>Подать до 17.11, 10:00</b><span>п. 6.1</span></div>
+        <p>8.3. <mark style="--i:3">Обеспечение заявки не требуется.</mark> Обеспечение исполнения договора
+          установлено в размере 5&nbsp;% от цены договора.</p>
+        <div class="margin" style="--i:3"><b>Без обеспечения заявки</b><span>п. 8.3</span></div>
+      </div>
+    </section>
+
+    <section class="flow">
+      <h2>От документации до заявки</h2>
+      <ol>
+        <li><b>Документы</b>
+          <p>Архивы, сканы, Word и Excel: сайт распакует, распознает текст и отметит скрытый.</p></li>
+        <li><b>Анализ</b>
+          <p>Поля карточки и позиции спецификации — с цитатой и файлом-источником, сразу в NocoDB.</p></li>
+        <li><b>Цены</b>
+          <p>Поиск по России и за рубежом, прайсы и КП поставщиков, цены прошлых конкурсов.</p></li>
+        <li><b>Заявка</b>
+          <p>Формы из документации заполнены сведениями участника, чего не хватает — отмечено.</p></li>
+      </ol>
+      <p class="chat">Вопрос по документации можно задать в чате конкурса — ответ придёт с пунктом и файлом,
+        откуда он взят.</p>
+    </section>
+  </main>
+
+  <footer>Нет логина — обратитесь к администратору вашей компании.</footer>
+
+  <script>
+    // Уже вошли — вместо «Войти» кнопка на свою страницу (cookie сеанса проверяет сервер).
+    (async () => {
+      try {
+        const r = await fetch("/api/auth/state", { credentials: "same-origin" });
+        if (r.status === 404) {                       // вход на сайт выключен — сразу на сайт
+          for (const id of ["top-login", "main-login"]) document.getElementById(id).href = "/";
+          return;
+        }
+        const d = await r.json();
+        if (!d.me || d.me.must_change || !d.access) return;
+        const main = document.getElementById("main-login");
+        main.textContent = "Открыть SupplyBro";
+        main.href = d.access.home.url;
+        document.getElementById("main-note").textContent = "Вы вошли как " + (d.me.name || d.me.login) + ".";
+        document.getElementById("top-login").hidden = true;
+      } catch (_) { /* нет связи — остаётся «Войти» */ }
+    })();
+  </script>
+</body>
+</html>

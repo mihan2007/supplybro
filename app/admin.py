@@ -114,9 +114,12 @@ def _known() -> set[str]:
     return {c["id"] for c in _clients()}
 
 
-def _set_cookie(request: Request, response: Response, token: str) -> None:
-    response.set_cookie(COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict",
-                        secure=request.url.scheme == "https", path="/")
+def _set_cookie(request: Request, response: Response, token: str, remember: bool = True) -> None:
+    """Cookie сеанса. remember — живёт до года (сколько продлится сеанс, решает сервер: auth.session_user), иначе —
+    до закрытия браузера. SameSite=Lax (0.17.0, было Strict): по ссылке на сайт из почты / мессенджера / NocoDB
+    сотрудник приходит уже вошедшим; изменяющие запросы с чужих сайтов по-прежнему отклоняются (Origin, X-SupplyBro)."""
+    response.set_cookie(COOKIE, token, max_age=auth.SESSION_MAX_DAYS * 86400 if remember else None, httponly=True,
+                        samesite="lax", secure=request.url.scheme == "https", path="/")
 
 
 def _wrap(fn):

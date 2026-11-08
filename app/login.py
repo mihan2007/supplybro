@@ -87,9 +87,10 @@ def state(request: Request):
 @router.post("/api/auth/login")
 def do_login(request: Request, response: Response, data: dict = Body(...)):
     _guard(request)
+    remember = data.get("remember", True) is not False        # «Не выходить на этом компьютере» (0.17.0)
     user, token = _wrap(lambda: auth.login(str(data.get("login") or ""), str(data.get("password") or ""),
-                                           _ip(request), request.headers.get("user-agent", "")))
-    _set_cookie(request, response, token)
+                                           _ip(request), request.headers.get("user-agent", ""), remember))
+    _set_cookie(request, response, token, remember)
     return {"me": auth.public(user), "access": _access(user)}
 
 
