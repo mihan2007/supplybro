@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sqlite3
@@ -16,6 +17,11 @@ from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("DATA_DIR_IN_CONTAINER", "/data"))
 DB_PATH = DATA_DIR / "app.db"
+
+# Кто ставит задачу (0.16.0, jobs.started_by — логин): на сайте — вошедший сотрудник (app/access.py, проходная),
+# в обработчике — тот, кто запустил текущую задачу (следующие задачи цепочки — от его имени). Пусто — вход выключен
+# или задачу поставила программа сама.
+ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar("supplybro_actor", default="")
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -109,7 +115,8 @@ def init() -> None:
         cols = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
         for col, ddl in (("params", "TEXT NOT NULL DEFAULT ''"),   # с 0.2.0: параметры задачи (JSON)
                          ("updated_at", "REAL"),                    # с 0.5.6: последнее действие задачи
-                         ("control", "TEXT NOT NULL DEFAULT ''")):  # с 0.5.8: просьба остановить: cancel / pause
+                         ("control", "TEXT NOT NULL DEFAULT ''"),   # с 0.5.8: просьба остановить: cancel / pause
+                         ("started_by", "TEXT NOT NULL DEFAULT ''")):  # с 0.16.0: кто запустил (логин)
             if col not in cols:
                 try:
                     con.execute(f"ALTER TABLE jobs ADD COLUMN {col} {ddl}")
@@ -160,12 +167,16 @@ def recent_jobs(client_id: str, seconds: float = 600) -> list[dict]:
 
 # ---------- очередь задач ----------
 
-def enqueue(client_id: str, folder: str, kind: str = "prepare", params: dict | None = None, auto: bool = False) -> int:
+def enqueue(client_id: str, folder: str, kind: str = "prepare", params: dict | None = None, auto: bool = False,
+            by: str | None = None) -> int:
     """Ставит задачу в очередь. Если такая же уже ждёт — возвращает её (не плодит дубли),
     дополнив её параметры новыми (например, «после подготовки — анализ»). Такая же приостановленная —
     продолжается (снова в очереди) с новыми параметрами, если задачу ставит пользователь (кнопкой);
     auto=True — задачу ставит сам обработчик по цепочке (после анализа — запись, поиск цен): приостановленную
-    пользователем он не трогает."""
+    пользователем он не трогает.
+    by — кто запустил (логин); по умолчанию — ACTOR. У задачи, которая уже ждала, остаётся прежний (кто поставил
+    первым), если он был записан."""
+    who = (ACTOR.get() if by is None else by) or ""
     with connect() as con:
         row = con.execute(
             "SELECT id, params, status FROM jobs WHERE client_id=? AND folder=? AND kind=? AND status IN ('queued','paused') "
@@ -175,13 +186,22 @@ def enqueue(client_id: str, folder: str, kind: str = "prepare", params: dict | N
         if row:
             merged = {**job_params(row), **(params or {})}
             con.execute("UPDATE jobs SET params=?, status='queued', control='', created_at=CASE WHEN status='paused' "
-                        "THEN ? ELSE created_at END WHERE id=?",
-                        (json.dumps(merged, ensure_ascii=False), time.time(), row["id"]))
+                        "THEN ? ELSE created_at END, started_by=CASE WHEN started_by='' THEN ? ELSE started_by END "
+                        "WHERE id=?",
+                        (json.dumps(merged, ensure_ascii=False), time.time(), who, row["id"]))
             return row["id"]
         cur = con.execute(
-            "INSERT INTO jobs(client_id, folder, kind, status, created_at, params) VALUES (?,?,?,?,?,?)",
-            (client_id, folder, kind, "queued", time.time(), json.dumps(params or {}, ensure_ascii=False)))
+            "INSERT INTO jobs(client_id, folder, kind, status, created_at, params, started_by) VALUES (?,?,?,?,?,?,?)",
+            (client_id, folder, kind, "queued", time.time(), json.dumps(params or {}, ensure_ascii=False), who))
         return cur.lastrowid
+
+
+def job_by(job) -> str:
+    """Кто запустил задачу (логин; '' — неизвестно: вход выключен, задача старше 0.16.0)."""
+    try:
+        return str(job["started_by"] or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
 
 
 def job_params(job) -> dict:

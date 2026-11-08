@@ -2,8 +2,10 @@
 Учётные записи сотрудников: логины, пароли, роли, доступ к клиентам, сеансы входа и журнал действий.
 
 Используется админ-панелью (/admin), страницей входа (/login) и проверкой входа на сайт (app/access.py, при
-LOGIN_REQUIRED=1 — с 0.7.0): сайт спрашивает логин, показывает только клиентов из доступа сотрудника и разрешает
-действия по его роли (ROLES ниже).
+LOGIN_REQUIRED=1 — с 0.7.0, с 0.16.0 по умолчанию): сайт спрашивает логин, показывает только клиентов из доступа
+сотрудника и разрешает действия по его роли (ROLES ниже). Защита от подбора (0.16.0): 5 неверных паролей подряд
+к учётной записи с одного адреса — с этого адреса вход в неё закрыт на 10 минут; 50 подряд со всех адресов — закрыта
+вся учётная запись на 10 минут; 20 неудачных входов с одного адреса за 15 минут — закрыт этот адрес.
 
 Пароли хранятся только как хеш scrypt со своей солью для каждого; сеансы — как хеш случайного ключа из cookie
 (украденная база не даёт ни паролей, ни действующих сеансов). Данные — в app.db (папка данных сайта).
@@ -29,6 +31,7 @@ import json
 import re
 import secrets
 import sys
+import threading
 import time
 
 from . import db
@@ -70,6 +73,7 @@ CREATE TABLE IF NOT EXISTS user_events (
     ip          TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS user_events_at ON user_events(at);
+CREATE INDEX IF NOT EXISTS user_events_ip ON user_events(ip, at);
 """
 
 # Роли и их права. По правам сайт (app/access.py) решает, какие действия разрешены сотруднику, а админ-панель — кого пускать.
@@ -126,8 +130,23 @@ ROLE_PERMISSIONS = {
 }
 
 SESSION_DAYS = 14
-MAX_FAILED = 5                  # столько неверных паролей подряд — вход закрыт на LOCK_MINUTES
+# Защита от подбора паролей (0.16.0, сайт в интернете). Адрес — настоящий адрес посетителя: за Caddy его передаёт
+# X-Forwarded-For (uvicorn доверяет ему при FORWARDED_ALLOW_IPS).
+# - MAX_FAILED неверных паролей подряд к учётной записи С ОДНОГО АДРЕСА — с этого адреса вход в неё закрыт на
+#   LOCK_MINUTES. С других адресов сотрудник входит как обычно: чужой человек не может держать его вход закрытым,
+#   просто вводя неверный пароль (до 0.16.0 закрывалась вся учётная запись — с любого адреса);
+# - MAX_FAILED_TOTAL подряд со всех адресов — закрыта вся учётная запись на LOCK_MINUTES (подбор с многих адресов;
+#   отметка «вход закрыт» и кнопка «Открыть вход» в админ-панели);
+# - MAX_FAILED_IP неудачных входов с адреса за IP_WINDOW_MINUTES (к любым логинам) — закрыт этот адрес.
+# Сброс (вход, «Открыть вход», сброс пароля) обнуляет счёт по учётной записи.
+MAX_FAILED = 5
+MAX_FAILED_TOTAL = 50
 LOCK_MINUTES = 10
+MAX_FAILED_IP = 20
+IP_WINDOW_MINUTES = 15
+RESET_ACTIONS = ("вход", "вход открыт", "пароль сброшен")
+# Проверка и запись попыток — по одной (иначе одновременные запросы обходят счёт: прочитали «4», записали «5» каждый).
+_LOGIN_LOCK = threading.Lock()
 MIN_PASSWORD = 10
 LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
 _SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
@@ -424,23 +443,75 @@ def unlock(user_id: int, actor: dict | None, ip: str = "") -> None:
 
 # ---------- вход и сеансы ----------
 
+def _wait(rows, window: float, limit: int, now: float) -> float:
+    """Сколько ещё ждать: limit неудач — пока самая ранняя из последних limit не выйдет из окна."""
+    if limit <= 0 or len(rows) < limit:
+        return 0.0
+    return max(0.0, rows[limit - 1]["at"] + window - now)
+
+
+def ip_wait(ip: str) -> float:
+    """Сколько секунд с этого адреса вход закрыт (0 — открыт): MAX_FAILED_IP неудачных входов за IP_WINDOW_MINUTES."""
+    if not ip:
+        return 0.0
+    now = time.time()
+    window = IP_WINDOW_MINUTES * 60
+    with db.connect() as con:
+        rows = con.execute("SELECT at FROM user_events WHERE ip=? AND at>? AND action='неудачный вход' "
+                           "ORDER BY at DESC LIMIT ?", (ip, now - window, max(MAX_FAILED_IP, 1))).fetchall()
+    return _wait(rows, window, MAX_FAILED_IP, now)
+
+
+def account_ip_wait(user_id: int, ip: str) -> float:
+    """Сколько секунд вход в эту учётную запись с этого адреса закрыт: MAX_FAILED неверных паролей подряд с него
+    (после последнего входа / «Открыть вход» / сброса пароля) за LOCK_MINUTES."""
+    if not ip:
+        return 0.0
+    now = time.time()
+    window = LOCK_MINUTES * 60
+    with db.connect() as con:
+        reset = con.execute(f"SELECT MAX(at) FROM user_events WHERE user_id=? AND action IN "
+                            f"({','.join('?' * len(RESET_ACTIONS))})", (user_id, *RESET_ACTIONS)).fetchone()[0] or 0
+        rows = con.execute("SELECT at FROM user_events WHERE user_id=? AND ip=? AND action='неудачный вход' AND at>? "
+                           "ORDER BY at DESC LIMIT ?", (user_id, ip, max(now - window, reset), MAX_FAILED)).fetchall()
+    return _wait(rows, window, MAX_FAILED, now)
+
+
+_DUMMY_HASH = hash_password(secrets.token_urlsafe(16))      # для одинакового времени ответа на чужие логины
+
+
+def _minutes(seconds: float) -> int:
+    return max(1, round(seconds / 60))
+
+
 def login(login_name: str, password: str, ip: str = "", agent: str = "") -> tuple[dict, str]:
-    """Проверка логина и пароля. Возвращает (учётная запись, ключ сеанса для cookie)."""
+    """Проверка логина и пароля. Возвращает (учётная запись, ключ сеанса для cookie). Попытки — по одной."""
+    with _LOGIN_LOCK:
+        return _login(login_name, password, ip, agent)
+
+
+def _login(login_name: str, password: str, ip: str, agent: str) -> tuple[dict, str]:
+    wait = ip_wait(ip)
+    if wait:                                                    # пароль даже не проверяем (и не пишем в журнал)
+        raise AuthError(f"слишком много неудачных попыток входа с вашего адреса — попробуйте через {_minutes(wait)} мин")
     user = find_user(login_name or "")
     now = time.time()
     if not user:
-        check_password(password or "", hash_password("x"))     # одинаковое время ответа для чужих логинов
+        check_password(password or "", _DUMMY_HASH)              # одинаковое время ответа для чужих логинов
         event(None, None, "неудачный вход", f"логин «{(login_name or '')[:40]}» не найден", ip)
         raise AuthError("неверный логин или пароль")
     if user["locked_until"] > now:
-        raise AuthError(f"слишком много неверных паролей — вход закрыт ещё на "
-                        f"{max(1, round((user['locked_until'] - now) / 60))} мин")
+        raise AuthError(f"слишком много неверных паролей — вход закрыт ещё на {_minutes(user['locked_until'] - now)} мин")
+    wait = account_ip_wait(user["id"], ip)
+    if wait:
+        raise AuthError(f"слишком много неверных паролей — вход закрыт ещё на {_minutes(wait)} мин")
     if not check_password(password or "", user["password_hash"]):
         failed = user["failed"] + 1
-        locked = now + LOCK_MINUTES * 60 if failed >= MAX_FAILED else 0
+        locked = now + LOCK_MINUTES * 60 if failed >= MAX_FAILED_TOTAL else 0
         with db.connect() as con:
             con.execute("UPDATE users SET failed=?, locked_until=? WHERE id=?", (0 if locked else failed, locked, user["id"]))
-        event(None, user, "неудачный вход", "вход закрыт на 10 мин" if locked else f"неверный пароль ({failed})", ip)
+        event(None, user, "неудачный вход", f"учётная запись закрыта на {LOCK_MINUTES} мин (неверных паролей подряд — "
+                                            f"{failed}, с разных адресов)" if locked else f"неверный пароль ({failed})", ip)
         raise AuthError("неверный логин или пароль")
     if not user["active"]:
         event(None, user, "неудачный вход", "учётная запись заблокирована", ip)

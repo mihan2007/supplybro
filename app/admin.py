@@ -1,8 +1,9 @@
 """
 Админ-панель учётных записей: страница /admin и адреса /api/admin/... (app/auth.py — сами учётные записи).
 
-Подключается, только если в .env ADMIN_PANEL=1 (по умолчанию выключена: решение пользователя 28.10.2026 —
-«сделай, но пока не подключай»). Сам сайт вход пока не требует.
+Подключается при LOGIN_REQUIRED=1 (вход на сайт обязателен — тогда всегда) или ADMIN_PANEL=1. При обязательном входе
+(0.16.0) панель и её адреса открываются только после входа на /login (app/access.py), первого администратора создаёт
+только команда setup-accounts.
 
 Безопасность: сеанс — cookie sb_session (HttpOnly, SameSite=Strict); изменяющие запросы — только с заголовком
 X-SupplyBro: 1 (чужая страница в браузере не может его поставить) и JSON-телом; всё, кроме входа, первого
@@ -14,13 +15,24 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 
 from . import auth
 from .config import load_clients
 
 ROOT = Path(__file__).resolve().parent
 COOKIE = "sb_session"
+_VERSION_FILE = ROOT.parent / "VERSION"
+VERSION = _VERSION_FILE.read_text(encoding="utf-8").strip() if _VERSION_FILE.exists() else "dev"
+
+
+def page(name: str) -> HTMLResponse:
+    """Страница из static/ со ссылками на свои .js / .css с номером версии (0.16.0): после обновления сайта браузер
+    берёт новые файлы сам, без Ctrl+F5."""
+    html = (ROOT / "static" / name).read_text(encoding="utf-8")
+    for asset in ("app.css", "admin.css", "login.css", "admin.js", "login.js"):
+        html = html.replace(f'"/static/{asset}"', f'"/static/{asset}?v={VERSION}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 router = APIRouter()
 auth.init()
@@ -118,7 +130,7 @@ def _wrap(fn):
 
 @router.get("/admin")
 def admin_page():
-    return FileResponse(ROOT / "static" / "admin.html")
+    return page("admin.html")
 
 
 # ---------- вход ----------
@@ -147,8 +159,13 @@ def _login_required() -> bool:
 
 @router.post("/api/admin/setup")
 def setup(request: Request, response: Response, data: dict = Body(...)):
-    """Первый администратор — только пока учётных записей нет совсем."""
+    """Первый администратор — только пока учётных записей нет совсем и только при выключенном входе на сайт.
+    При LOGIN_REQUIRED=1 (сайт может быть открыт в интернет, 0.16.0) — только командой setup-accounts: иначе первым
+    администратором стал бы любой, кто откроет новый сервер раньше вас."""
     _guard(request)
+    if _login_required():
+        raise HTTPException(403, "первого администратора создают командой в папке проекта: "
+                                 "docker compose exec web python -m app.auth setup-accounts")
     if auth.count_users() > 0:
         raise HTTPException(409, "администратор уже есть — войдите")
     def run():

@@ -8,7 +8,9 @@ sb_session, та же, что у админ-панели: вошли здесь 
 будет доступно сотруднику».
 
 Таблицы — те же users / sessions / user_events (структура не меняется). Защита — как у админ-панели: изменяющие
-запросы только с заголовком X-SupplyBro: 1, 5 неверных паролей подряд — вход закрыт на 10 минут.
+запросы только с заголовком X-SupplyBro: 1; подбор паролей — ограничения в app/auth.py (0.16.0: 5 неверных подряд с
+одного адреса — вход в эту учётную запись с него закрыт на 10 минут, 50 подряд со всех — вся учётная запись, 20
+неудачных с адреса за 15 минут — закрыт адрес).
 
 """
 
@@ -17,10 +19,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Request, Response
-from fastapi.responses import FileResponse
 
 from . import access, auth
-from .admin import COOKIE, _guard, _ip, _me, _set_cookie, _token, _wrap
+from .admin import COOKIE, _guard, _ip, _me, _set_cookie, _token, _wrap, page
 from .config import load_clients
 
 ROOT = Path(__file__).resolve().parent
@@ -70,7 +71,7 @@ def _access(user: dict | None) -> dict | None:
 
 @router.get("/login")
 def login_page():
-    return FileResponse(ROOT / "static" / "login.html", headers={"Cache-Control": "no-cache"})
+    return page("login.html")
 
 
 # ---------- вход ----------

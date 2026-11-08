@@ -733,24 +733,30 @@ function fmtDur(sec) {
   return `${Math.floor(sec / 3600)} ч ${Math.round((sec % 3600) / 60)} мин`;
 }
 
+// Кто запустил задачу (0.16.0, логин; у задач до 0.16.0 и без входа — пусто).
+function byText(job) {
+  return job && job.started_by ? ` · запустил ${job.started_by}` : "";
+}
+
 // «В очереди» — за кем стоит задача или что обработчик не запущен.
 function queuedText(job) {
   if (job.worker_alive === false && job.age > 20) {
-    return "в очереди — обработчик не отвечает" + (job.worker_seen ? ` (последний отклик ${fmtDur(job.worker_seen)} назад)` : "") +
+    return "в очереди" + byText(job) + " — обработчик не отвечает" +
+      (job.worker_seen ? ` (последний отклик ${fmtDur(job.worker_seen)} назад)` : "") +
       ". Запустите сайт заново: «Запустить SupplyBro.bat».";
   }
   if (job.waiting_for) {
     const w = job.waiting_for;
-    return `в очереди «${job.lane_title}» — ждёт, пока закончится: ${w.folder} — ${w.kind_title} (идёт ${fmtDur(w.elapsed)})` +
+    return `в очереди «${job.lane_title}»${byText(job)} — ждёт, пока закончится: ${w.folder} — ${w.kind_title} (идёт ${fmtDur(w.elapsed)})` +
       (job.ahead ? `; перед ней ещё ${job.ahead}` : "");
   }
-  return "в очереди…" + (job.ahead ? ` (перед ней ${job.ahead})` : "");
+  return "в очереди…" + (job.ahead ? ` (перед ней ${job.ahead})` : "") + byText(job);
 }
 
-// «Идёт» — сколько идёт, когда было последнее действие; предупреждение, если давно нет движения.
+// «Идёт» — кто запустил, сколько идёт, когда было последнее действие; предупреждение, если давно нет движения.
 function runningTail(job) {
-  if (job.elapsed === undefined) return "";
-  let t = ` · идёт ${fmtDur(job.elapsed)} · последнее действие ${fmtDur(job.quiet)} назад`;
+  if (job.elapsed === undefined) return byText(job);
+  let t = byText(job) + ` · идёт ${fmtDur(job.elapsed)} · последнее действие ${fmtDur(job.quiet)} назад`;
   if (job.worker_alive === false) {
     t += ". ⚠ Обработчик не отвечает — запустите сайт заново («Запустить SupplyBro.bat»), задача продолжится";
   } else if (job.quiet_warn) {
@@ -2772,10 +2778,11 @@ function jobLine(j, withFolder = true) {
   const head = (withFolder ? j.folder + " — " : "") + j.kind_title;
   if (j.status === "running") return `${head}: ${j.step || "…"}` + stoppingText(j);
   if (j.status === "queued") return `${head}: ` + queuedText(j);
-  if (j.status === "paused") return `${head}: ${lc1(j.message || "Приостановлена")}`;
+  const by = byText(j);
+  if (j.status === "paused") return `${head}${by}: ${lc1(j.message || "Приостановлена")}`;
   const ago = j.finished_at ? fmtDur(Date.now() / 1000 - j.finished_at) + " назад" : "";
-  if (j.status === "canceled") return `${head}: ${lc1(j.message || "Отменена")} ${ago}`;
-  return `${head}: ${j.status === "error" ? "ошибка" : "готово"} ${ago}` + (j.status === "error" ? ` — ${j.message}` : "");
+  if (j.status === "canceled") return `${head}${by}: ${lc1(j.message || "Отменена")} ${ago}`;
+  return `${head}${by}: ${j.status === "error" ? "ошибка" : "готово"} ${ago}` + (j.status === "error" ? ` — ${j.message}` : "");
 }
 
 async function pollActivity() {

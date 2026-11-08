@@ -91,6 +91,8 @@ async function boot() {
   try {
     st = await api("/api/admin/state");
   } catch (e) {
+    // Вход на сайт обязателен (0.16.0): без входа панель не открывается — на страницу входа и обратно сюда.
+    if (e.status === 401) { location.href = "/login?next=" + encodeURIComponent("/admin"); return; }
     document.querySelector("main").replaceChildren(el("div", { class: "notice bad", text: "Админ-панель недоступна: " + e.message }));
     return;
   }

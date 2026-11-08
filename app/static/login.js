@@ -7,10 +7,18 @@ const $ = (id) => document.getElementById(id);
 let st = null;          // /api/auth/state: has_users, me, access, min_password, required
 let justEntered = false; // только что вошли / сменили пароль — пора на сайт
 
-// Куда вернуться после входа: только свой сайт (не //чужой.сайт) и не сама страница входа.
+// Куда вернуться после входа: только свой сайт (не //чужой.сайт) и не сама страница входа. Пробелы, табуляция и
+// служебные символы браузер из адреса выбрасывает («/<Tab>/чужой.сайт» → «//чужой.сайт») — такие не принимаем (0.16.0),
+// и в конце сверяем, что адрес действительно на этом сайте.
 function safeNext() {
   const v = new URLSearchParams(location.search).get("next") || "";
-  return v.startsWith("/") && !v.startsWith("//") && !v.includes("\\") && !v.startsWith("/login") ? v : "";
+  if (/[\u0000-\u0020\u007f]/.test(v)) return "";
+  if (!v.startsWith("/") || v.startsWith("//") || v.includes("\\") || v.startsWith("/login")) return "";
+  try {
+    const u = new URL(v, location.origin);
+    if (u.origin !== location.origin || u.pathname.startsWith("//") || u.pathname.startsWith("/login")) return "";
+    return u.pathname + u.search + u.hash;
+  } catch (_) { return ""; }
 }
 
 async function api(path, method = "GET", body) {
@@ -64,7 +72,8 @@ async function boot() {
       { className: "notice bad", textContent: "Страница входа недоступна: " + e.message }));
     return;
   }
-  if (!st.me && !st.has_users) return show("v-empty");
+  // Вход обязателен (сайт может быть в интернете) — первого администратора через сайт не создать, только командой.
+  if (!st.me && !st.has_users) { $("e-admin").hidden = Boolean(st.required); return show("v-empty"); }
   if (!st.me) return showLogin();
   if (st.me.must_change) return showChange(true);
   // Вход обязателен: после входа — сразу на сайт (туда, откуда пришли, или на свою страницу).

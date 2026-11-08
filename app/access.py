@@ -1,10 +1,16 @@
 """
 Вход на сайт и права сотрудников (0.7.0): кто вошёл, к каким клиентам у него доступ, что разрешает его роль.
 
-Включается LOGIN_REQUIRED=1 в .env (решение пользователя 03.11.2026 «делай вход для админа и для пользователей»).
-Тогда без входа сайт не открывается: страницы ведут на /login, адреса /api/... отвечают 401. Админ-панель (/admin),
-страница сотрудника (/user) и страница входа (/login) при этом включены всегда, независимо от ADMIN_PANEL / USER_PAGE /
-LOGIN_PAGE. LOGIN_REQUIRED=0 — сайт как раньше, без входа.
+Включается LOGIN_REQUIRED=1 в .env (решение пользователя 03.11.2026 «делай вход для админа и для пользователей»;
+с 0.16.0 это и значение по умолчанию: настройки нет совсем — вход всё равно обязателен). Тогда без входа сайт не
+открывается: страницы ведут на /login, адреса /api/... отвечают 401. Админ-панель (/admin), страница сотрудника (/user)
+и страница входа (/login) при этом включены всегда, независимо от ADMIN_PANEL / USER_PAGE / LOGIN_PAGE.
+LOGIN_REQUIRED=0 — сайт как раньше, без входа (только для своего компьютера, не для сервера).
+
+0.16.0 — сайт открывается в интернет (сервер, Caddy с HTTPS): без входа открыты ТОЛЬКО страница входа (/login, её
+оформление и скрипт), её адреса /api/auth/... и /health. Админ-панель (/admin, /api/admin/...) тоже только после
+входа (первого администратора через сайт больше не создать — только командой setup-accounts), остальные файлы
+/static/ и описание адресов (/docs, /openapi.json) закрыты.
 
 Проверка стоит одной «проходной» (LoginMiddleware) перед всеми адресами, а не в каждом адресе отдельно:
 - без сеанса (или с временным паролем, который ещё не сменили) — на /login, для /api — 401;
@@ -13,7 +19,9 @@ LOGIN_PAGE. LOGIN_REQUIRED=0 — сайт как раньше, без входа
   неизвестный изменяющий запрос — только администратору;
 - «/» (страница администратора) — только администратору, остальных ведёт на /user;
 - изменяющий запрос с чужого сайта (заголовок Origin не наш) — 403;
-- кто что запустил — в журнал учётных записей (вкладка «Журнал» админ-панели).
+- кто что запустил — в журнал учётных записей (вкладка «Журнал» админ-панели), а у задач обработчика — в колонку
+  jobs.started_by (db.ACTOR, 0.16.0);
+- путь с «.» / «..» — 404; ответы — с заголовками безопасности (SecurityHeaders).
 Модель анализа / чата и поисковик цен выбирает только администратор: для остальных адреса берут настройки сайта
 (is_admin() в main.py).
 
@@ -30,14 +38,21 @@ from urllib.parse import parse_qs, quote, urlsplit
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 
-from . import auth
+from . import auth, db
 
 
 def _flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
-LOGIN_REQUIRED = _flag("LOGIN_REQUIRED")
+def _off(name: str) -> bool:
+    """Выключено только явно: 0 / false / no / off (опечатка или пустое значение — не выключает)."""
+    return os.environ.get(name, "").strip().lower() in ("0", "false", "no", "off")
+
+
+# 0.16.0: по умолчанию — обязателен (сайт на сервере открыт в интернет): выключает только явное LOGIN_REQUIRED=0,
+# а забытая строка, пустое значение или опечатка вход не выключают.
+LOGIN_REQUIRED = not _off("LOGIN_REQUIRED")
 # При обязательном входе админ-панель, страница сотрудника и страница входа нужны всегда.
 ADMIN_PANEL = LOGIN_REQUIRED or _flag("ADMIN_PANEL")
 USER_PAGE = LOGIN_REQUIRED or _flag("USER_PAGE")
@@ -46,9 +61,14 @@ LOGIN_PAGE = LOGIN_REQUIRED or _flag("LOGIN_PAGE")
 COOKIE = "sb_session"
 CURRENT_USER: contextvars.ContextVar[dict | None] = contextvars.ContextVar("supplybro_user", default=None)
 
-# Открыто без входа: страница входа и её адреса, оформление, проверка «сайт жив», админ-панель (у неё свой вход).
-OPEN_EXACT = {"/login", "/health", "/admin", "/favicon.ico"}
-OPEN_PREFIXES = ("/static/", "/api/auth/", "/api/admin/")
+# Открыто без входа (0.16.0): только страница входа — сама, её оформление и скрипт, её адреса /api/auth/... — и
+# проверка «сайт жив». Админ-панель, страница сайта, остальные файлы /static/ — только после входа.
+OPEN_EXACT = {"/login", "/health", "/favicon.ico"}
+OPEN_STATIC = {"/static/app.css", "/static/admin.css", "/static/login.css", "/static/login.js"}
+OPEN_PREFIXES = ("/api/auth/",)
+# Админ-панель: нужен вход, а кому что можно — проверяет сама панель (app/admin.py: администратор сайта / клиента).
+ADMIN_PAGE = "/admin"
+ADMIN_API = "/api/admin/"
 
 # Изменяющие запросы: (адрес после /api/clients/<клиент>, право, что записать в журнал).
 RULES = [
@@ -132,6 +152,10 @@ def home(user: dict) -> str:
 def safe_next(value: str | None) -> str:
     """Адрес «вернуться после входа» — только свой сайт (не //чужой.сайт) и не сама страница входа."""
     value = (value or "").strip()
+    # Пробелы, табуляция и служебные символы браузер выбрасывает из адреса: «/<Tab>/чужой.сайт» стал бы «//чужой.сайт»
+    # (0.16.0) — такие адреса не принимаем совсем.
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in value):
+        return ""
     if not value.startswith("/") or value.startswith("//") or "\\" in value or value.startswith("/login"):
         return ""
     return value
@@ -151,12 +175,22 @@ def _foreign_origin(request: Request) -> bool:
 
 
 def _deny(request: Request, status: int, text: str):
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith(("/api/", "/static/")):     # адрес и файл — ответ, а не переход на вход
         return JSONResponse({"detail": text}, status_code=status)
     if status == 401:
         target = request.url.path + (("?" + request.url.query) if request.url.query else "")
         return RedirectResponse("/login?next=" + quote(target, safe=""), status_code=303)
     return JSONResponse({"detail": text}, status_code=status)
+
+
+def _bad_path(path: str) -> bool:
+    """Путь с «.» / «..» или обратной чертой — такие страница сайта не строит; проходную ими не обойти."""
+    return "\\" in path or "\x00" in path or any(seg in (".", "..") for seg in path.split("/"))
+
+
+def is_open(path: str) -> bool:
+    """Открыто ли без входа (страница входа и то, что ей нужно, /health)."""
+    return path in OPEN_EXACT or path in OPEN_STATIC or path.startswith(OPEN_PREFIXES)
 
 
 class LoginMiddleware:
@@ -166,11 +200,16 @@ class LoginMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket" and LOGIN_REQUIRED:
+            await receive()                                  # websocket сайт не использует — закрываем
+            return await send({"type": "websocket.close", "code": 1008})
         if scope["type"] != "http" or not LOGIN_REQUIRED:
             return await self.app(scope, receive, send)
         request = Request(scope)
         path, method = request.url.path, request.method
-        if path in OPEN_EXACT or path.startswith(OPEN_PREFIXES):
+        if _bad_path(path):
+            return await JSONResponse({"detail": "не найдено"}, status_code=404)(scope, receive, send)
+        if is_open(path):
             return await self.app(scope, receive, send)
 
         user = user_from_request(request)
@@ -178,6 +217,12 @@ class LoginMiddleware:
             return await _deny(request, 401, "войдите на сайт")(scope, receive, send)
         if method in MUTATING and _foreign_origin(request):
             return await _deny(request, 403, "запрос отклонён")(scope, receive, send)
+
+        if path.startswith(ADMIN_API):                     # админ-панель: права проверяет она сама
+            await self._run(user, scope, receive, send)
+            return
+        if path == ADMIN_PAGE and user["role"] not in auth.MANAGER_ROLES:
+            return await RedirectResponse(home(user), status_code=303)(scope, receive, send)
 
         if path == "/" and user["role"] != "admin":
             q = ("?" + request.url.query) if request.url.query else ""
@@ -207,6 +252,15 @@ class LoginMiddleware:
         elif path.startswith("/api/") and method in MUTATING and user["role"] != "admin":
             return await _deny(request, 403, "вашей роли это недоступно")(scope, receive, send)
 
+        code = await self._run(user, scope, receive, send)
+        if journal and code < 400:
+            try:
+                auth.event(user, None, journal[0], journal[1], request.client.host if request.client else "")
+            except Exception:
+                pass                                         # журнал не должен ломать работу
+
+    async def _run(self, user: dict, scope, receive, send) -> int:
+        """Выполнить адрес от имени вошедшего: current_user() и «кто запустил» у задач (db.ACTOR). Код ответа."""
         status = {}
 
         async def send_wrapper(message):
@@ -215,12 +269,43 @@ class LoginMiddleware:
             await send(message)
 
         token = CURRENT_USER.set(user)
+        actor = db.ACTOR.set(user["login"])
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
+            db.ACTOR.reset(actor)
             CURRENT_USER.reset(token)
-        if journal and status.get("code", 500) < 400:
-            try:
-                auth.event(user, None, journal[0], journal[1], request.client.host if request.client else "")
-            except Exception:
-                pass                                         # журнал не должен ломать работу
+        return status.get("code", 500)
+
+
+# ---------- заголовки безопасности (0.16.0) ----------
+
+SECURITY_HEADERS = [
+    (b"x-content-type-options", b"nosniff"),          # браузер не угадывает тип файла (скачанный .html не запустится)
+    (b"x-frame-options", b"SAMEORIGIN"),              # чужой сайт не вставит наш в рамку (подмена кнопок)
+    (b"referrer-policy", b"same-origin"),             # адреса наших страниц не уходят на чужие сайты (NocoDB и др.)
+]
+HSTS = (b"strict-transport-security", b"max-age=31536000")   # по HTTPS — дальше браузер ходит только по HTTPS
+
+
+class SecurityHeaders:
+    """Заголовки безопасности у каждого ответа (и при LOGIN_REQUIRED=0). HSTS — только если запрос пришёл по HTTPS
+    (за Caddy: X-Forwarded-Proto, uvicorn доверяет ему при FORWARDED_ALLOW_IPS)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        extra = SECURITY_HEADERS + ([HSTS] if scope.get("scheme") == "https" else [])
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                have = {k.lower() for k, _ in headers}
+                headers += [(k, v) for k, v in extra if k not in have]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)

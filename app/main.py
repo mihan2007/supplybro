@@ -54,7 +54,8 @@ NOT_SPECIFIED = "Не указано в документах"
 # id таблицы NocoDB в ссылке вида https://app.nocodb.com/<ws>/<base>/<таблица>/<вид>
 TABLE_ID_RE = re.compile(r"/(m[a-z0-9]{8,})(?:/|$|\?)")
 
-app = FastAPI(title="SupplyBro", version=APP_VERSION)
+# Описание адресов (/docs, /redoc, /openapi.json) выключено (0.16.0): сайт открыт в интернет, список адресов никому не нужен.
+app = FastAPI(title="SupplyBro", version=APP_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 # Вход на сайт (0.7.0, app/access.py): при LOGIN_REQUIRED=1 без входа сайт не открывается, сотрудник видит только своих
@@ -75,6 +76,8 @@ if access.LOGIN_REQUIRED:
     from . import auth
     auth.init()
     app.add_middleware(access.LoginMiddleware)
+# Заголовки безопасности — у всех ответов, и у отказов проходной (добавлена последней — значит, снаружи), 0.16.0.
+app.add_middleware(access.SecurityHeaders)
 
 
 db.init()
@@ -97,11 +100,24 @@ ALIVE_SECONDS = 60          # очередь обработчика молчит
 QUIET_WARN_SECONDS = 180    # задача столько не меняет шаг — показываем предупреждение (но она может быть жива)
 
 
+OTHER_CLIENT = "конкурс другого клиента"
+# Что видно о задаче чужого клиента (очередь обработчика общая): что очередь занята и сколько, без папки, шага и логина.
+FOREIGN_KEEP = ("id", "kind", "status", "progress", "control", "created_at", "started_at", "updated_at", "finished_at")
+
+
+def _foreign(job: dict) -> bool:
+    """Задача клиента, к которому у вошедшего нет доступа (0.16.0). Вход выключен / администратор сайта — своё всё."""
+    return not access.can_client(access.current_user(), str(job.get("client_id") or ""))
+
+
 def job_view(job: dict | None, lanes: dict | None = None, active: list[dict] | None = None) -> dict | None:
     """Задача для страницы: сколько ждёт / идёт, когда было последнее действие, в какой очереди и кого ждёт,
-    жив ли обработчик."""
+    жив ли обработчик, кто запустил (started_by, 0.16.0). Задача чужого клиента — без папки, шага и логина."""
     if not job:
         return None
+    if _foreign(dict(job)):
+        job = {**{k: dict(job).get(k) for k in FOREIGN_KEEP}, "client_id": "", "folder": OTHER_CLIENT, "step": "",
+               "message": "", "started_by": "", "other_client": True}
     now = time.time()
     j = {k: v for k, v in dict(job).items() if k != "params"}
     lanes = db.lanes_state() if lanes is None else lanes
@@ -122,8 +138,11 @@ def job_view(job: dict | None, lanes: dict | None = None, active: list[dict] | N
         ahead = [a for a in same if a["status"] == "queued" and a["id"] < j["id"]]
         j["ahead"] = len(ahead)
         if running and running["id"] != j["id"]:
-            j["waiting_for"] = {"folder": running["folder"], "kind_title": db.KIND_TITLES.get(running["kind"], running["kind"]),
-                                "step": running.get("step") or "", "elapsed": round(now - (running.get("started_at") or now))}
+            other = _foreign(running)
+            j["waiting_for"] = {"folder": OTHER_CLIENT if other else running["folder"],
+                                "kind_title": db.KIND_TITLES.get(running["kind"], running["kind"]),
+                                "step": "" if other else (running.get("step") or ""),
+                                "elapsed": round(now - (running.get("started_at") or now))}
     return j
 
 
@@ -556,11 +575,33 @@ def api_doc_text(client_id: str, folder: str, path: str):
     return PlainTextResponse(inside(base, row["text_path"]).read_text(encoding="utf-8"))
 
 
+def _file_block(rel: str) -> str | None:
+    """Чей раздел этот файл папки конкурса (0.16.0): результаты в AIExtract — анализа, цен или заявки; прайсы
+    поставщиков — цен. Выключенный сотруднику раздел не отдаёт свои файлы и через «скачать файл»."""
+    parts = [x for x in fix_path(rel).replace("\\", "/").split("/") if x]
+    if not parts:
+        return None
+    top = parts[0].lower()
+    if re.search(r"прайс", top):
+        return "prices"
+    if top != "aiextract":
+        return None
+    rest = "/".join(parts[1:]).lower()
+    if rest.startswith(("заявка", "bid", "history/заявка", "поставщикам")):
+        return "bid"
+    if rest.startswith(("prices", "цены_поиск", "pricelists", "_converted/pricelists")):
+        return "prices"
+    return "analysis"
+
+
 @app.get("/api/clients/{client_id}/docs/file")
 def api_doc_file(client_id: str, folder: str, path: str):
     """Сам файл (скачать / открыть)."""
     client = get_client(client_id)
     base = folder_path(client, folder)
+    blk = _file_block(path)
+    if blk and not access.block_on(blk):
+        raise HTTPException(403, "этот файл — из раздела, который для вашей учётной записи выключен (админ-панель)")
     target = inside(base, path)
     if not target.is_file():
         raise HTTPException(404, "файл не найден")

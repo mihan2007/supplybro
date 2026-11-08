@@ -284,7 +284,11 @@ def lane(name: str, only: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> N
             continue
         _current[name] = job["id"]
         db.heartbeat(name, job["id"])
-        print(f"Задача {job['id']}: {job['kind']} — {job['folder']}", flush=True)
+        # Следующие задачи цепочки (после подготовки — анализ, после анализа — запись и цены) — от имени того,
+        # кто запустил эту (0.16.0, jobs.started_by).
+        db.ACTOR.set(db.job_by(job))
+        who = db.job_by(job)
+        print(f"Задача {job['id']}: {job['kind']} — {job['folder']}" + (f" (запустил {who})" if who else ""), flush=True)
         try:
             summary = run_job(job)
             db.update_job(job["id"], status="done", step="Готово", progress=1, message=summary,
