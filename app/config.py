@@ -10,10 +10,41 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 CLIENTS_FILE = Path(os.environ.get("CLIENTS_FILE", "/app/config/clients.json"))
+
+# База NocoDB клиента одной строкой в .env (0.16.1, пользователь 08.11.2026: «сделай, чтобы я мог просто поменять данные
+# базы данных»): NOCODB_URL_<КЛИЕНТ> — адрес «Реестра конкурсов» из браузера, например
+# NOCODB_URL_MAIN=https://app.nocodb.com/wzs963xn/py03vcjrohur7u7/m9w2qkxcvt02nkb/vwrh37vtzc3h9r0r/...
+# Из него берутся рабочее пространство, база и таблица реестра; пусто — как в config/clients.json.
+NOCO_URL_RE = re.compile(r"^(https?://[^/#?]+)/(?:#/)?(?:nc/)?([a-z0-9]+)/(p[a-z0-9]+)/(m[a-z0-9]+)(?:[/?#]|$)", re.I)
+
+
+def noco_env_name(client_id: str) -> str:
+    return "NOCODB_URL_" + re.sub(r"[^A-Z0-9]", "_", client_id.upper())
+
+
+def noco_from_url(url: str) -> dict:
+    """Адрес таблицы NocoDB → {url, workspace_id, base_id, registry_table_id}. Не адрес таблицы — ValueError."""
+    m = NOCO_URL_RE.match((url or "").strip().strip('"').strip("'"))
+    if not m:
+        raise ValueError("это не адрес таблицы NocoDB — откройте «Реестр конкурсов» в NocoDB и скопируйте адрес "
+                         "из строки браузера целиком (вида https://app.nocodb.com/w…/p…/m…/…)")
+    return {"url": m.group(1), "workspace_id": m.group(2), "base_id": m.group(3), "registry_table_id": m.group(4)}
+
+
+def _noco_override(client_id: str) -> dict:
+    name = noco_env_name(client_id)
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        return noco_from_url(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} в .env: {exc}") from None
 
 
 @dataclass
@@ -72,11 +103,12 @@ class Client:
 
 
 def load_clients() -> dict[str, Client]:
-    """Читает config/clients.json. Читается при каждом запросе — правки применяются без перезапуска."""
+    """Читает config/clients.json. Читается при каждом запросе — правки применяются без перезапуска. База NocoDB
+    клиента — из NOCODB_URL_<КЛИЕНТ> в .env, если задан (0.16.1; .env — после `docker compose up -d`)."""
     raw = json.loads(CLIENTS_FILE.read_text(encoding="utf-8"))
     clients: dict[str, Client] = {}
     for c in raw.get("clients", []):
-        noco = NocoSettings(**c["nocodb"])
+        noco = NocoSettings(**{**c["nocodb"], **_noco_override(c["id"])})
         entities = [LegalEntity(**e) for e in c.get("legal_entities", [])]
         clients[c["id"]] = Client(id=c["id"], name=c["name"], nocodb=noco, legal_entities=entities,
                                   tenders_folder=c.get("tenders_folder", ""))

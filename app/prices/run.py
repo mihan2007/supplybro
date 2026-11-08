@@ -1016,7 +1016,12 @@ def _write_noco(client, result: dict, rows: list[dict]) -> dict:
     try:
         # nc.BASE_ID не меняем (его использует запись в NocoDB в другом потоке): адреса ниже — по id таблицы.
         token = s.token()
-        table_id = link["spec_table_id"]
+        # Только таблица своей базы (0.16.1, app/noco_tables.py): в noco_links из старой базы — id старой таблицы.
+        from ..noco_tables import own_table
+        table_id = own_table(s, link["spec_table_id"])
+        if not table_id:
+            return {"status": "skipped", "text": "не записано — таблицы спецификации нет в базе NocoDB этого клиента "
+                                                 "(ссылка ведёт в другую базу); цены — в Позиции_и_цены.xlsx"}
         nc.ensure_spec_columns(token, table_id, only=nc.MARKET_OFFER_FIELDS)
         existing = {str(r.get("№") or "").strip(): r["Id"] for r in nc.list_all_records(token, table_id)}
         updates = []

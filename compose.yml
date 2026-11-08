@@ -20,6 +20,9 @@ services:
       DATA_DIR_IN_CONTAINER: /data
       TENDERS_DIR_IN_CONTAINER: /tenders
       CLIENTS_FILE: /app/config/clients.json
+      # База NocoDB клиента — адрес «Реестра конкурсов» из браузера (0.16.1); пусто — как в config/clients.json.
+      NOCODB_URL_MAIN: ${NOCODB_URL_MAIN:-}
+      NOCODB_URL_SARGSYAN: ${NOCODB_URL_SARGSYAN:-}
       # Выход в интернет (NocoDB) через прокси, если он указан в .env.
       HTTPS_PROXY: ${OUTBOUND_PROXY:-}
       HTTP_PROXY: ${OUTBOUND_PROXY:-}

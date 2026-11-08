@@ -430,11 +430,15 @@ def _supplier_key(name: str) -> str:
 
 def _spec_table(client, internal: str) -> tuple[str | None, str]:
     """Таблица спецификации конкурса: та, что записал сайт (noco_links), иначе — по ссылке в записи реестра,
-    иначе — по названию (внутреннему номеру). Возвращает (id таблицы, ключ NocoDB)."""
+    иначе — по названию (внутреннему номеру). Только из базы клиента (0.16.1, app/noco_tables.py: в копии базы
+    ссылки и noco_links ведут в старую — тогда таблица с тем же названием в своей). Возвращает (id таблицы, ключ)."""
     from tools import nocodb_client as nc
     from .analysis import noco_write as nw
+    from .noco_tables import own_table, table_id_in_link
     link = db.noco_link(client.id, internal) or {}
     tid = str(link.get("spec_table_id") or "")
+    if tid and not tid.startswith("pending:"):
+        tid = own_table(client.nocodb, tid) or ""
     with nw._WRITE_LOCK:             # программа агента держит базу в общих настройках — не мешаем записи анализа
         token = nw._configure(client)
         if tid and not tid.startswith("pending:"):
@@ -445,7 +449,8 @@ def _spec_table(client, internal: str) -> tuple[str | None, str]:
             if found:
                 rec = found[0]
                 break
-        tid = nc._table_id_from_link((rec or {}).get(nc.SPEC_LINK_COLUMN)) if rec else None
+        tid = table_id_in_link((rec or {}).get(nc.SPEC_LINK_COLUMN)) if rec else None
+        tid = own_table(client.nocodb, tid) if tid else None
         if not tid:
             t = nc.find_table_by_title(token, nc._spec_table_title(internal))
             tid = (t or {}).get("id")

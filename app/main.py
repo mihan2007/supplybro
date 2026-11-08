@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 
 from . import access, chat, db, price_summary, pricelists, tender_list
+from .noco_tables import own_table_async
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
 from .analysis import changes
@@ -392,7 +393,11 @@ async def api_tender(client_id: str, record_id: int, view: str | None = None, fr
     card_on = access.block_on("card")                # раздел выключен сотруднику — только шапка конкурса (0.11.0)
     spec_on = access.block_on("spec")
 
+    # Ссылка на спецификацию — только на таблицу своей базы (0.16.1: в копии базы ссылки ведут в старую базу —
+    # тогда ссылка на таблицу с тем же названием в своей базе).
     spec_id = spec_table_id(record.get(F_SPEC_LINK))
+    own_spec = await own_table_async(client.nocodb, spec_id) if spec_id and spec_on else None
+    spec_link = (clean(record.get(F_SPEC_LINK)) if own_spec == spec_id else noco.table_link(own_spec)) if own_spec else ""
     return {
         "id": record_id,
         "internal": clean(record.get(F_INTERNAL)),
@@ -406,7 +411,7 @@ async def api_tender(client_id: str, record_id: int, view: str | None = None, fr
         "links": {
             "procedure": clean(record.get(F_PROCEDURE)),
             "nocodb": noco.table_link(reg_id, (meta["views"][0]["id"] if meta["views"] else None), record_id) if card_on else "",
-            "spec": clean(record.get(F_SPEC_LINK)) if spec_id and spec_on else "",
+            "spec": spec_link,
         },
         "views": meta["views"] if card_on else [],
         "view": chosen if card_on else None,
@@ -422,7 +427,8 @@ async def api_spec(client_id: str, record_id: int, view: str | None = None, fres
     noco = NocoClient(client.nocodb)
     record = await noco.record(client.nocodb.registry_table_id, record_id)
 
-    table_id = spec_table_id(record.get(F_SPEC_LINK))
+    # Только таблица своей базы (0.16.1): ссылка в чужую базу — таблица с тем же названием в своей или запасной путь.
+    table_id = await own_table_async(client.nocodb, spec_table_id(record.get(F_SPEC_LINK)))
     if not table_id:
         # Запасной путь: таблица названа внутренним номером конкурса (К939) или «Спецификация — <номер>».
         for title in (clean(record.get(F_INTERNAL)), f"Спецификация — {clean(record.get(F_NUMBER))}"):

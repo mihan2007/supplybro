@@ -304,6 +304,9 @@ docker compose exec web python -m app.auth reset-password ЛОГИН
 - `tools/extract_archive.py` — распаковка архивов (копия из проекта StrokTenderDataExtractor).
 - Клиенты и юр. лица — `config/clients.json` (`tenders_folder` — папка клиента в `Dropbox\Агент`): «Наша компания»
   и «ИП Саргсян» (своя база NocoDB, своя нумерация с К1).
+- Другая база NocoDB для сайта (0.16.1) — одна строка в `.env`: адрес «Реестра конкурсов» из строки браузера целиком,
+  `NOCODB_URL_MAIN=https://app.nocodb.com/…` (ИП Саргсян — `NOCODB_URL_SARGSYAN`), затем `docker compose up -d`.
+  Спецификации сайт берёт только из этой базы.
 - Настройки запуска — `.env` (в GitHub не попадает), образец — `.env.example`.
 - Ключи — папка `secrets/` (в GitHub и в образ не попадает).
 - Данные сайта (база, очередь) — `DATA_DIR` внутри Ubuntu (по умолчанию `/home/user_1/supplybro-data`).

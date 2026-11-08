@@ -53,6 +53,13 @@ def _request_with_counter(method, url, token, body=None, _retries=8):
 if nc._request is not _request_with_counter and getattr(nc._request, "__name__", "") != "_request_with_counter":
     nc._request = _request_with_counter
 
+# 0.16.1: до _configure — никакой базы. В tools/nocodb_client вписаны база и реестр «Наша» (старая база, до копии
+# 08.11.2026): забытая настройка не должна тихо писать туда — запрос без _configure просто не пройдёт.
+if not getattr(nc, "_supplybro_reset", False):
+    nc.WORKSPACE_ID = nc.BASE_ID = nc.TABLE_ID = ""
+    nc.RECORDS_URL = ""
+    nc._supplybro_reset = True
+
 
 def _configure(client: Client) -> str:
     """Настраивает nocodb_client на базу клиента и возвращает ключ."""
@@ -228,7 +235,11 @@ def _save(client: Client, folder_name: str, result: dict, force: bool, progress)
     # представлениями «Сбор цен», «Закупки», «Цены агента» у нового конкурса настраивается несколько минут
     # (по одной колонке на запрос) — ссылка на неё дописывается в запись после.
     progress("NocoDB: запись конкурса", 0.89)
-    linked_id = nc._table_id_from_link((target or {}).get(nc.SPEC_LINK_COLUMN))
+    # Ссылка в записи и noco_links — только на таблицу своей базы (0.16.1, app/noco_tables.py: в копии базы они ведут
+    # в старую — тогда таблица с тем же названием в своей, её нет — как без ссылки).
+    from ..noco_tables import own_table, table_id_in_link
+    linked_id = table_id_in_link((target or {}).get(nc.SPEC_LINK_COLUMN))
+    linked_id = own_table(client.nocodb, linked_id) if linked_id else None
     if target:
         status, body = nc._request("PATCH", nc.RECORDS_URL, token, {"Id": target["Id"], **row})
         if status != 200:
@@ -240,7 +251,9 @@ def _save(client: Client, folder_name: str, result: dict, force: bool, progress)
             raise RuntimeError(f"NocoDB: создать запись не удалось: HTTP {status} {body}")
         record_id, action = body.get("Id"), "created"
     created_by_site = action == "created" or state["created_by_site"]
-    link_before = db.noco_link(client.id, internal) or {}
+    link_before = dict(db.noco_link(client.id, internal) or {})
+    if link_before.get("spec_table_id") and not str(link_before["spec_table_id"]).startswith("pending:"):
+        link_before["spec_table_id"] = own_table(client.nocodb, link_before["spec_table_id"]) or ""
     db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site,
                       linked_id or link_before.get("spec_table_id") or "")
 

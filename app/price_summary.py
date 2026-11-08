@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 
 from . import db
 from .analysis.run import load_result
+from .noco_tables import own_table_async
 from .nocodb import NocoClient, NocoError
 from .prices.extract import parse_price
 from .pricelists import RED, _supplier_key, supplier_prices
@@ -133,11 +134,12 @@ async def read_spec(client, folder_name: str, record_id: int | None = None, ttl:
         if record_id:
             rec = await noco.record(client.nocodb.registry_table_id, record_id)
             m = TABLE_ID_RE.search(str(rec.get(SPEC_LINK) or ""))
-            table_id = m.group(1) if m else None
+            # Только таблица своей базы (0.16.1, app/noco_tables.py): ссылка из копии базы ведёт в старую.
+            table_id = await own_table_async(client.nocodb, m.group(1)) if m else None
             internal = internal or norm_number(str(rec.get("Внутренний номер") or "")) or ""
         if not table_id and internal:
             tid = str((db.noco_link(client.id, internal) or {}).get("spec_table_id") or "")
-            table_id = tid if tid and not tid.startswith("pending:") else None
+            table_id = await own_table_async(client.nocodb, tid) if tid and not tid.startswith("pending:") else None
         if not table_id and internal:
             table_id = await noco.find_table_by_title(internal)
         if not table_id:
