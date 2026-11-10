@@ -26,6 +26,7 @@ NocoDB доделывается в ту же таблицу.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import threading
 import time
@@ -74,9 +75,16 @@ def _save_noco(client, job_folder: str, folder, result: dict, force: bool, progr
     return noco
 
 
+# Юр. лицо текущей задачи (0.19.0): с ним работают промты, и его же получают задачи цепочки (_chain).
+JOB_ENTITY: contextvars.ContextVar[str] = contextvars.ContextVar("supplybro_job_entity", default="")
+
+
 def _chain(client_id: str, folder: str, kind: str, params: dict | None = None) -> bool:
     """Следующая задача цепочки (после подготовки — анализ, после анализа — запись и поиск цен). Если такую же
-    пользователь приостановил — она остаётся на паузе (False)."""
+    пользователь приостановил — она остаётся на паузе (False). Юр. лицо текущей задачи передаётся дальше (0.19.0)."""
+    entity = JOB_ENTITY.get()
+    if entity and not (params or {}).get("entity"):
+        params = {**(params or {}), "entity": entity}
     job_id = db.enqueue(client_id, folder, kind, params, auto=True)
     return (db.get_job(job_id) or {}).get("status") != "paused"
 
@@ -90,6 +98,10 @@ def run_job(job) -> str:
         raise RuntimeError(f"клиент не найден: {job['client_id']}")
     folder = folder_path(client, job["folder"])
     params = db.job_params(job)
+    # Юр. лицо, выбранное на странице при запуске (0.19.0): его промты; неизвестное клиенту — как не выбранное.
+    entity = str(params.get("entity") or "")
+    entity = entity if client.entity(entity) else ""
+    JOB_ENTITY.set(entity)
     last = {"t": 0.0, "check": 0.0}
 
     def check() -> None:
@@ -127,7 +139,7 @@ def run_job(job) -> str:
     if job["kind"] == "changes":
         from .analysis.changes import mark_prices_queued, process
         summary, entry = process(client.id, job["folder"], folder, progress, by=params.get("by") or "",
-                                 cache_dir=cache)
+                                 cache_dir=cache, entity=entity)
         need = (entry or {}).get("prices", {}).get("positions") or []
         if need and AUTO_PRICES:
             from .prices.run import load_report
@@ -155,7 +167,8 @@ def run_job(job) -> str:
             result = prev
             summary = "Анализ был готов до перезапуска обработчика — продолжено с записи в NocoDB"
         else:
-            summary, result = analyze(client.id, job["folder"], folder, progress, params.get("model"), cache_dir=cache)
+            summary, result = analyze(client.id, job["folder"], folder, progress, params.get("model"), cache_dir=cache,
+                                      entity=entity)
         # Запись в NocoDB и поиск цен — в своих очередях (у нового конкурса запись идёт 10–20 минут: программа
         # агента настраивает представления спецификации по колонке на запрос), анализ следующих конкурсов не ждёт.
         if NOCODB_WRITE:
@@ -206,7 +219,7 @@ def run_job(job) -> str:
     if job["kind"] == "pricelist":
         # Прайсы, КП, счета поставщиков (0.8.0): все файлы в очереди этого конкурса — по одному.
         from .pricelists import process
-        return process(client.id, job["folder"], folder, progress, cache_dir=cache)
+        return process(client.id, job["folder"], folder, progress, cache_dir=cache, entity=entity)
 
     if job["kind"] == "noco_purch":
         # Цены поставщиков по кнопке «Записать в спецификацию» — в колонки «Отдел закупок».
@@ -217,7 +230,7 @@ def run_job(job) -> str:
         from .prices.run import find_prices
         summary, _report = find_prices(client, job["folder"], folder, progress, urgent=bool(params.get("urgent")),
                                        abroad=params.get("abroad", True) is not False, engine=params.get("engine"),
-                                       cache_dir=cache, only=params.get("only") or None)
+                                       cache_dir=cache, only=params.get("only") or None, entity=entity)
         return summary
 
     if job["kind"] == "bid":

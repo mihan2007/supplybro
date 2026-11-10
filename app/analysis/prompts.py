@@ -3,11 +3,15 @@
 
 SYSTEM одинаков у всех вызовов Claude одного анализа — вместе с блоком документов он кэшируется.
 Правила перенесены из CLAUDE.md старого проекта (Шаги 5, 5.1, 5.1a, 5.1e, 5.2).
+
+0.18.0: SYSTEM, *_RULES и правила полей (fields.py) — стандартные тексты; у клиента они могут быть изменены в
+админ-панели (app/prompt_store.py). Задание собирают функции ниже: служебная часть (дата, список позиций, формат
+ответа) — отсюда, правила — из промтов клиента ps (None — стандартные).
 """
 
 from __future__ import annotations
 
-from .fields import FIELD_BY_KEY
+from ..prompt_store import Prompts, or_default
 
 SYSTEM = """Ты — эксперт по тендерной документации (закупки по 44-ФЗ и 223-ФЗ) в компании-поставщике оборудования. \
 Твоя задача — точно извлекать сведения из документов одной закупки.
@@ -39,11 +43,21 @@ FIELD_VALUE = _obj({"value": STR, "quote": STR, "file": STR})
 
 # ---------- поля блоков 1–7 ----------
 
-def group_prompt(keys: list[str], today: str) -> str:
+def system(ps: Prompts | None = None) -> str:
+    return or_default(ps).text("analysis.system")
+
+
+def field_rule(key: str, ps: Prompts | None = None) -> str:
+    """Правило заполнения поля карточки (промт клиента «analysis.field.<ключ>»)."""
+    return or_default(ps).text(f"analysis.field.{key}")
+
+
+def group_prompt(keys: list[str], today: str, ps: Prompts | None = None) -> str:
+    from .fields import FIELD_BY_KEY
     lines = []
     for k in keys:
-        _, _block, label, rule = FIELD_BY_KEY[k]
-        lines.append(f"- {k} — «{label}»: {rule}")
+        _, _block, label, _rule = FIELD_BY_KEY[k]
+        lines.append(f"- {k} — «{label}»: {field_rule(k, ps)}")
     return (f"Сегодня: {today}.\n\n"
             "Задание: заполни поля конкурса по документам. Для каждого поля верни объект "
             "{value, quote, file}: value — значение по правилу поля, quote — дословная цитата, file — документ.\n\n"
@@ -58,9 +72,7 @@ def group_schema(keys: list[str]) -> dict:
 
 POS_SHORT = _obj({"n": STR, "name": STR, "qty": STR, "unit": STR})
 
-INVENTORY_PROMPT = """Сегодня: {today}.
-
-Задание: составь полный перечень закупаемых позиций (товаров).
+INVENTORY_RULES = """Задание: составь полный перечень закупаемых позиций (товаров).
 1. Найди основной перечень — обычно «Перечень и объём закупаемой продукции» (Таблица 1.1) в технических требованиях / \
 техническом задании. Если его нет — спецификация, форма коммерческого предложения / структура НМЦ, проект договора.
 2. Выпиши ВСЕ позиции основного перечня по порядку, без пропусков и без объединения строк: n — номер как в документе, \
@@ -85,12 +97,7 @@ INVENTORY_SCHEMA = _obj({
 
 # ---------- позиции: подробно, частями ----------
 
-DETAIL_PROMPT = """Сегодня: {today}.
-
-Задание: подробно опиши позиции основного перечня ({main_source}). Позиции этой части:
-{items}
-
-Для каждой позиции заполни:
+DETAIL_RULES = """Для каждой позиции заполни:
 - n — номер как в списке выше.
 - name — «Наименование позиции» дословно из основного перечня.
 - tz — «Техническое задание»: все требования ТЗ / технической части к этой позиции дословно, без сокращений и без \
@@ -123,6 +130,15 @@ Electric — Франция, Phoenix Contact — Германия); если б�
 
 В ответе — ровно эти позиции, в том же порядке."""
 
+def inventory_prompt(today: str, ps: Prompts | None = None) -> str:
+    return f"Сегодня: {today}.\n\n" + or_default(ps).text("analysis.inventory")
+
+
+def detail_prompt(today: str, main_source: str, items: str, ps: Prompts | None = None) -> str:
+    return (f"Сегодня: {today}.\n\nЗадание: подробно опиши позиции основного перечня ({main_source}). "
+            f"Позиции этой части:\n{items}\n\n" + or_default(ps).text("analysis.detail"))
+
+
 DETAIL_SCHEMA = _obj({"positions": {"type": "array", "items": _obj({
     "n": STR, "name": STR, "tz": STR, "doc_errors": STR, "brand_model": STR, "manufacturer": STR, "country": STR,
     "analog_allowed": STR, "analog_status": {"type": "string", "enum": ["Да", "Нет", "Уточни"]},
@@ -132,9 +148,7 @@ DETAIL_SCHEMA = _obj({"positions": {"type": "array", "items": _obj({
 
 # ---------- перепроверка критичных полей (сравнение с DeepSeek) ----------
 
-COMPARE_PROMPT = """Сегодня: {today}.
-
-Задание: перепроверка критичных полей. Для каждого поля ниже — наше значение и фрагмент, который независимо нашла \
+COMPARE_RULES = """Задание: перепроверка критичных полей. Для каждого поля ниже — наше значение и фрагмент, который независимо нашла \
 другая модель (DeepSeek) в тех же документах. Она цитирует «как в тексте», поэтому формулировки могут отличаться — \
 сравнивай смысл, числа и даты, а не форму записи.
 
@@ -149,6 +163,10 @@ COMPARE_PROMPT = """Сегодня: {today}.
 иначе наше без изменений. Без маркеров ✅/🔺.
 - their_version — кратко суть версии другой модели (для пометки о расхождении).
 - comment — одно предложение: на чём основано решение (документ, пункт)."""
+
+
+def compare_prompt(today: str, items: str, ps: Prompts | None = None) -> str:
+    return f"Сегодня: {today}.\n\n" + or_default(ps).render("analysis.compare", items=items)
 
 
 def compare_schema(keys: list[str]) -> dict:

@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import db, jobctl
+from ..prompt_store import Prompts, for_client, or_default
 from . import prompts
 from .corpus import QuoteIndex, build_documents_block, corpus_hash, load_docs
 from .fields import COMPUTED, CRITICAL, DISPLAY_ORDER, GROUPS, NOT_SPECIFIED, label_of
@@ -131,59 +132,61 @@ def _money_values(text: str) -> list[float]:
 
 # ---------- шаги ----------
 
-def _deepseek(documents_text: str, usage: Usage) -> dict:
+def _deepseek(documents_text: str, usage: Usage, ps: Prompts | None = None) -> dict:
     ds = DeepSeek(DEEPSEEK_MODEL, usage)
-    return ds.json_call(system=deepseek_extract.SYSTEM_PROMPT,
+    return ds.json_call(system=or_default(ps).text("analysis.deepseek"),
                         user=deepseek_extract.build_user_prompt(documents_text[:DEEPSEEK_LIMIT]),
                         label="DeepSeek: критичные поля")
 
 
-def _group(claude: Claude, docs_block: str, today: str, group) -> dict:
+def _group(claude: Claude, docs_block: str, today: str, group, ps: Prompts | None = None) -> dict:
     """Поля одной группы блоков 1–7. Если ответ не поместился — группа делится пополам."""
     title, keys = group
     try:
-        ans = claude.json_call(system=prompts.SYSTEM, documents=docs_block, prompt=prompts.group_prompt(keys, today),
+        ans = claude.json_call(system=prompts.system(ps), documents=docs_block,
+                               prompt=prompts.group_prompt(keys, today, ps),
                                schema=prompts.group_schema(keys), label=f"Поля: {title}", max_tokens=32000)
     except TruncatedError:
         if len(keys) < 2:
             raise
         half = len(keys) // 2
-        return {**_group(claude, docs_block, today, (title + " (½)", keys[:half])),
-                **_group(claude, docs_block, today, (title + " (½)", keys[half:]))}
+        return {**_group(claude, docs_block, today, (title + " (½)", keys[:half]), ps),
+                **_group(claude, docs_block, today, (title + " (½)", keys[half:]), ps)}
     return {k: ans.get(k) or {"value": NOT_SPECIFIED, "quote": "", "file": ""} for k in keys}
 
 
-def _inventory(claude: Claude, docs_block: str, today: str) -> dict:
-    return claude.json_call(system=prompts.SYSTEM, documents=docs_block,
-                            prompt=prompts.INVENTORY_PROMPT.format(today=today),
+def _inventory(claude: Claude, docs_block: str, today: str, ps: Prompts | None = None) -> dict:
+    return claude.json_call(system=prompts.system(ps), documents=docs_block,
+                            prompt=prompts.inventory_prompt(today, ps),
                             schema=prompts.INVENTORY_SCHEMA, label="Позиции: перечень", max_tokens=64000)
 
 
-def _details(claude: Claude, docs_block: str, today: str, main_source: str, part: list[dict], label: str) -> list[dict]:
+def _details(claude: Claude, docs_block: str, today: str, main_source: str, part: list[dict], label: str,
+             ps: Prompts | None = None) -> list[dict]:
     """Подробности позиций одной части. Если ответ не поместился (модель много думала или ТЗ длинные) —
     часть делится пополам и запрашивается заново."""
     items = "\n".join(f"{p['n']}. {p['name']} — {p['qty']} {p['unit']}" for p in part)
     try:
-        ans = claude.json_call(system=prompts.SYSTEM, documents=docs_block,
-                               prompt=prompts.DETAIL_PROMPT.format(today=today, main_source=main_source, items=items),
+        ans = claude.json_call(system=prompts.system(ps), documents=docs_block,
+                               prompt=prompts.detail_prompt(today, main_source, items, ps),
                                schema=prompts.DETAIL_SCHEMA, label=label, max_tokens=64000)
     except TruncatedError:
         if len(part) == 1:
             raise
         half = len(part) // 2
-        return (_details(claude, docs_block, today, main_source, part[:half], f"{label} (½)")
-                + _details(claude, docs_block, today, main_source, part[half:], f"{label} (½)"))
+        return (_details(claude, docs_block, today, main_source, part[:half], f"{label} (½)", ps)
+                + _details(claude, docs_block, today, main_source, part[half:], f"{label} (½)", ps))
     return ans.get("positions") or []
 
 
-def _compare(claude: Claude, docs_block: str, today: str, ours: dict, theirs: dict) -> dict:
+def _compare(claude: Claude, docs_block: str, today: str, ours: dict, theirs: dict, ps: Prompts | None = None) -> dict:
     keys = [k for k in CRITICAL if k in ours]
     items = []
     for k in keys:
         items.append(f"### {k} — «{label_of(k)[1]}»\nНаше значение: {ours[k]}\n"
                      f"Версия другой модели: {theirs.get(k) or 'не найдено в переданном тексте'}")
-    return claude.json_call(system=prompts.SYSTEM, documents=docs_block,
-                            prompt=prompts.COMPARE_PROMPT.format(today=today, items="\n\n".join(items)),
+    return claude.json_call(system=prompts.system(ps), documents=docs_block,
+                            prompt=prompts.compare_prompt(today, "\n\n".join(items), ps),
                             schema=prompts.compare_schema(keys), label="Перепроверка критичных полей",
                             max_tokens=32000)
 
@@ -338,7 +341,7 @@ def _apply_markers(values: dict, verdicts: dict) -> dict[str, dict]:
 # ---------- главная функция ----------
 
 def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str | None = None,
-            cache_dir: Path | None = None) -> tuple[str, dict]:
+            cache_dir: Path | None = None, entity: str | None = None) -> tuple[str, dict]:
     """Анализ документов конкурса. Возвращает (итог одной строкой, результат). model — модель Claude (иначе CLAUDE_MODEL).
     cache_dir — кэш ответов модели этой задачи (app/jobctl.py): после паузы / отмены / ошибки / перезапуска
     обработчика уже полученные ответы повторно не оплачиваются."""
@@ -353,6 +356,9 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
     claude = Claude(model, usage, effort_for(model))
     if cache_dir:
         claude.cache = jobctl.AnswerCache(cache_dir)
+    # Промты клиента и юр. лица (0.18.0 / 0.19.0, админ-панель) — один раз на весь анализ: у всех вызовов одинаковое
+    # начало (кэш документов). entity — юр. лицо, выбранное на странице при запуске (app/worker.py передаёт по цепочке).
+    ps = for_client(client_id, entity)
     check = jobctl.checker(progress)      # просят ли остановить задачу (пока ждём ответов модели — раз в секунду)
     checks: list[str] = []
     if skipped:
@@ -361,21 +367,21 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
     pool = ThreadPoolExecutor(max_workers=PARALLEL + 1)
     ds_docs = [d for d in used if d.priority <= DEEPSEEK_MAX_PRIORITY] or used
     ds_block, _, _ = build_documents_block(ds_docs, DEEPSEEK_LIMIT)
-    deepseek_future = pool.submit(_deepseek, ds_block, usage)
+    deepseek_future = pool.submit(_deepseek, ds_block, usage, ps)
 
     try:
         # 1. Перечень позиций — первым вызовом: он записывает документы в кэш, остальные вызовы читают из кэша.
         progress("Перечень позиций (документы передаются модели)", 0.05)
-        inv = jobctl.result(pool.submit(_inventory, claude, docs_block, today), check)
+        inv = jobctl.result(pool.submit(_inventory, claude, docs_block, today, ps), check)
         main = [p for p in inv.get("positions") or [] if str(p.get("name") or "").strip()]
         inv["positions"] = main
 
         # 2. Параллельно: поля блоков 1–7 (три группы) и позиции подробно частями.
         progress(f"Поля конкурса и позиции подробно (0 из {len(main)})", 0.2)
-        group_futs = [pool.submit(_group, claude, docs_block, today, g) for g in GROUPS]
+        group_futs = [pool.submit(_group, claude, docs_block, today, g, ps) for g in GROUPS]
         parts = [main[i:i + CHUNK] for i in range(0, len(main), CHUNK)]
         part_futs = [(pool.submit(_details, claude, docs_block, today, inv.get("main_source") or "", part,
-                                  f"Позиции {part[0]['n']}–{part[-1]['n']}"), part) for part in parts]
+                                  f"Позиции {part[0]['n']}–{part[-1]['n']}", ps), part) for part in parts]
         details: dict[str, dict] = {}
         done = 0
         for fut, part in part_futs:
@@ -393,7 +399,8 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
             for i in range(0, len(missing), CHUNK):
                 part = missing[i:i + CHUNK]
                 for d in jobctl.result(pool.submit(_details, claude, docs_block, today, inv.get("main_source") or "",
-                                                   part, f"Позиции (повтор) {part[0]['n']}–{part[-1]['n']}"), check):
+                                                   part, f"Позиции (повтор) {part[0]['n']}–{part[-1]['n']}", ps),
+                                   check):
                     details[_clean_n(d.get("n"))] = d
 
         values = {k: (v.get("value") or "").strip() or NOT_SPECIFIED for k, v in raw_fields.items()}
@@ -412,7 +419,7 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
             theirs = jobctl.result(deepseek_future, check)
             ds_fields = theirs if isinstance(theirs, dict) else {}
             verdicts = jobctl.result(pool.submit(_compare, claude, docs_block, today,
-                                                 {k: values[k] for k in CRITICAL if k in values}, ds_fields), check)
+                                                 {k: values[k] for k in CRITICAL if k in values}, ds_fields, ps), check)
             verification = _apply_markers(values, verdicts)
             for k, v in verification.items():
                 if v["verdict"] == "theirs_correct":

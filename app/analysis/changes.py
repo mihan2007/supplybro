@@ -40,6 +40,7 @@ from pathlib import Path
 
 from .. import db, jobctl
 from ..docs.names import fix_path
+from ..prompt_store import Prompts, for_client, or_default
 from . import prompts
 from .corpus import TEXT_STATUSES, QuoteIndex, build_documents_block, corpus_hash, load_docs, norm
 from .fields import COMPUTED, DISPLAY_ORDER, FIELD_BY_KEY, NOT_SPECIFIED, label_of
@@ -174,9 +175,9 @@ def _title(result: dict) -> str:
     return pn.split("Список позиций:")[0].strip() if "Список позиций:" in pn else pn
 
 
-CHANGES_PROMPT = """Сегодня: {today}.
-
-Конкурс уже разобран — текущие данные ниже. Заказчик опубликовал новые документы, они в <documents>: изменения \
+# Стандартный текст промта «changes.task» (0.18.0: у клиента может быть изменён в админ-панели, app/prompt_store.py).
+# Метки {fields}, {positions}, {rules} заполняет build_prompt; остальные фигурные скобки — просто текст.
+CHANGES_RULES = """Конкурс уже разобран — текущие данные ниже. Заказчик опубликовал новые документы, они в <documents>: изменения \
 извещения или документации, новые редакции, разъяснения, протоколы. Задание: прочитай ТОЛЬКО эти новые документы и \
 найди, что в них изменено по сравнению с текущими данными.
 
@@ -203,7 +204,7 @@ comment — коротко, что и где изменено («п. 12 изве
 4. positions — изменения перечня позиций: action «changed» (у существующей позиции другое количество, единица, \
 наименование, марка, цена, допуск аналога, требования ТЗ), «added» (новая позиция), «removed» (позиция исключена). \
 n — № позиции: для changed и removed — из текущего перечня, для added — № в новой редакции. changes — список \
-{{column, new_value}} только изменённых граф: «Наименование позиции», «Кол-во» (число), «Ед. изм.», «Марка/модель», \
+{column, new_value} только изменённых граф: «Наименование позиции», «Кол-во» (число), «Ед. изм.», «Марка/модель», \
 «Аналог допускается», «Аналог (статус)» (Да / Нет / Уточни), «Стоимость НМЦ» (за единицу с НДС, число с точкой и \
 2 знаками), «НМЦК за позицию» (за позицию с НДС, так же), «Техническое задание» (только новый или изменённый текст \
 требований — он будет дописан к прежнему ТЗ). Для added — все известные графы, обязательно наименование, кол-во и \
@@ -233,7 +234,8 @@ SCHEMA = prompts._obj({
 })
 
 
-def build_prompt(result: dict, today: str) -> str:
+def build_prompt(result: dict, today: str, ps: Prompts | None = None) -> str:
+    ps = or_default(ps)
     by_key = {f["key"]: f for f in result.get("fields") or []}
     lines = [f"- product_title — «{TITLE_LABEL}»: {_short(_title(result), 300)}"]
     for key in DISPLAY_ORDER:
@@ -246,9 +248,9 @@ def build_prompt(result: dict, today: str) -> str:
                                f"{_cell(r.get('Кол-во'))} {r.get('Ед. изм.') or ''}".strip(),
                                _short(r.get("Марка/модель"), 80), _short(r.get("Аналог допускается"), 60),
                                _cell(r.get("Стоимость НМЦ")), _cell(r.get("НМЦК за позицию"))]))
-    rules = [f"- {k}: {FIELD_BY_KEY[k][3]}" for k in FIELD_KEYS if k in FIELD_BY_KEY]
-    return CHANGES_PROMPT.format(today=today, fields="\n".join(lines),
-                                 positions="\n".join(pos) or "(позиций нет)", rules="\n".join(rules))
+    rules = [f"- {k}: {prompts.field_rule(k, ps)}" for k in FIELD_KEYS if k in FIELD_BY_KEY]
+    return f"Сегодня: {today}.\n\n" + ps.render("changes.task", fields="\n".join(lines),
+                                                  positions="\n".join(pos) or "(позиций нет)", rules="\n".join(rules))
 
 
 # ---------- проверки и применение ----------
@@ -324,7 +326,7 @@ def _backup(folder: Path, result: dict, stamp: str) -> str:
 
 
 def process(client_id: str, folder_name: str, folder: Path, progress, by: str = "",
-            cache_dir: Path | None = None) -> tuple[str, dict | None]:
+            cache_dir: Path | None = None, entity: str | None = None) -> tuple[str, dict | None]:
     """Задача «changes»: разобрать документы, появившиеся после анализа, и применить изменения.
     Возвращает (итог одной строкой, запись журнала или None, если новых документов нет)."""
     result = load_result(folder)
@@ -340,6 +342,7 @@ def process(client_id: str, folder_name: str, folder: Path, progress, by: str = 
     claude = Claude(model, usage, effort_for(model))
     if cache_dir:
         claude.cache = jobctl.AnswerCache(cache_dir)
+    ps = for_client(client_id, entity)            # промты клиента и юр. лица (0.18.0 / 0.19.0)
     check = jobctl.checker(progress)
     now_dt = datetime.now(MSK)
     today = now_dt.strftime("%d.%m.%Y")
@@ -347,7 +350,7 @@ def process(client_id: str, folder_name: str, folder: Path, progress, by: str = 
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         ans = jobctl.result(pool.submit(lambda: claude.json_call(
-            system=prompts.SYSTEM, documents=block, prompt=build_prompt(result, today), schema=SCHEMA,
+            system=prompts.system(ps), documents=block, prompt=build_prompt(result, today, ps), schema=SCHEMA,
             label="Изменения: что изменилось", max_tokens=32000)), check)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)

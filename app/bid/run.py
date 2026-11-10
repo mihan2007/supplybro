@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import db, jobctl
+from ..prompt_store import for_client
 from ..analysis.corpus import QuoteIndex, build_documents_block, load_docs
 from ..analysis.llm import Claude, DeepSeekJSON, Usage
 from ..analysis.run import CORPUS_LIMIT, MSK, OUT_DIR, effort_for, load_result
@@ -363,17 +364,19 @@ def prepare_bid(client, folder_name: str, folder: Path, progress, entity: str | 
         claude.cache = jobctl.AnswerCache(cache_dir)
     today = datetime.now(MSK).strftime("%d.%m.%Y")
     tender = _tender_text(result, None)
+    ps = for_client(client.id, part.id)           # промты клиента и участника (0.18.0, юр. лицо — 0.19.0)
+    system = ps.text("bid.system")
     pool = ThreadPoolExecutor(max_workers=PARALLEL)
     try:
         # 1. Требования к участнику и состав заявки.
         progress("Требования к участнику и состав заявки (модель читает документацию)", 0.06)
         # Два вызова параллельно (в одном ответе всё не помещалось): требования и порядок подачи; состав заявки.
         args = (today, part.profile, part.library_text(), tender)
-        f_docs = pool.submit(claude.json_call, system=prompts.SYSTEM, documents=docs_block,
-                             prompt=prompts.docs_prompt(*args), schema=prompts.DOCS_SCHEMA, label="Состав заявки",
+        f_docs = pool.submit(claude.json_call, system=system, documents=docs_block,
+                             prompt=prompts.docs_prompt(*args, ps=ps), schema=prompts.DOCS_SCHEMA, label="Состав заявки",
                              max_tokens=64000)
-        f_req = pool.submit(claude.json_call, system=prompts.SYSTEM, documents=docs_block,
-                            prompt=prompts.req_prompt(*args), schema=prompts.REQ_SCHEMA,
+        f_req = pool.submit(claude.json_call, system=system, documents=docs_block,
+                            prompt=prompts.req_prompt(*args, ps=ps), schema=prompts.REQ_SCHEMA,
                             label="Требования к участнику и порядок подачи", max_tokens=32000)
         plan = {**jobctl.result(f_req, check), **jobctl.result(f_docs, check)}
         quotes = QuoteIndex(used)
@@ -405,8 +408,8 @@ def prepare_bid(client, folder_name: str, folder: Path, progress, entity: str | 
             listing = "\n".join(f"{d['n']}. {d['title']}" + (f" ({d['form']})" if d.get("form") else "")
                                 + f" — {d['kind']}" for d in need)
             ans = jobctl.result(pool.submit(
-                claude.json_call, system=prompts.SYSTEM, documents=None,
-                prompt=prompts.forms_prompt(listing, "\n\n".join(outlines)), schema=prompts.FORMS_SCHEMA,
+                claude.json_call, system=system, documents=None,
+                prompt=prompts.forms_prompt(listing, "\n\n".join(outlines), ps), schema=prompts.FORMS_SCHEMA,
                 label="Где формы", max_tokens=8000), check)
             by_name = {s["name"]: s for s in sources}
             for f in ans.get("forms") or []:
@@ -445,9 +448,9 @@ def prepare_bid(client, folder_name: str, folder: Path, progress, entity: str | 
             kind = form["kind"]
             pos = _positions_text(rows, with_tz=(kind == "tech")) if kind in ("tech", "price") else ""
             ans = claude.json_call(
-                system=prompts.SYSTEM, documents=None,
+                system=system, documents=None,
                 prompt=prompts.fill_prompt(d.get("title") or form["title"], kind, forms.markup(doc), part_text,
-                                           tender, pos, tokens, extra),
+                                           tender, pos, tokens, extra, ps),
                 schema=prompts.FILL_SCHEMA, label=f"Форма: {(d.get('title') or form['title'])[:60]}",
                 max_tokens=32000)
             return {"edits": ans.get("edits") or [], "note": ans.get("note") or ""}

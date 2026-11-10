@@ -51,6 +51,8 @@ function toLogin() {
 async function api(path, query = {}, options = {}) {
   const u = new URL(path, location.origin);
   for (const [k, v] of Object.entries(query)) if (v) u.searchParams.set(k, v);
+  // Запросы по конкурсу — с юр. лицом (0.19.0): задачи и чат пойдут с промтами этого юр. лица (админ-панель).
+  if (query.folder && !("entity" in query) && promptEntity()) u.searchParams.set("entity", promptEntity());
   if (state.fresh) u.searchParams.set("fresh", "1");
   const r = await fetch(u, options);
   if (r.status === 401) toLogin();
@@ -490,6 +492,14 @@ async function createFolder(number, title) {
 
 function currentTender() {
   return state.tenders.get(state.tender) || null;
+}
+
+// Юр. лицо для промтов (0.19.0): выбранное на странице, а если выбраны все — участник конкурса из NocoDB, когда он
+// один. Пусто — промты клиента. Сервер передаёт его задаче и всей её цепочке (анализ → запись → поиск цен).
+function promptEntity() {
+  if (state.entity) return state.entity;
+  const p = (currentTender() || {}).participants || [];
+  return p.length === 1 ? p[0] : "";
 }
 
 // Разделы, выключенные сотруднику в админ-панели (0.11.0): на <body> класс off-<раздел> (loadMe). Раздел не
@@ -947,6 +957,7 @@ function uploadFiles(fileList, target, statusId = "docs-status") {
   const form = new FormData();
   for (const f of fileList) form.append("files", f, f.name);
   const q = new URLSearchParams({ folder: t.folder, target: target || $("upload-target").value || DOCS_TARGET });
+  if (promptEntity()) q.set("entity", promptEntity());
   const xhr = new XMLHttpRequest();
   xhr.open("POST", clientPath("/docs/upload") + "?" + q);
   $("upload-progress").hidden = false;
@@ -2554,6 +2565,7 @@ async function uploadPricelists(fileList) {
   for (const f of files) form.append("files", f, f.name);
   const u = new URL(clientPath("/pricelists/upload"), location.origin);
   u.searchParams.set("folder", t.folder);
+  if (promptEntity()) u.searchParams.set("entity", promptEntity());
   toast(files.length === 1 ? `Загружаю «${files[0].name}»…` : `Загружаю файлов: ${files.length}…`);
   try {
     const r = await fetch(u, { method: "POST", body: form });
@@ -2663,6 +2675,7 @@ async function askChat(question) {
   try {
     const u = new URL(clientPath("/chat"), location.origin);
     u.searchParams.set("folder", t.folder);
+    if (promptEntity()) u.searchParams.set("entity", promptEntity());
     const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, model: USER_MODE ? null : $("chat-model").value }) });
     if (r.status === 401) toLogin();
@@ -3171,6 +3184,23 @@ document.addEventListener("click", (e) => {
   const mo = new MutationObserver(syncVisibility);
   for (const id of watched) mo.observe($(id), { attributes: true, attributeFilter: ["hidden"] });
   syncVisibility();
+})();
+
+// ---------- кнопка «наверх» (0.17.3) ----------
+// Появляется, когда страница прокручена вниз больше чем на экран; нажатие — к началу страницы (плавно, если в системе
+// не отключена анимация). Вкладки-переходы подсветку пересчитают сами — по прокрутке.
+(function toTop() {
+  const btn = $("to-top");
+  let frame = 0;
+  const update = () => { frame = 0; btn.hidden = window.scrollY < Math.max(400, window.innerHeight * 0.8); };
+  window.addEventListener("scroll", () => { if (!frame) frame = requestAnimationFrame(update); }, { passive: true });
+  window.addEventListener("resize", update);
+  btn.addEventListener("click", () => {
+    const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
+    btn.blur();
+  });
+  update();
 })();
 
 // ---------- кто вошёл (0.7.0) ----------

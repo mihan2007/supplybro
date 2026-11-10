@@ -91,7 +91,8 @@ body.no-chat .need-chat, body.no-jobs .job-ctl { display: none !important; }
 main > section { scroll-margin-top: calc(var(--sticky-h, 120px) + 6px); }
 .ver { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
 
-main { max-width: 1400px; margin: 0 auto; padding: 16px 20px 40px; display: grid; gap: 14px; }
+/* Снизу — место под кнопкой «наверх», чтобы она не закрывала конец страницы (чат). */
+main { max-width: 1400px; margin: 0 auto; padding: 16px 20px 84px; display: grid; gap: 14px; }
 .panel {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   padding: 16px; box-shadow: var(--shadow); min-width: 0;
@@ -174,7 +175,7 @@ td .clamp { -webkit-line-clamp: 3; }
 
 /* Телефон и узкие окна */
 @media (max-width: 760px) {
-  main { padding: 12px 12px 32px; }
+  main { padding: 12px 12px 68px; }   /* снизу — место под кнопкой «наверх» */
   .topbar { padding: 10px 12px; }
   .topbar { flex-wrap: wrap; row-gap: 8px; }
   .topbar-tools { flex-wrap: wrap; row-gap: 6px; }       /* кнопки шапки — второй строкой, а не за край экрана */
@@ -404,6 +405,19 @@ td.block-row { background: var(--chip) !important; font-weight: 600; }
   box-shadow: 0 6px 24px rgba(16, 24, 40, .18); padding: 10px 14px; font-size: 13px;
 }
 .toast.bad { border-color: var(--bad); color: var(--bad); }
+/* Кнопка «наверх» (0.17.3): справа внизу, когда страница прокручена вниз; под всплывающими сообщениями (.toast). */
+.to-top {
+  position: fixed; right: 20px; bottom: 20px; z-index: 40;
+  width: 46px; height: 46px; padding: 0; border-radius: 50%; display: grid; place-items: center; cursor: pointer;
+  background: var(--panel); color: var(--accent); border: 1px solid var(--line-strong);
+  box-shadow: 0 6px 20px rgba(16, 24, 40, .18); animation: to-top-in .15s ease-out;
+}
+.to-top svg { width: 22px; height: 22px; }
+.to-top:hover { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+.to-top:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@keyframes to-top-in { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { .to-top { animation: none; } }
+@media (max-width: 760px) { .to-top { right: 12px; bottom: 12px; width: 44px; height: 44px; } }
 @media (max-width: 700px) { .activity { max-width: 52vw; overflow: hidden; text-overflow: ellipsis; } }
 
 /* ---------- Панель «Конкурсы» (0.13.0) ---------- */

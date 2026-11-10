@@ -1,4 +1,6 @@
 // Админ-панель учётных записей (/admin): первый администратор, вход, клиенты и их сотрудники, роли, журнал.
+// 0.18.0: вкладка «Промты» — задания моделям ИИ, свои у каждого клиента и (0.19.0) юр. лица (только
+// администратору сайта).
 // 0.12.0: сотрудники сгруппированы по клиентам (каждый — в одном клиенте); администратор сайта видит всех клиентов
 // и администраторов сайта, администратор клиента — только сотрудников своего клиента.
 "use strict";
@@ -42,6 +44,7 @@ function setStatus(id, text, bad = false) {
   const s = $(id);
   s.textContent = text || "";
   s.classList.toggle("error", Boolean(bad));
+  s.classList.remove("warn");
 }
 
 let toastTimer = null;
@@ -111,6 +114,8 @@ async function boot() {
     return;
   }
   $("users-tab-title").textContent = st.site_admin ? "Клиенты и сотрудники" : "Сотрудники";
+  $("prompts-tab-btn").hidden = !st.site_admin;          // промты правит только администратор сайта (0.18.0)
+  if (tab === "prompts" && !st.site_admin) tab = "users";
   $("u-intro").textContent = st.site_admin
     ? "Клиенты — из списка клиентов сайта (новых добавляет Claude). Каждый сотрудник работает в одном клиенте."
     : `Сотрудники клиента «${clientName(st.scope)}»: добавляйте, меняйте роль и разделы, сбрасывайте пароль.`;
@@ -175,7 +180,9 @@ function showTab(name) {
   $("t-users").hidden = name !== "users";
   $("t-roles").hidden = name !== "roles";
   $("t-events").hidden = name !== "events";
+  $("t-prompts").hidden = name !== "prompts";
   if (name === "users") loadUsers();
+  if (name === "prompts") loadPrompts();
   if (name === "roles") renderRoles();
   if (name === "events") loadEvents();
 }
@@ -526,3 +533,225 @@ $("sec-close").addEventListener("click", () => { $("secret").close(); $("sec-pas
 $("u-new").addEventListener("click", () => openEditor(null, st.site_admin ? {} : { client: st.scope }));
 
 boot();
+
+// ---------- промты клиентов и юр. лиц (0.18.0, юр. лица — 0.19.0) ----------
+// Список промтов выбранного клиента (или его юр. лица) по разделам; щелчок — редактор. Действует текст юр. лица,
+// иначе клиента, иначе стандартный (в коде сайта). «Вернуть стандартный» / «Убрать правку юр. лица» удаляет правку
+// этого уровня (в истории остаётся).
+
+const pr = { client: "", entity: "", clients: [], sections: [], item: null, loaded: "", open: new Set() };
+
+function promptScope() { return { client: pr.client, entity: pr.entity }; }
+function promptQuery(extra = {}) { return new URLSearchParams({ ...promptScope(), ...extra }).toString(); }
+function promptClient() { return pr.clients.find((c) => c.id === pr.client) || { entities: [] }; }
+function promptClientName() { return promptClient().name || pr.client; }
+function promptEntityName() { return ((promptClient().entities || []).find((e) => e.id === pr.entity) || {}).name || pr.entity; }
+function promptWhere() { return promptClientName() + (pr.entity ? " → " + promptEntityName() : " · все юр. лица"); }
+
+async function loadPrompts() {
+  try {
+    const d = await guarded(() => api("/api/admin/prompts?" + promptQuery()));
+    if (!d) return;
+    pr.client = d.client;
+    pr.entity = d.entity || "";
+    pr.clients = d.clients;
+    pr.sections = d.sections;
+    if (!pr.open.size) for (const sec of d.sections) if (sec.key !== "fields" || sec.custom) pr.open.add(sec.key);
+    const sel = $("p-client");
+    sel.replaceChildren(...d.clients.map((c) => el("option", { value: c.id, text: c.name })));
+    sel.value = pr.client;
+    const ents = promptClient().entities || [];
+    $("p-entity").replaceChildren(el("option", { value: "", text: "все юр. лица клиента" }),
+      ...ents.map((e) => el("option", { value: e.id, text: e.inn ? `${e.name} · ИНН ${e.inn}` : e.name })));
+    $("p-entity").value = pr.entity;
+    $("p-level").textContent = pr.entity
+      ? `Правки — только для ${promptEntityName()}: действуют вместо текста клиента. Где своей правки нет, действует текст клиента. Юр. лицо задачи — участник в подготовке заявки, а в остальном — выбранное на странице конкурса (если там «все» — участник из NocoDB, когда он один).`
+      : `Правки — для всех юр. лиц клиента «${promptClientName()}» (если у юр. лица нет своей).`;
+    setStatus("p-status", "");
+    renderPrompts();
+  } catch (err) { setStatus("p-status", "Не удалось загрузить промты: " + err.message, true); }
+}
+
+function promptPills(it) {
+  if (it.custom) return [el("span", { class: "pill warn", text: pr.entity ? "своё у юр. лица" : "изменён" }),
+    el("span", { class: "p-who", text: `${it.updated_by || "—"} · ${when(it.updated_at)}` })];
+  if (pr.entity && it.client_custom) return [el("span", { class: "pill role-admin", text: "как у клиента: изменён" }),
+    el("span", { class: "p-who", text: `${it.client_updated_by || "—"} · ${when(it.client_updated_at)}` })];
+  return [el("span", { class: "pill", text: "стандартный" })];
+}
+
+function renderPrompts() {
+  const q = $("p-search").value.trim().toLowerCase();
+  const only = $("p-only").checked;
+  const groups = [];
+  for (const sec of pr.sections) {
+    const items = sec.items.filter((it) => (!only || it.custom || (pr.entity && it.client_custom))
+      && (!q || (it.title + " " + it.about + " " + it.key).toLowerCase().includes(q)));
+    if (!items.length && (q || only)) continue;
+    const box = el("details", { class: "u-group p-group", "data-section": sec.key });
+    box.open = Boolean(q || only || pr.open.has(sec.key));
+    box.addEventListener("toggle", () => { if (!q && !only) box.open ? pr.open.add(sec.key) : pr.open.delete(sec.key); });
+    const changed = (sec.custom ? ` · ${pr.entity ? "своих у юр. лица" : "изменено"}: ${sec.custom}` : "")
+      + (pr.entity && sec.client_custom ? ` · как у клиента: ${sec.client_custom}` : "");
+    box.append(el("summary", { class: "g-head" },
+      el("div", {}, el("h3", { text: sec.title }), el("div", { class: "g-sub", text: sec.about })),
+      el("span", { class: "muted p-count", text: `промтов: ${sec.items.length}${changed}` })));
+    const list = el("div", { class: "p-list" });
+    for (const it of items) {
+      const row = el("button", { type: "button", class: "p-row" + (it.custom ? " custom" : "") + (pr.entity && it.client_custom && !it.custom ? " inherited" : ""),
+        "data-key": it.key },
+        el("span", { class: "p-title", text: it.title }),
+        el("span", { class: "p-pills" }, ...promptPills(it)),
+        el("span", { class: "p-about", text: it.about }));
+      row.addEventListener("click", () => openPrompt(it.key));
+      list.append(row);
+    }
+    if (!items.length) list.append(el("div", { class: "g-empty", text: "Нет промтов." }));
+    box.append(list);
+    groups.push(box);
+  }
+  if (!groups.length) groups.push(el("p", { class: "muted", text: only ? "Изменённых промтов нет — все стандартные." : "Ничего не найдено." }));
+  $("p-sections").replaceChildren(...groups);
+}
+
+$("p-client").addEventListener("change", () => { pr.client = $("p-client").value; pr.entity = ""; loadPrompts(); });
+$("p-entity").addEventListener("change", () => { pr.entity = $("p-entity").value; loadPrompts(); });
+$("p-search").addEventListener("input", renderPrompts);
+$("p-only").addEventListener("change", renderPrompts);
+
+function fillPromptEditor(it) {
+  pr.item = it;
+  $("pe-status").classList.remove("warn");
+  $("pe-title").textContent = it.title;
+  $("pe-sub").textContent = `${promptWhere()} · ${it.section_title} · модель: ${it.model}`;
+  $("pe-about").textContent = it.about;
+  const marks = it.marks || [];
+  $("pe-marks").hidden = !marks.length;
+  $("pe-marks").replaceChildren(
+    el("div", { class: "label", text: "Метки — сюда программа подставит данные:" }),
+    ...marks.map((m) => el("div", {}, el("code", { text: "{" + m.name + "}" }),
+      ` — ${m.what}` + (m.required ? " (обязательна)" : " (можно убрать)"))));
+  $("pe-guard").hidden = !it.guard;
+  $("pe-reset").hidden = !it.custom;
+  $("pe-reset").textContent = pr.entity ? "Убрать правку юр. лица" : "Вернуть стандартный";
+  $("pe-client").hidden = !(pr.entity && it.inherited_from === "client");
+  const inh = it.inherited_from === "client"
+    ? `текст клиента (изменён: ${it.client_updated_by || "—"}, ${when(it.client_updated_at)})` : "стандартный текст";
+  $("pe-state").textContent = it.custom
+    ? `${pr.entity ? "Своя правка юр. лица" : "Изменён"}: ${it.updated_by || "—"}, ${when(it.updated_at)}` + (pr.entity ? ` · без неё — ${inh}` : "")
+    : (pr.entity ? `Своей правки нет — действует ${inh}` : "Стандартный текст");
+  renderPromptHistory(it.history || []);
+}
+
+function promptCount() {
+  const n = $("pe-text").value.length;
+  const d = pr.item ? pr.item.default.length : 0;
+  const dirty = $("pe-text").value !== pr.loaded;
+  $("pe-count").textContent = `${n.toLocaleString("ru-RU")} символов · стандартный — ${d.toLocaleString("ru-RU")}`
+    + (dirty ? " · не сохранено" : "");
+  $("pe-count").classList.toggle("dirty", dirty);
+}
+$("pe-text").addEventListener("input", promptCount);
+
+function renderPromptHistory(list) {
+  const box = $("pe-history");
+  $("pe-hist-box").hidden = !list.length;
+  const undo = pr.entity ? "правка юр. лица убрана" : "возвращён стандартный";
+  box.replaceChildren(...list.map((h) => {
+    const b = el("button", { type: "button", class: "btn ghost small", text: "В редактор" });
+    b.addEventListener("click", () => loadPromptVersion(h));
+    return el("div", { class: "pe-h-row" },
+      el("span", { text: `${when(h.at)} · ${h.by || "—"} · ${h.action === "стандартный" ? undo : "изменён"} · ${h.chars} симв.` }), b);
+  }));
+}
+
+async function openPrompt(key) {
+  try {
+    const it = await guarded(() => api("/api/admin/prompts/item?" + promptQuery({ key })));
+    if (!it) return;
+    fillPromptEditor(it);
+    $("pe-text").value = it.text;
+    pr.loaded = it.text;
+    $("pe-hist-box").open = false;
+    setStatus("pe-status", "");
+    promptCount();
+    $("p-editor").showModal();
+    $("pe-text").focus();
+    $("pe-text").setSelectionRange(0, 0);
+    $("pe-text").scrollTop = 0;                  // текст — с начала (на телефоне фокус прокручивал в конец)
+  } catch (err) { toast("Промт: " + err.message, true); }
+}
+
+async function loadPromptVersion(h) {
+  try {
+    const v = await api("/api/admin/prompts/version?" + promptQuery({ key: pr.item.key, id: h.id }));
+    $("pe-text").value = v.text;
+    promptCount();
+    setStatus("pe-status", `В поле — версия от ${when(v.at)} (${v.by || "—"}). Нажмите «Сохранить», чтобы она стала действующей.`);
+  } catch (err) { setStatus("pe-status", err.message, true); }
+}
+
+async function savePrompt() {
+  if (!pr.item) return;
+  const text = $("pe-text").value;
+  $("pe-save").disabled = true;
+  try {
+    const d = await api("/api/admin/prompts/item", "POST", { ...promptScope(), key: pr.item.key, text });
+    fillPromptEditor(d.item);
+    $("pe-text").value = d.item.text;
+    pr.loaded = d.item.text;
+    promptCount();
+    const same = pr.entity ? "Текст совпадает с тем, что действует без правки юр. лица, — правка снята."
+      : "Текст совпадает со стандартным — правка снята.";
+    const what = !d.changed ? "Без изменений." : d.custom ? "Сохранено — действует с ближайшей новой задачи." : same;
+    const warn = (d.warnings || []).map((w) => "⚠ " + w).join(" ");
+    setStatus("pe-status", [what, warn].filter(Boolean).join(" "));
+    $("pe-status").classList.toggle("warn", Boolean(warn));      // сохранено, но с предупреждением — не красным
+    if (d.changed) { toast(`«${d.item.title}»: ${d.custom ? "сохранено" : "правка снята"}`); loadPrompts(); }
+  } catch (err) {
+    setStatus("pe-status", "Не сохранено: " + err.message, true);
+  } finally { $("pe-save").disabled = false; }
+}
+
+$("pe-form").addEventListener("submit", (e) => { e.preventDefault(); savePrompt(); });
+$("pe-text").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); savePrompt(); }
+});
+$("pe-default").addEventListener("click", () => {
+  if (!pr.item) return;
+  $("pe-text").value = pr.item.default;
+  promptCount();
+  setStatus("pe-status", "В поле — стандартный текст. Нажмите «Сохранить», чтобы он стал действующим, или поправьте его.");
+});
+$("pe-client").addEventListener("click", () => {
+  if (!pr.item) return;
+  $("pe-text").value = pr.item.inherited;
+  promptCount();
+  setStatus("pe-status", "В поле — текст клиента. Поправьте его для этого юр. лица и нажмите «Сохранить».");
+});
+$("pe-reset").addEventListener("click", async () => {
+  if (!pr.item) return;
+  const ask = pr.entity
+    ? `Убрать правку «${pr.item.title}» у ${promptEntityName()}? Снова будет действовать ${pr.item.inherited_from === "client" ? "текст клиента" : "стандартный текст"} (правка останется в истории).`
+    : `Вернуть стандартный текст «${pr.item.title}» для клиента «${promptClientName()}»? Правка удалится (в истории останется). Юр. лица со своей правкой её сохранят.`;
+  if (!confirm(ask)) return;
+  try {
+    const d = await api("/api/admin/prompts/reset", "POST", { ...promptScope(), key: pr.item.key });
+    fillPromptEditor(d.item);
+    $("pe-text").value = d.item.text;
+    pr.loaded = d.item.text;
+    promptCount();
+    setStatus("pe-status", pr.entity ? "Правка юр. лица убрана." : "Возвращён стандартный текст.");
+    toast(`«${d.item.title}»: ${pr.entity ? "правка юр. лица убрана" : "стандартный текст"}`);
+    loadPrompts();
+  } catch (err) { setStatus("pe-status", err.message, true); }
+});
+
+function closePromptEditor() {
+  if ($("pe-text").value !== pr.loaded && !confirm("Есть несохранённые изменения. Закрыть без сохранения?")) return false;
+  $("p-editor").close();
+  return true;
+}
+$("pe-close").addEventListener("click", closePromptEditor);
+$("pe-cancel").addEventListener("click", closePromptEditor);
+$("p-editor").addEventListener("cancel", (e) => { e.preventDefault(); closePromptEditor(); });   // Esc

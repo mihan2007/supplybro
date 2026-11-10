@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import db
+from .prompt_store import for_client
 from .analysis.corpus import QuoteIndex, build_documents_block, load_docs
 from .analysis.llm import FALLBACK_DEEPSEEK_MODEL, FALLBACK_TO_DEEPSEEK, BillingError, LLMError, stream_claude, stream_deepseek
 from .analysis.run import MSK, load_result
@@ -42,6 +44,7 @@ HISTORY_TURNS = int(os.environ.get("CHAT_HISTORY_TURNS", "8"))   # скольк�
 MAX_QUESTION = 4000
 MAX_ANSWER_TOKENS = 4000
 
+# Стандартный текст промта «chat.system» (0.18.0: у клиента может быть изменён в админ-панели, app/prompt_store.py).
 SYSTEM = """Ты — помощник тендерного специалиста компании-поставщика оборудования. Отвечаешь на вопросы \
 по документации ОДНОЙ закупки: тексты документов — в <documents> (или найденные фрагменты — в <fragments>), \
 результаты уже сделанного анализа — в <analysis>, найденные цены по позициям — в <prices>.
@@ -62,6 +65,11 @@ SYSTEM = """Ты — помощник тендерного специалист�
 (магазин со ссылкой; поставщика и файл прайса), рубли — как в <prices>. Цены «НЕ ПРОВЕРЕНО» (из выдачи поиска) \
 так и помечай; 🔴 — неполное совпадение с позицией (скажи, что не совпадает). Сравнивай с НМЦ за единицу. \
 Если цен по позиции нет — так и скажи. Для ответа о ценах в «Источниках» строка: «- Цены: <магазин или прайс>»."""
+
+
+def _prompt_mark(text: str) -> str:
+    """Короткий отпечаток промта чата: после правки промта прежний кэш документов у модели не подходит (cache_status)."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
 class _PricesOff(Exception):
@@ -177,12 +185,13 @@ TTL_SECONDS = {"1h": 3600, "5m": 300}
 TYPICAL_OUTPUT = 800         # токенов в ответе, пока своих ответов нет
 
 
-def cache_status(client_id: str, folder_name: str, model: str | None = None) -> dict:
+def cache_status(client_id: str, folder_name: str, model: str | None = None, entity: str | None = None) -> dict:
     """Готов ли чат и сколько будет стоить следующий вопрос: документы ещё в кэше модели (до какого времени) или
     уже нет. Только чтение базы сайта — без обращений к модели.
 
     Кэш Claude живёт CHAT_CACHE_TTL после последнего вопроса (каждый вопрос его продлевает); он сбрасывается, если
-    после вопроса изменились документы или сменился день (в задании модели есть сегодняшняя дата)."""
+    после вопроса изменились документы, сменился день (в задании модели есть сегодняшняя дата) или промт чата
+    клиента (0.18.0, админ-панель)."""
     from .analysis.corpus import TEXT_STATUSES
     from .analysis.pricing import cost
 
@@ -201,6 +210,7 @@ def cache_status(client_id: str, folder_name: str, model: str | None = None) -> 
 
     calls = [m for m in db.chat_history(client_id, folder_name, limit=60)
              if m["role"] == "assistant" and (m["meta"].get("usage") or {}).get("model") == model]
+    prompt_mark = _prompt_mark(for_client(client_id, entity).text("chat.system"))
     last = calls[-1] if calls else None
     usage = (last or {}).get("meta", {}).get("usage") or {}
     tokens = sum(int(usage.get(k) or 0) for k in ("input", "cache_write", "cache_read"))
@@ -221,7 +231,8 @@ def cache_status(client_id: str, folder_name: str, model: str | None = None) -> 
         started = float(last.get("created_at") or 0) - float(last["meta"].get("seconds") or 0)
         same_day = datetime.fromtimestamp(started, MSK).date() == datetime.fromtimestamp(now, MSK).date()
         expires = started + TTL_SECONDS[ttl]
-        if same_day and expires > now and started > docs_changed:
+        same_prompt = last["meta"].get("prompt", prompt_mark) == prompt_mark    # промт чата не меняли (0.18.0)
+        if same_day and same_prompt and expires > now and started > docs_changed:
             out.update(warm=True, expires_at=expires)
     write = {"cache_write_1h": tokens} if ttl == "1h" else {"cache_write_5m": tokens}
     out.update(mode=mode, ttl=TTL_SECONDS[ttl], tokens=tokens, tokens_estimated=estimated,
@@ -230,8 +241,9 @@ def cache_status(client_id: str, folder_name: str, model: str | None = None) -> 
     return out
 
 
-def ask(client_id: str, folder_name: str, folder: Path, question: str, model: str | None):
-    """Генератор строк NDJSON для страницы: {"t":"text"} по мере ответа, затем {"t":"done"} или {"t":"error"}."""
+def ask(client_id: str, folder_name: str, folder: Path, question: str, model: str | None, entity: str | None = None):
+    """Генератор строк NDJSON для страницы: {"t":"text"} по мере ответа, затем {"t":"done"} или {"t":"error"}.
+    entity — юр. лицо, выбранное на странице (0.19.0): промт чата — его, иначе клиента."""
     model = model if model in CHAT_MODELS else CHAT_MODEL
     question = (question or "").strip()[:MAX_QUESTION]
     if not question:
@@ -257,6 +269,8 @@ def ask(client_id: str, folder_name: str, folder: Path, question: str, model: st
         else:
             meta["mode"] = "documents"
         today = datetime.now(MSK).strftime("%d.%m.%Y")
+        system_text = for_client(client_id, entity).text("chat.system")  # промт чата клиента / юр. лица
+        meta["prompt"] = _prompt_mark(system_text)
         from .access import block_on
         analysis = (_analysis_text(load_result(folder)) if block_on("analysis")
                     else "<analysis>\nРаздел анализа для этого пользователя выключен.\n</analysis>")
@@ -284,13 +298,13 @@ def ask(client_id: str, folder_name: str, folder: Path, question: str, model: st
         pairs = pairs[-HISTORY_TURNS:]
 
         def deepseek_stream(ds_model: str):
-            messages = [{"role": "system", "content": SYSTEM + f"\n\nСегодня: {today}.\n\n" + block + "\n\n" + analysis}]
+            messages = [{"role": "system", "content": system_text + f"\n\nСегодня: {today}.\n\n" + block + "\n\n" + analysis}]
             for q, a in pairs:
                 messages += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
             messages.append({"role": "user", "content": question})
             return stream_deepseek(model=ds_model, messages=messages, max_tokens=MAX_ANSWER_TOKENS)
 
-        system = [{"type": "text", "text": SYSTEM + f"\n\nСегодня: {today}."}]
+        system = [{"type": "text", "text": system_text + f"\n\nСегодня: {today}."}]
 
         def claude_stream(ttl: str):
             return stream_claude(model=model, system=system, messages=_claude_messages(block, analysis, pairs, question, ttl),

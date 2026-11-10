@@ -542,9 +542,20 @@ def _unique(path: Path) -> Path:
     raise FolderError("слишком много файлов с одинаковым именем")
 
 
+def _entity(client: Client, entity: str | None) -> str:
+    """Юр. лицо, выбранное на странице (0.19.0): с его промтами (админ-панель) пойдут задача и её цепочка.
+    Пустое или чужое клиенту — промты клиента."""
+    return entity if entity and client.entity(entity) else ""
+
+
+def _with_entity(params: dict | None, client: Client, entity: str | None) -> dict | None:
+    e = _entity(client, entity)
+    return {**(params or {}), "entity": e} if e else params
+
+
 @app.post("/api/clients/{client_id}/docs/upload")
 async def api_upload(client_id: str, folder: str, target: str = DOC_SUBFOLDERS[0],
-                     files: list[UploadFile] = File(...)):
+                     files: list[UploadFile] = File(...), entity: str = ""):
     """Загрузка файлов в подпапку конкурса и постановка обработки в очередь."""
     client = get_client(client_id)
     base = folder_path(client, folder)
@@ -569,7 +580,7 @@ async def api_upload(client_id: str, folder: str, target: str = DOC_SUBFOLDERS[0
     if AUTO_ANALYZE:
         user = access.current_user() or {}
         params = {"changes": True, "by": user.get("login") or ""} if is_changes else {"analyze": True}
-    job_id = db.enqueue(client.id, folder, "prepare", params)
+    job_id = db.enqueue(client.id, folder, "prepare", _with_entity(params, client, entity))
     return {"saved": saved, "job_id": job_id, "auto_analyze": AUTO_ANALYZE, "changes": is_changes,
             "target": target}
 
@@ -677,7 +688,7 @@ def api_analysis(client_id: str, folder: str):
 
 
 @app.post("/api/clients/{client_id}/analysis/run")
-def api_analysis_run(client_id: str, folder: str, model: str | None = None):
+def api_analysis_run(client_id: str, folder: str, model: str | None = None, entity: str = ""):
     """Запустить анализ документов (ИИ) — после него результат записывается в NocoDB."""
     client = get_client(client_id)
     folder_path(client, folder)
@@ -689,6 +700,7 @@ def api_analysis_run(client_id: str, folder: str, model: str | None = None):
     if not access.is_admin():
         model = None          # сотрудник модель не выбирает — настройка сайта
     params = {"model": model} if model in ANALYSIS_MODELS else {}
+    params = _with_entity(params, client, entity) or {}
     if db.active_job(client.id, folder, "prepare"):
         # Документы ещё готовятся — анализ встанет в очередь сразу после подготовки.
         return {"job_id": db.enqueue(client.id, folder, "prepare", {"analyze": True, **params}), "after_prepare": True}
@@ -696,7 +708,7 @@ def api_analysis_run(client_id: str, folder: str, model: str | None = None):
 
 
 @app.post("/api/clients/{client_id}/analysis/changes/run")
-def api_changes_run(client_id: str, folder: str):
+def api_changes_run(client_id: str, folder: str, entity: str = ""):
     """Разобрать документы, появившиеся после анализа: что изменилось, обновить данные, комментарии (0.9.0)."""
     client = get_client(client_id)
     base = folder_path(client, folder)
@@ -709,7 +721,7 @@ def api_changes_run(client_id: str, folder: str):
     user = access.current_user() or {}
     # Сначала подготовка (обрабатывает только новые и изменённые файлы — секунды): файлы могли положить в папку
     # вручную, мимо сайта; разбор изменений встанет следом.
-    params = {"changes": True, "by": user.get("login") or ""}
+    params = _with_entity({"changes": True, "by": user.get("login") or ""}, client, entity)
     return {"job_id": db.enqueue(client.id, folder, "prepare", params), "after_prepare": True}
 
 
@@ -861,7 +873,8 @@ def _analysis_pending(client_id: str, folder: str) -> bool:
 
 
 @app.post("/api/clients/{client_id}/prices/run")
-async def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bool = True, engine: str = ""):
+async def api_prices_run(client_id: str, folder: str, urgent: bool = False, abroad: bool = True, engine: str = "",
+                         entity: str = ""):
     """Запустить поиск цен — в любой момент (0.14.0, пользователь 04.11.2026: «искать цены всегда, даже если они были
     извлечены ранее»). Позиции — из анализа на сайте, а без него — из спецификации NocoDB. Идёт анализ — поиск
     запустится сам сразу после него (AUTO_PRICES). engine — deepseek / yandex / both (чем искать по России)."""
@@ -886,7 +899,7 @@ async def api_prices_run(client_id: str, folder: str, urgent: bool = False, abro
         params["source"] = "nocodb"                           # для журнала и страницы; позиции обработчик прочитает сам
     if engine in prices.ENGINES and access.is_admin():      # сотрудник поисковик не выбирает
         params["engine"] = engine
-    return {"job_id": db.enqueue(client.id, folder, "prices", params)}
+    return {"job_id": db.enqueue(client.id, folder, "prices", _with_entity(params, client, entity))}
 
 
 # ---------- прайсы, КП и счета поставщиков (0.8.0, app/pricelists.py) ----------
@@ -908,7 +921,7 @@ def api_pricelists(client_id: str, folder: str):
 
 
 @app.post("/api/clients/{client_id}/pricelists/upload")
-async def api_pricelists_upload(client_id: str, folder: str, files: list[UploadFile] = File(...)):
+async def api_pricelists_upload(client_id: str, folder: str, files: list[UploadFile] = File(...), entity: str = ""):
     """Прайс / КП / счёт поставщика из чата: в «Прайсы, счета, КП» конкурса и в очередь на разбор."""
     client = get_client(client_id)
     base = folder_path(client, folder)
@@ -931,7 +944,7 @@ async def api_pricelists_upload(client_id: str, folder: str, files: list[UploadF
         saved.append(dest.relative_to(base).as_posix())
     user = access.current_user()
     added = pricelists.add_files(base, saved, (user or {}).get("login", ""))
-    job_id = db.enqueue(client.id, folder, "pricelist")
+    job_id = db.enqueue(client.id, folder, "pricelist", _with_entity(None, client, entity))
     return {"files": added, "job_id": job_id}
 
 
@@ -1159,20 +1172,20 @@ def api_chat_history(client_id: str, folder: str):
 
 
 @app.get("/api/clients/{client_id}/chat/status")
-def api_chat_status(client_id: str, folder: str, model: str | None = None):
+def api_chat_status(client_id: str, folder: str, model: str | None = None, entity: str = ""):
     """Готов ли чат и сколько стоит следующий вопрос: документы в кэше модели (до какого времени) или нет."""
     client = get_client(client_id)
     folder_path(client, folder)
-    return chat.cache_status(client.id, folder, model if access.is_admin() else None)
+    return chat.cache_status(client.id, folder, model if access.is_admin() else None, _entity(client, entity))
 
 
 @app.post("/api/clients/{client_id}/chat")
-def api_chat_ask(client_id: str, folder: str, data: dict = Body(...)):
+def api_chat_ask(client_id: str, folder: str, data: dict = Body(...), entity: str = ""):
     """Вопрос по документации. Ответ идёт по мере готовности: строки JSON ({"t":"text"…}, в конце {"t":"done"…})."""
     client = get_client(client_id)
     base = folder_path(client, folder)
     model = data.get("model") if access.is_admin() else None   # сотрудник модель чата не выбирает
-    gen = chat.ask(client.id, folder, base, str(data.get("question", "")), model)
+    gen = chat.ask(client.id, folder, base, str(data.get("question", "")), model, _entity(client, entity))
     return StreamingResponse(gen, media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})
 
 

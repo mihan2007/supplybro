@@ -1,5 +1,7 @@
 """
 Админ-панель учётных записей: страница /admin и адреса /api/admin/... (app/auth.py — сами учётные записи).
+С 0.18.0 здесь же промты клиентов и (0.19.0) их юр. лиц (/api/admin/prompts..., app/prompt_store.py) — только
+администратору сайта.
 
 Подключается при LOGIN_REQUIRED=1 (вход на сайт обязателен — тогда всегда) или ADMIN_PANEL=1. При обязательном входе
 (0.16.0) панель и её адреса открываются только после входа на /login (app/access.py), первого администратора создаёт
@@ -17,7 +19,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
-from . import auth
+from . import auth, prompt_store
 from .config import load_clients
 
 ROOT = Path(__file__).resolve().parent
@@ -279,3 +281,105 @@ def events(request: Request, user_id: int | None = None, limit: int = 200):
         _target(me, user_id)
     among = None if _scope(me) is None else {u["id"] for u in auth.list_users() if _in_scope(me, u)}
     return {"events": auth.events(min(max(limit, 1), 1000), user_id, among)}
+
+
+# ---------- промты клиентов и их юр. лиц (0.18.0, юр. лица — 0.19.0) ----------
+# Пользователь 10.11.2026: «у админа должна быть возможность править промты… у каждой организации свои промты»;
+# затем: «чтобы админ мог править промты клиентов, других юр. лиц». Уровни: юр. лицо → клиент → стандартный текст.
+# Только администратор сайта: промт влияет на качество, стоимость и защиту от подложного текста в документах.
+
+def _site_admin(request: Request, change: bool = False) -> dict:
+    me = _admin(request, change)
+    if me["role"] != "admin":
+        raise HTTPException(403, "править промты может только администратор сайта")
+    return me
+
+
+def _prompt_clients() -> list[dict]:
+    try:
+        return [{"id": c.id, "name": c.name,
+                 "entities": [{"id": e.id, "name": e.name, "inn": e.inn} for e in c.legal_entities]}
+                for c in load_clients().values()]
+    except Exception:
+        return []
+
+
+def _prompt_scope(client_id: str, entity_id: str = "") -> tuple[dict, dict | None]:
+    """(клиент, юр. лицо или None — правка на весь клиент). Чужое юр. лицо — 404."""
+    c = next((c for c in _prompt_clients() if c["id"] == client_id), None)
+    if not c:
+        raise HTTPException(404, "клиент не найден")
+    if not entity_id:
+        return c, None
+    e = next((e for e in c["entities"] if e["id"] == entity_id), None)
+    if not e:
+        raise HTTPException(404, "у этого клиента нет такого юр. лица")
+    return c, e
+
+
+def _pwrap(fn):
+    try:
+        return fn()
+    except prompt_store.PromptError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get("/api/admin/prompts")
+def prompts_list(request: Request, client: str = "", entity: str = ""):
+    """Промты клиента (или его юр. лица) по разделам: какие изменены, кем и когда."""
+    _site_admin(request)
+    clients = _prompt_clients()
+    if not client and clients:
+        client = clients[0]["id"]
+    _prompt_scope(client, entity)
+    return {"client": client, "entity": entity, "clients": clients, "sections": prompt_store.listing(client, entity)}
+
+
+@router.get("/api/admin/prompts/item")
+def prompts_item(request: Request, client: str, key: str, entity: str = ""):
+    _site_admin(request)
+    _prompt_scope(client, entity)
+    return _pwrap(lambda: prompt_store.item(client, key, entity))
+
+
+def _prompt_event(me: dict, request: Request, client: dict, entity: dict | None, key: str, custom: bool) -> None:
+    p = prompt_store.registry()[key]
+    where = client["name"] + (f" · {entity['name']}" if entity else "")
+    auth.event(me, None, "промт изменён" if custom else ("промт: правка юр. лица убрана" if entity
+                                                          else "промт: стандартный текст"),
+               f"{where} · {prompt_store.SECTION_TITLES.get(p.section, '')} · {p.title}", _ip(request))
+
+
+@router.post("/api/admin/prompts/item")
+def prompts_save(request: Request, data: dict = Body(...)):
+    """Сохранить текст промта клиента или юр. лица. Текст, равный тому, что действует без правки, — правка снимается."""
+    me = _site_admin(request, change=True)
+    client, entity = _prompt_scope(str(data.get("client") or ""), str(data.get("entity") or ""))
+    key, eid = str(data.get("key") or ""), (entity or {}).get("id", "")
+    res = _pwrap(lambda: prompt_store.save(client["id"], key, str(data.get("text") or ""), me["login"], eid))
+    if res["changed"]:
+        _prompt_event(me, request, client, entity, key, res["custom"])
+    return {**res, "item": prompt_store.item(client["id"], key, eid)}
+
+
+@router.post("/api/admin/prompts/reset")
+def prompts_reset(request: Request, data: dict = Body(...)):
+    """Убрать правку: у клиента — снова стандартный текст, у юр. лица — снова текст клиента."""
+    me = _site_admin(request, change=True)
+    client, entity = _prompt_scope(str(data.get("client") or ""), str(data.get("entity") or ""))
+    key, eid = str(data.get("key") or ""), (entity or {}).get("id", "")
+    res = _pwrap(lambda: prompt_store.reset(client["id"], key, me["login"], eid))
+    if res["changed"]:
+        _prompt_event(me, request, client, entity, key, False)
+    return {**res, "item": prompt_store.item(client["id"], key, eid)}
+
+
+@router.get("/api/admin/prompts/version")
+def prompts_version(request: Request, client: str, key: str, id: int, entity: str = ""):
+    """Текст одной записи истории — чтобы вернуть прежнюю версию (в редактор, сохранить — кнопкой)."""
+    _site_admin(request)
+    _prompt_scope(client, entity)
+    v = prompt_store.version(client, key, id, entity)
+    if not v:
+        raise HTTPException(404, "версия не найдена")
+    return v
