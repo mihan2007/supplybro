@@ -1,5 +1,5 @@
 {
-  "_comment": "Клиенты сайта: у каждого своя база NocoDB и свои юр. лица. Ключ API здесь не хранится — token_file это путь внутри контейнера (файл подключается в compose.yml из NOCODB_TOKEN_FILE в .env). Правки применяются без перезапуска — достаточно обновить страницу.",
+  "_comment": "Клиенты сайта: у каждого своя база NocoDB и свои юр. лица. Ключ API здесь не хранится — token_file это путь внутри контейнера (файл подключается в compose.yml из NOCODB_TOKEN_FILE в .env). Правки применяются без перезапуска — достаточно обновить страницу. «Наша компания» с 0.17.2 работает с копией базы для сайта (py03vcjrohur7u7, реестр m9w2qkxcvt02nkb); старая база, куда пишет агент в приложении, — pf3o1felxit8s5b, реестр mdbebnsirecunr5. Вернуть сайт на старую базу без правки этого файла — NOCODB_URL_MAIN в .env (адрес старого реестра из браузера).",
   "clients": [
     {
       "id": "main",
@@ -8,8 +8,8 @@
       "nocodb": {
         "url": "https://app.nocodb.com",
         "workspace_id": "wzs963xn",
-        "base_id": "pf3o1felxit8s5b",
-        "registry_table_id": "mdbebnsirecunr5",
+        "base_id": "py03vcjrohur7u7",
+        "registry_table_id": "m9w2qkxcvt02nkb",
         "token_file": "/run/secrets/nocodb_main",
         "participant_column": "Участник",
         "default_registry_view": "Вся таблица",

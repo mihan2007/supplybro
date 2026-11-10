@@ -64,9 +64,9 @@ CURRENT_USER: contextvars.ContextVar[dict | None] = contextvars.ContextVar("supp
 
 # Открыто без входа (0.16.0): только страница входа — сама, её оформление и скрипт, её адреса /api/auth/... — и
 # проверка «сайт жив». Админ-панель, страница сайта, остальные файлы /static/ — только после входа.
-OPEN_EXACT = {"/login", "/start", "/health", "/favicon.ico"}   # /start — страница-приветствие (0.17.0)
+OPEN_EXACT = {"/login", "/start", "/health", "/favicon.ico", "/robots.txt"}   # /start — страница-приветствие (0.17.0)
 OPEN_STATIC = {"/static/app.css", "/static/admin.css", "/static/login.css", "/static/login.js"}
-OPEN_PREFIXES = ("/api/auth/",)
+OPEN_PREFIXES = ("/api/auth/", "/static/fonts/")    # шрифты страницы-приветствия (0.17.1)
 # Админ-панель: нужен вход, а кому что можно — проверяет сама панель (app/admin.py: администратор сайта / клиента).
 ADMIN_PAGE = "/admin"
 ADMIN_API = "/api/admin/"

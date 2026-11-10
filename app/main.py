@@ -207,6 +207,12 @@ def start_page():
     return FileResponse(ROOT / "static" / "start.html", headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots():
+    """Поисковикам — не индексировать сайт (ТЗ стартовой страницы: внутренний сервис; продвигать — убрать)."""
+    return "User-agent: *\nDisallow: /\n"
+
+
 @app.get("/")
 def index():
     return HTMLResponse(_page_html(), headers={"Cache-Control": "no-cache"})
