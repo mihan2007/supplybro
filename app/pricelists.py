@@ -269,6 +269,24 @@ def _positions(result: dict) -> list[dict]:
     return [p for p in (result or {}).get("positions") or [] if str(p.get("№") or "").strip()]
 
 
+def tender_positions(client_id: str, folder_name: str, folder: Path) -> tuple[list[dict], str]:
+    """Позиции конкурса для прайсов: из анализа на сайте, а без него — из спецификации NocoDB (0.20.0, как поиск цен
+    с 0.14.0: большинство конкурсов разбирал агент, анализа на сайте у них нет, а закупщику нужно вносить цены).
+    Возвращает (позиции, откуда: analysis / nocodb / ошибка чтения NocoDB)."""
+    found = _positions(load_result(folder))
+    if found:
+        return found, "analysis"
+    from .config import load_clients
+    from .prices.run import noco_positions
+    client = load_clients().get(client_id)
+    if not client:
+        return [], "клиент не найден"
+    try:
+        return [p for p in noco_positions(client, folder_name) if str(p.get("№") or "").strip()], "nocodb"
+    except Exception as exc:
+        return [], str(exc)[:200]
+
+
 def _analyze_file(entry: dict, folder: Path, positions: list[dict], fx: dict, usage: Usage, cache,
                   ps: Prompts | None = None) -> dict:
     path = folder / entry["file"]
@@ -349,11 +367,11 @@ def _analyze_file(entry: dict, folder: Path, positions: list[dict], fx: dict, us
 def process(client_id: str, folder_name: str, folder: Path, progress, cache_dir: Path | None = None,
             entity: str | None = None) -> str:
     """Задача «pricelist»: разобрать все файлы в очереди (по одному)."""
-    result = load_result(folder)
-    positions = _positions(result)
     pending = [f for f in load(folder)["files"] if f.get("status") == "queued"]
     if not pending:
         return "прайсов в очереди нет"
+    progress("Позиции конкурса", 0.0)
+    positions, pos_source = tender_positions(client_id, folder_name, folder)
     done, total_usd, errors = 0, 0.0, []
     fx = {}
     # Кэш ответов модели: после паузы, отмены или перезапуска обработчика тот же прайс второй раз не оплачивается.
@@ -369,8 +387,11 @@ def process(client_id: str, folder_name: str, folder: Path, progress, cache_dir:
         update(folder, lambda d: mark(d, status="running", step="читаю файл и ищу позиции", started_at=time.time()))
         if not positions:
             update(folder, lambda d: mark(d, status="error", step="", finished_at=time.time(),
-                                          error="у конкурса ещё нет анализа документов — не с чем сопоставлять прайс "
-                                                "(сначала анализ: в нём список позиций)"))
+                                          error="позиций конкурса нет: анализа документов на сайте нет, а в "
+                                                "спецификации NocoDB нет строк с наименованием"
+                                                + ("" if pos_source in ("analysis", "nocodb") else f" ({pos_source})")
+                                                + " — не с чем сопоставлять прайс (запустите анализ документов "
+                                                "или заполните спецификацию конкурса в NocoDB)"))
             errors.append(entry["name"])
             continue
         usage = Usage()
@@ -469,7 +490,9 @@ def write_noco(client, folder_name: str, folder: Path, progress) -> str:
     """Задача «noco_purch»: записать отмеченные цены всех прайсов, ждущих записи."""
     from tools import nocodb_client as nc
     result = load_result(folder) or {}
-    internal = result.get("internal_number") or ""
+    # Без анализа на сайте (конкурс разбирал агент) — внутренний номер из названия папки (0.20.0).
+    from .tenders import norm_number
+    internal = result.get("internal_number") or norm_number(folder_name) or ""
     todo = [f for f in load(folder)["files"] if (f.get("write") or {}).get("status") == "requested"]
     if not todo:
         return "записывать нечего"

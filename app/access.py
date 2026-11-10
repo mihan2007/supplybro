@@ -87,9 +87,10 @@ RULES = [
     (re.compile(r"^/jobs/\d+/cancel$"), "jobs", "отменил задачу"),
     (re.compile(r"^/jobs/\d+/pause$"), "jobs", "приостановил задачу"),
     (re.compile(r"^/jobs/\d+/resume$"), "jobs", "продолжил задачу"),
-    (re.compile(r"^/pricelists/upload$"), "prices", "загрузил прайс поставщика"),
-    (re.compile(r"^/pricelists/write$"), "prices", "записал цены поставщика в NocoDB"),
-    (re.compile(r"^/pricelists/remove$"), "prices", "убрал прайс из списка"),
+    # Прайсы поставщиков — своё право «purchase» (0.20.0): у закупщика оно есть, у логиста и наблюдателя — нет.
+    (re.compile(r"^/pricelists/upload$"), "purchase", "загрузил прайс поставщика"),
+    (re.compile(r"^/pricelists/write$"), "purchase", "записал цены поставщика в NocoDB"),
+    (re.compile(r"^/pricelists/remove$"), "purchase", "убрал прайс из списка"),
     (re.compile(r"^/chat$"), "chat", "задал вопрос в чате"),
     (re.compile(r"^/chat/clear$"), "chat", "очистил историю чата"),
 ]

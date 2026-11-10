@@ -2388,9 +2388,14 @@ async function loadChat() {
   plData = null;
   plSel.clear();
   renderChatLog();
-  $("chat-hint").textContent = "Ответы — только по документам этого конкурса и найденным ценам, с источниками; цитаты программа сверяет с текстом. " +
-    "Задавать вопросы можно в любое время, как только документы подготовлены, — анализ для этого не нужен. " +
-    "Прайс, КП или счёт поставщика — скрепкой 📎 или перетащите файл сюда: сайт найдёт позиции конкурса и цены.";
+  $("chat-own").hidden = !d.personal;                    // личный чат (0.20.0): чужие вопросы не видны
+  const purchase = !document.body.classList.contains("no-purchase");
+  $("chat-hint").textContent = (d.personal ? "Это ваш чат: вопросы и ответы видите только вы. " : "") +
+    "Ответы — только по документам этого конкурса и найденным ценам, с источниками; цитаты программа сверяет с текстом. " +
+    "Задавать вопросы можно в любое время, как только документы подготовлены, — анализ для этого не нужен." +
+    (purchase ? " Прайс, КП или счёт поставщика — скрепкой 📎 или перетащите файл сюда; сообщение поставщика с ценами — " +
+      "вставьте в поле и нажмите «Цены из сообщения»: сайт найдёт позиции конкурса и цены, записать их в спецификацию " +
+      "NocoDB — кнопкой на карточке." : "");
   scrollChat();
   loadChatStatus();
   loadPricelists();
@@ -2419,7 +2424,8 @@ function renderChatLog() {
 
 async function loadPricelists() {
   const t = currentTender();
-  if (!t || !t.folder || blockOff("chat") || blockOff("prices")) return;
+  // Карточки прайсов в чате — тем, кто вносит цены поставщиков (право «purchase», 0.20.0); цены — и в «Все цены».
+  if (!t || !t.folder || blockOff("chat") || blockOff("prices") || document.body.classList.contains("no-purchase")) return;
   const my = ++seq.pl;
   clearTimeout(plTimer);
   let d;
@@ -2491,7 +2497,7 @@ function pricelistCard(f) {
       const sel = plSel.get(f.id);
       const w = f.write || {};
       const locked = ["requested", "running"].includes(w.status);
-      const writeBtn = el("button", { class: "btn small primary need-prices", type: "button" });
+      const writeBtn = el("button", { class: "btn small primary need-purchase", type: "button" });
       const updBtn = () => {
         writeBtn.textContent = `Записать в спецификацию (${sel.size})`;
         writeBtn.disabled = locked || !sel.size;
@@ -2499,7 +2505,7 @@ function pricelistCard(f) {
       const head = el("tr", {}, ...["", "№", "Позиция конкурса", "Строка документа", "Цена за ед.", "К НМЦ", "Совпадение"].map((h) => el("th", { text: h })));
       const body = el("tbody");
       for (const m of ms) {
-        const cb = el("input", { type: "checkbox", class: "need-prices" });
+        const cb = el("input", { type: "checkbox", class: "need-purchase" });
         cb.checked = sel.has(m.pos);
         cb.disabled = locked;
         cb.addEventListener("change", () => { if (cb.checked) sel.add(m.pos); else sel.delete(m.pos); updBtn(); });
@@ -2540,7 +2546,7 @@ function pricelistCard(f) {
     }
   }
   if (!PL_BUSY(f)) {
-    const rm = el("button", { class: "btn small ghost need-prices pl-remove", type: "button", text: "Убрать из списка",
+    const rm = el("button", { class: "btn small ghost need-purchase pl-remove", type: "button", text: "Убрать из списка",
       title: "Убрать карточку (сам файл остаётся в папке «Прайсы, счета, КП»)" });
     let armed = false;
     rm.addEventListener("click", async () => {
@@ -2560,7 +2566,7 @@ async function uploadPricelists(fileList) {
   const t = currentTender();
   const files = [...(fileList || [])];
   if (!t || !t.folder || !files.length) return;
-  if (document.body.classList.contains("no-prices")) return toast("Загружать прайсы вашей роли недоступно", true);
+  if (document.body.classList.contains("no-purchase")) return toast("Вносить цены поставщиков вашей роли недоступно", true);
   const form = new FormData();
   for (const f of files) form.append("files", f, f.name);
   const u = new URL(clientPath("/pricelists/upload"), location.origin);
@@ -2583,10 +2589,24 @@ async function uploadPricelists(fileList) {
 }
 
 $("chat-files").addEventListener("change", (e) => uploadPricelists(e.target.files));
+// Сообщение поставщика с ценами (почта, мессенджер) — как прайс (0.20.0): текст уходит файлом «Сообщение поставщика
+// <дата>.txt» в «Прайсы, счета, КП» и разбирается так же.
+$("chat-as-prices").addEventListener("click", () => {
+  const text = $("chat-input").value.trim();
+  if (text.length < 10) {
+    toast("Вставьте в поле сообщение поставщика с ценами и нажмите ещё раз", true);
+    $("chat-input").focus();
+    return;
+  }
+  const d = new Date(), z = (n) => String(n).padStart(2, "0");
+  const name = `Сообщение поставщика ${z(d.getDate())}.${z(d.getMonth() + 1)}.${d.getFullYear()} ${z(d.getHours())}-${z(d.getMinutes())}.txt`;
+  $("chat-input").value = "";
+  uploadPricelists([new File([text], name, { type: "text/plain" })]);
+});
 // Перетащить прайс прямо в чат.
 for (const ev of ["dragover", "dragenter"]) {
   $("chat").addEventListener(ev, (e) => {
-    if (document.body.classList.contains("no-prices") || !e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+    if (document.body.classList.contains("no-purchase") || !e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
     e.preventDefault();
     $("chat").classList.add("drag-over");
   });
@@ -2594,7 +2614,7 @@ for (const ev of ["dragover", "dragenter"]) {
 $("chat").addEventListener("dragleave", (e) => { if (!$("chat").contains(e.relatedTarget)) $("chat").classList.remove("drag-over"); });
 $("chat").addEventListener("drop", (e) => {
   $("chat").classList.remove("drag-over");
-  if (document.body.classList.contains("no-prices") || !e.dataTransfer || !e.dataTransfer.files.length) return;
+  if (document.body.classList.contains("no-purchase") || !e.dataTransfer || !e.dataTransfer.files.length) return;
   e.preventDefault();
   uploadPricelists(e.dataTransfer.files);
 });
@@ -3192,9 +3212,13 @@ document.addEventListener("click", (e) => {
 (function toTop() {
   const btn = $("to-top");
   let frame = 0;
-  const update = () => { frame = 0; btn.hidden = window.scrollY < Math.max(400, window.innerHeight * 0.8); };
+  // Пока человек печатает (поле ввода в фокусе — на телефоне открыта клавиатура), кнопка не закрывает «Спросить».
+  const typing = () => { const a = document.activeElement; return Boolean(a && a.matches("textarea, input, select")); };
+  const update = () => { frame = 0; btn.hidden = typing() || window.scrollY < Math.max(400, window.innerHeight * 0.8); };
   window.addEventListener("scroll", () => { if (!frame) frame = requestAnimationFrame(update); }, { passive: true });
   window.addEventListener("resize", update);
+  document.addEventListener("focusin", update);
+  document.addEventListener("focusout", () => setTimeout(update, 0));
   btn.addEventListener("click", () => {
     const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     window.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
@@ -3221,10 +3245,10 @@ async function loadMe() {
   const off = new Set((d.access.blocks || []).filter((b) => !b.on).map((b) => b.key));
   for (const b of d.access.blocks || []) document.body.classList.toggle("off-" + b.key, off.has(b.key));
   if (off.has("docs")) allowed.delete("upload");
-  if (off.has("prices")) allowed.delete("prices");
+  if (off.has("prices")) { allowed.delete("prices"); allowed.delete("purchase"); }
   if (off.has("analysis")) allowed.delete("analyze");
   if (off.has("chat")) allowed.delete("chat");
-  for (const k of ["upload", "analyze", "prices", "jobs", "chat"]) document.body.classList.toggle("no-" + k, !allowed.has(k));
+  for (const k of ["upload", "analyze", "prices", "purchase", "jobs", "chat"]) document.body.classList.toggle("no-" + k, !allowed.has(k));
   $("me-name").textContent = d.me.name === d.access.role_title ? d.me.name : `${d.me.name} · ${d.access.role_title}`;
   $("me-name").title = `Логин: ${d.me.login}`;
   $("me-admin").hidden = !d.access.admin_panel;

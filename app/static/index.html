@@ -311,16 +311,17 @@
     <!-- Вопросы по документации (чат): ответы только по документам конкурса, со ссылками -->
     <section class="panel" id="chat" hidden>
       <div class="section-head">
-        <h2>Вопросы по документации</h2>
+        <h2>Вопросы по документации <span class="chat-own" id="chat-own" hidden title="Ваши вопросы и ответы видите только вы: у каждого сотрудника свой чат">· видны только вам</span></h2>
         <div class="section-tools">
           <label class="inline admin-only">Модель <select id="chat-model"></select></label>
-          <button class="btn small need-chat" id="chat-clear" type="button" title="Удалить историю вопросов по этому конкурсу">Очистить</button>
+          <button class="btn small need-chat" id="chat-clear" type="button" title="Удалить мои вопросы и ответы по этому конкурсу">Очистить</button>
         </div>
       </div>
       <div class="chat-log" id="chat-log"></div>
       <form class="chat-form need-chat" id="chat-form">
-        <label class="btn attach need-prices" id="chat-attach" title="Прайс, КП или счёт поставщика (Excel, Word, PDF, фото): сайт найдёт в нём позиции конкурса и цены, а записать их в спецификацию можно кнопкой">📎<input type="file" id="chat-files" multiple hidden></label>
-        <textarea id="chat-input" rows="2" placeholder="Например: какие документы нужны во второй части заявки? Есть ли аванс? Сколько стоит позиция 5 и где дешевле? Прайс поставщика — скрепкой 📎 слева"></textarea>
+        <label class="btn attach need-purchase" id="chat-attach" title="Прайс, КП или счёт поставщика (Excel, Word, PDF, фото): сайт найдёт в нём позиции конкурса и цены, а записать их в спецификацию можно кнопкой">📎<input type="file" id="chat-files" multiple hidden></label>
+        <textarea id="chat-input" rows="2" placeholder="Например: какие документы нужны во второй части заявки? Есть ли аванс? Сколько стоит позиция 5 и где дешевле?"></textarea>
+        <button class="btn need-purchase" type="button" id="chat-as-prices" title="Вставьте в поле сообщение поставщика с ценами (из почты, мессенджера) и нажмите: сайт найдёт в нём позиции конкурса и цены — как в прайсе">Цены из сообщения</button>
         <button class="btn primary" type="submit" id="chat-send">Спросить</button>
       </form>
       <div class="chat-cache" id="chat-cache"></div>

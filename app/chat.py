@@ -208,6 +208,7 @@ def cache_status(client_id: str, folder_name: str, model: str | None = None, ent
     docs_changed = max(float(r.get("updated_at") or 0) for r in rows)
     mode = "fragments" if chars > CHAT_MAX_CHARS else "documents"
 
+    # Все сотрудники (owner=None): документы в кэше модели общие у всех, кто спрашивает по этому конкурсу.
     calls = [m for m in db.chat_history(client_id, folder_name, limit=60)
              if m["role"] == "assistant" and (m["meta"].get("usage") or {}).get("model") == model]
     prompt_mark = _prompt_mark(for_client(client_id, entity).text("chat.system"))
@@ -241,16 +242,18 @@ def cache_status(client_id: str, folder_name: str, model: str | None = None, ent
     return out
 
 
-def ask(client_id: str, folder_name: str, folder: Path, question: str, model: str | None, entity: str | None = None):
+def ask(client_id: str, folder_name: str, folder: Path, question: str, model: str | None, entity: str | None = None,
+        owner: str = "", with_unowned: bool = True):
     """Генератор строк NDJSON для страницы: {"t":"text"} по мере ответа, затем {"t":"done"} или {"t":"error"}.
-    entity — юр. лицо, выбранное на странице (0.19.0): промт чата — его, иначе клиента."""
+    entity — юр. лицо, выбранное на странице (0.19.0): промт чата — его, иначе клиента. owner — логин (0.20.0, личный
+    чат): модель получает только его прежние вопросы и ответы, новые сообщения — его."""
     model = model if model in CHAT_MODELS else CHAT_MODEL
     question = (question or "").strip()[:MAX_QUESTION]
     if not question:
         yield _event("error", text="пустой вопрос")
         return
-    history = db.chat_history(client_id, folder_name, limit=HISTORY_TURNS * 2)
-    q_id = db.chat_add(client_id, folder_name, "user", question, {"model": model})
+    history = db.chat_history(client_id, folder_name, limit=HISTORY_TURNS * 2, owner=owner, with_unowned=with_unowned)
+    q_id = db.chat_add(client_id, folder_name, "user", question, {"model": model}, owner=owner)
     yield _event("start", id=q_id)
 
     started = time.monotonic()
@@ -335,13 +338,13 @@ def ask(client_id: str, folder_name: str, folder: Path, question: str, model: st
                 meta["cache_ttl_fallback"] = True
                 plan = [("claude", "")]
         meta.update(usage=usage, seconds=round(time.monotonic() - started, 1), sources=_sources(answer, qi))
-        a_id = db.chat_add(client_id, folder_name, "assistant", answer, meta)
+        a_id = db.chat_add(client_id, folder_name, "assistant", answer, meta, owner=owner)
         yield _event("done", id=a_id, meta=meta)
     except LLMError as exc:
         meta.update(error=str(exc), seconds=round(time.monotonic() - started, 1))
-        db.chat_add(client_id, folder_name, "error", answer + ("\n\n" if answer else "") + str(exc), meta)
+        db.chat_add(client_id, folder_name, "error", answer + ("\n\n" if answer else "") + str(exc), meta, owner=owner)
         yield _event("error", text=str(exc))
     except Exception as exc:  # чтобы страница не зависла без ответа
         meta.update(error=f"{type(exc).__name__}: {exc}")
-        db.chat_add(client_id, folder_name, "error", f"Ошибка: {exc}", meta)
+        db.chat_add(client_id, folder_name, "error", f"Ошибка: {exc}", meta, owner=owner)
         yield _event("error", text=f"внутренняя ошибка: {exc}")

@@ -1161,14 +1161,24 @@ def api_bid_zip(client_id: str, folder: str):
 
 
 # ---------- чат по документации ----------
+# Личный чат (0.20.0): сотрудник видит только свои вопросы и ответы; модель получает только его историю.
+
+def _chat_owner() -> tuple[str, bool]:
+    """(логин вошедшего, видит ли он сообщения без автора — до 0.20.0: администратор сайта; вход выключен — все)."""
+    user = access.current_user()
+    if not user:
+        return "", True
+    return user["login"], user["role"] == "admin"
+
 
 @app.get("/api/clients/{client_id}/chat")
 def api_chat_history(client_id: str, folder: str):
-    """История чата конкурса и настройки (модели на выбор)."""
+    """История чата конкурса этого сотрудника и настройки (модели на выбор)."""
     client = get_client(client_id)
     folder_path(client, folder)
-    return {"messages": db.chat_history(client.id, folder), "models": chat.CHAT_MODELS, "default_model": chat.CHAT_MODEL,
-            "cache_ttl": chat.CHAT_CACHE_TTL}
+    owner, unowned = _chat_owner()
+    return {"messages": db.chat_history(client.id, folder, owner=owner, with_unowned=unowned), "personal": bool(owner),
+            "models": chat.CHAT_MODELS, "default_model": chat.CHAT_MODEL, "cache_ttl": chat.CHAT_CACHE_TTL}
 
 
 @app.get("/api/clients/{client_id}/chat/status")
@@ -1185,7 +1195,9 @@ def api_chat_ask(client_id: str, folder: str, data: dict = Body(...), entity: st
     client = get_client(client_id)
     base = folder_path(client, folder)
     model = data.get("model") if access.is_admin() else None   # сотрудник модель чата не выбирает
-    gen = chat.ask(client.id, folder, base, str(data.get("question", "")), model, _entity(client, entity))
+    owner, unowned = _chat_owner()
+    gen = chat.ask(client.id, folder, base, str(data.get("question", "")), model, _entity(client, entity),
+                   owner=owner, with_unowned=unowned)
     return StreamingResponse(gen, media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})
 
 
@@ -1193,4 +1205,5 @@ def api_chat_ask(client_id: str, folder: str, data: dict = Body(...), entity: st
 def api_chat_clear(client_id: str, folder: str):
     client = get_client(client_id)
     folder_path(client, folder)
-    return {"deleted": db.chat_clear(client.id, folder)}
+    owner, unowned = _chat_owner()
+    return {"deleted": db.chat_clear(client.id, folder, owner=owner, with_unowned=unowned)}

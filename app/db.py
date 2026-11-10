@@ -122,6 +122,13 @@ def init() -> None:
                     con.execute(f"ALTER TABLE jobs ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass  # колонку только что добавил другой процесс (сайт и обработчик стартуют одновременно)
+        # 0.20.0: личный чат — автор сообщения (логин; '' — вход выключен или автор старого сообщения не нашёлся;
+        # NULL — сообщение до 0.20.0, автора ещё не искали: assign_chat_owners).
+        if "user_login" not in {r["name"] for r in con.execute("PRAGMA table_info(chat_messages)")}:
+            try:
+                con.execute("ALTER TABLE chat_messages ADD COLUMN user_login TEXT")
+            except sqlite3.OperationalError:
+                pass
 
 
 # Какая очередь обработчика выполняет какую задачу (app/worker.py) и как это называть на странице.
@@ -344,18 +351,33 @@ def resume(job_id: int) -> str:
 
 # ---------- чат по документации ----------
 
-def chat_add(client_id: str, folder: str, role: str, content: str, meta: dict | None = None) -> int:
+# Личный чат (0.20.0, пользователь 10.11.2026: «у логиста и закупщика должны быть чаты… вопросы друг друга они не
+# должны видеть»; бэклог: «у каждого пользователя свой чат, который не видят другие пользователи»). owner — логин:
+# сотрудник видит только свои вопросы и ответы; with_unowned — ещё и сообщения без автора (до 0.20.0, автор не нашёлся
+# в журнале) — администратор сайта и сайт без входа. owner=None — все сообщения (только для оценки кэша модели).
+
+def _chat_where(owner: str | None, with_unowned: bool) -> tuple[str, tuple]:
+    if owner is None:
+        return "", ()
+    extra = " OR user_login='' OR user_login IS NULL" if with_unowned else ""
+    return f" AND (user_login=?{extra})", (owner,)
+
+
+def chat_add(client_id: str, folder: str, role: str, content: str, meta: dict | None = None, owner: str = "") -> int:
     with connect() as con:
-        cur = con.execute("INSERT INTO chat_messages(client_id, folder, role, content, meta, created_at) VALUES (?,?,?,?,?,?)",
-                          (client_id, folder, role, content, json.dumps(meta or {}, ensure_ascii=False), time.time()))
+        cur = con.execute("INSERT INTO chat_messages(client_id, folder, role, content, meta, created_at, user_login) "
+                          "VALUES (?,?,?,?,?,?,?)", (client_id, folder, role, content,
+                                                     json.dumps(meta or {}, ensure_ascii=False), time.time(), owner or ""))
         return cur.lastrowid
 
 
-def chat_history(client_id: str, folder: str, limit: int = 200) -> list[dict]:
-    """Последние сообщения чата конкурса, по порядку."""
+def chat_history(client_id: str, folder: str, limit: int = 200, owner: str | None = None,
+                 with_unowned: bool = False) -> list[dict]:
+    """Последние сообщения чата конкурса, по порядку: сотрудника owner (None — всех)."""
+    where, args = _chat_where(owner, with_unowned)
     with connect() as con:
-        rows = con.execute("SELECT * FROM chat_messages WHERE client_id=? AND folder=? ORDER BY id DESC LIMIT ?",
-                           (client_id, folder, limit)).fetchall()
+        rows = con.execute(f"SELECT * FROM chat_messages WHERE client_id=? AND folder=?{where} ORDER BY id DESC LIMIT ?",
+                           (client_id, folder, *args, limit)).fetchall()
     out = []
     for r in reversed(rows):
         d = dict(r)
@@ -367,9 +389,44 @@ def chat_history(client_id: str, folder: str, limit: int = 200) -> list[dict]:
     return out
 
 
-def chat_clear(client_id: str, folder: str) -> int:
+def chat_clear(client_id: str, folder: str, owner: str | None = None, with_unowned: bool = False) -> int:
+    """Очистить чат конкурса: только сообщения owner (и без автора — with_unowned); None — весь."""
+    where, args = _chat_where(owner, with_unowned)
     with connect() as con:
-        return con.execute("DELETE FROM chat_messages WHERE client_id=? AND folder=?", (client_id, folder)).rowcount
+        return con.execute(f"DELETE FROM chat_messages WHERE client_id=? AND folder=?{where}",
+                           (client_id, folder, *args)).rowcount
+
+
+CHAT_EVENT = "задал вопрос в чате"          # app/access.py RULES: журнал пишется, когда ответ отдан
+
+
+def assign_chat_owners() -> int:
+    """0.20.0: у сообщений чата до личных чатов автора нет. Автор вопроса — из журнала (user_events: «задал вопрос
+    в чате», «клиент · папка», время — конец ответа, через 0–15 мин после вопроса); ответ и ошибка — автора вопроса
+    перед ними. Не нашёлся (вход был выключен) — '' (такие видит администратор сайта). Повторно не ищет."""
+    with connect() as con:
+        if not con.execute("SELECT 1 FROM chat_messages WHERE user_login IS NULL LIMIT 1").fetchone():
+            return 0
+        events = []
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_events'").fetchone():
+            events = [dict(r) for r in con.execute(
+                "SELECT id, at, actor, details FROM user_events WHERE action=? ORDER BY at", (CHAT_EVENT,))]
+        used: set[int] = set()
+        owner: dict[tuple, str] = {}
+        updates = []
+        for r in con.execute("SELECT id, client_id, folder, role, created_at FROM chat_messages WHERE user_login IS NULL "
+                             "ORDER BY client_id, folder, id").fetchall():
+            key = (r["client_id"], r["folder"])
+            if r["role"] == "user":
+                detail, t = f"{r['client_id']} · {r['folder']}", float(r["created_at"] or 0)
+                ev = next((e for e in events if e["id"] not in used and e["details"] == detail
+                           and t - 5 <= float(e["at"] or 0) <= t + 900), None)
+                if ev:
+                    used.add(ev["id"])
+                owner[key] = (ev or {}).get("actor") or ""
+            updates.append((owner.get(key, ""), r["id"]))
+        con.executemany("UPDATE chat_messages SET user_login=? WHERE id=?", updates)
+        return len(updates)
 
 
 # ---------- записи NocoDB ----------
