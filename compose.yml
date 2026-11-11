@@ -3,9 +3,10 @@
 #   docker compose ps              — посмотреть, запущены ли сайт и обработчик
 #   docker compose logs -f web     — журнал сайта (выход — Ctrl+C)
 #   docker compose logs -f worker  — журнал обработчика документов
-#   docker compose down            — остановить
+#   docker compose down            — остановить (без -v: том dropbox-home хранит привязку к Dropbox)
 # Настройки (папки, порт, прокси, ключи, модели ИИ) — в файле .env рядом.
 # На этом компьютере дополнительно подключается compose.local.yml (см. COMPOSE_FILE в .env).
+# На сервере ещё и Dropbox (сервис dropbox ниже) — строкой COMPOSE_PROFILES=dropbox в .env.
 
 name: supplybro
 
@@ -165,3 +166,32 @@ services:
         bind:
           create_host_path: false
     restart: unless-stopped
+
+  # Dropbox (0.22.0): на сервере папки конкурсов приходят через Dropbox — программа Dropbox для Linux в своём
+  # контейнере (dropbox/Dockerfile) синхронизирует папку сервера DROPBOX_DIR, а TENDERS_DIR сайта указывает на
+  # папку конкурсов внутри неё (например, /opt/supplybro-dropbox/Агент).
+  # Запускается только со строкой COMPOSE_PROFILES=dropbox в .env. На компьютере с Dropbox для Windows эту строку
+  # не добавлять: там папку синхронизирует Dropbox для Windows, второй Dropbox скачал бы её ещё раз.
+  #   docker compose logs dropbox                  — ссылка для привязки к учётной записи Dropbox (один раз)
+  #   docker compose exec dropbox dropbox status   — синхронизация («Up to date» — всё скачано и отправлено)
+  dropbox:
+    profiles: ["dropbox"]
+    image: supplybro-dropbox:dev
+    build:
+      context: ./dropbox
+    # Маленький «init» первым процессом: docker compose stop останавливает Dropbox сразу и аккуратно.
+    init: true
+    volumes:
+      # Настройки Dropbox (привязка к учётной записи) и сама программа с обновлениями — переживают перезапуск
+      # и пересборку. Удаляется только «docker compose down -v» — тогда сервер придётся привязать заново.
+      - "dropbox-home:/home/dropbox"
+      # Папка Dropbox — папка сервера (DROPBOX_DIR в .env). Её создаёт Docker, права отдаёт dropbox/start.sh.
+      - type: bind
+        source: "${DROPBOX_DIR:-/opt/supplybro-dropbox}"
+        target: /home/dropbox/Dropbox
+        bind:
+          create_host_path: true
+    restart: unless-stopped
+
+volumes:
+  dropbox-home:
