@@ -841,7 +841,7 @@ def api_prices(client_id: str, folder: str):
     has_analysis = bool(result and result.get("positions"))
     # Без анализа на сайте позиции — из спецификации NocoDB (0.14.0): сколько их — по прочитанной «Всеми ценами»
     # спецификации (None — ещё не прочитана; кнопка всё равно доступна, сайт проверит при запуске).
-    spec = None if has_analysis else price_summary.cached_spec(client.id, folder)
+    spec = None if has_analysis else price_summary.cached_spec(client, folder)
     spec_positions = None if spec is None else prices.positions_from_spec(spec)
     if has_analysis:
         positions = result["positions"]

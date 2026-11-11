@@ -1009,7 +1009,7 @@ def _noco_text(noco: dict) -> str:
 
 def _write_noco(client, result: dict, rows: list[dict]) -> dict:
     internal = result.get("internal_number") or ""
-    link = db.noco_link(client.id, internal)
+    link = db.noco_link(client.id, internal, base_id=client.nocodb.base_id)
     if not link or not link.get("created_by_site") or not link.get("spec_table_id") \
             or str(link.get("spec_table_id")).startswith("pending:"):
         return {"status": "skipped", "text": "не записано — спецификацию этого конкурса в NocoDB создал не сайт "

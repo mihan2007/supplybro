@@ -653,7 +653,7 @@ def _write_one(client, folder_name: str, folder: Path, cid: str, progress) -> di
     with nw._WRITE_LOCK:                 # программа агента держит базу в общих настройках — по очереди с записью анализа
         token = nw._configure(client)
         progress("NocoDB: запись конкурса", 0.1)
-        link = db.noco_link(client.id, internal) or {}
+        link = db.noco_link(client.id, internal, base_id=client.nocodb.base_id) or {}
         record_id, created_by_site = link.get("record_id"), bool(link.get("created_by_site"))
         if not record_id:
             for v in nw._internal_variants(internal):

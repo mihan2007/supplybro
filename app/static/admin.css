@@ -116,3 +116,23 @@ dialog.wide { width: min(1000px, calc(100vw - 32px)); }
 #pe-status.warn { color: var(--warn-text); }
 .p-level { margin: -4px 0 10px; font-size: 13px; color: var(--accent); }
 .p-level:empty { display: none; }
+
+/* Базы NocoDB клиентов (0.21.0) */
+.b-body { display: grid; gap: 10px; padding: 12px 14px 14px; min-width: 0; }
+.b-body > * { min-width: 0; }
+.b-now { font-size: 14px; }
+.b-now .label { color: var(--muted); }
+.b-note { font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.b-note .btn { white-space: normal; text-align: left; max-width: 100%; }
+.b-now, .b-check { overflow-wrap: anywhere; }
+.b-pick { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1.3fr) auto; gap: 8px; align-items: end; }
+.b-pick .field { margin: 0; }
+.b-pick select { width: 100%; }
+input.b-url { width: 100%; min-width: 0; padding: 8px 10px; font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: 8px; }
+.b-check { padding: 10px 12px; border-radius: 8px; font-size: 13px; display: grid; gap: 6px; background: var(--chip); }
+.b-check.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.b-check.warn { background: var(--warn-bg); color: var(--warn-text); }
+.b-check.bad { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); }
+.b-check ul { margin: 0; padding-left: 18px; }
+@media (max-width: 760px) { .b-pick { grid-template-columns: 1fr; } }

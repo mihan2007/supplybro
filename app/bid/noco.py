@@ -23,8 +23,8 @@ LIST_COLUMN = "Перечень документов заявки"
 FORMS_COLUMN = "ДС: декларативные формы"
 
 
-def _record(nc, nw, token: str, client_id: str, internal: str) -> int | None:
-    link = db.noco_link(client_id, internal) or {}
+def _record(nc, nw, token: str, client, internal: str) -> int | None:
+    link = db.noco_link(client.id, internal, base_id=client.nocodb.base_id) or {}
     if link.get("record_id"):
         return link["record_id"]
     for v in nw._internal_variants(internal):
@@ -50,7 +50,7 @@ def write(client, folder_name: str, folder: Path, progress) -> str:
     with nw._WRITE_LOCK:
         token = nw._configure(client)
         progress("NocoDB: запись конкурса", 0.1)
-        record_id = _record(nc, nw, token, client.id, internal)
+        record_id = _record(nc, nw, token, client, internal)
         if not record_id:
             raise RuntimeError(f"в NocoDB нет записи конкурса {internal} — сначала запишите анализ")
         cols = nc.get_table_columns(token, nc.TABLE_ID)

@@ -1,6 +1,7 @@
 // Админ-панель учётных записей (/admin): первый администратор, вход, клиенты и их сотрудники, роли, журнал.
 // 0.18.0: вкладка «Промты» — задания моделям ИИ, свои у каждого клиента и (0.19.0) юр. лица (только
-// администратору сайта).
+// администратору сайта). 0.21.0: вкладка «Базы NocoDB» — с какой базой работает каждый клиент, переключение
+// с проверкой (только администратору сайта).
 // 0.12.0: сотрудники сгруппированы по клиентам (каждый — в одном клиенте); администратор сайта видит всех клиентов
 // и администраторов сайта, администратор клиента — только сотрудников своего клиента.
 "use strict";
@@ -115,7 +116,8 @@ async function boot() {
   }
   $("users-tab-title").textContent = st.site_admin ? "Клиенты и сотрудники" : "Сотрудники";
   $("prompts-tab-btn").hidden = !st.site_admin;          // промты правит только администратор сайта (0.18.0)
-  if (tab === "prompts" && !st.site_admin) tab = "users";
+  $("bases-tab-btn").hidden = !st.site_admin;            // базы NocoDB — тоже (0.21.0)
+  if ((tab === "prompts" || tab === "bases") && !st.site_admin) tab = "users";
   $("u-intro").textContent = st.site_admin
     ? "Клиенты — из списка клиентов сайта (новых добавляет Claude). Каждый сотрудник работает в одном клиенте."
     : `Сотрудники клиента «${clientName(st.scope)}»: добавляйте, меняйте роль и разделы, сбрасывайте пароль.`;
@@ -181,8 +183,10 @@ function showTab(name) {
   $("t-roles").hidden = name !== "roles";
   $("t-events").hidden = name !== "events";
   $("t-prompts").hidden = name !== "prompts";
+  $("t-bases").hidden = name !== "bases";
   if (name === "users") loadUsers();
   if (name === "prompts") loadPrompts();
+  if (name === "bases") loadBases();
   if (name === "roles") renderRoles();
   if (name === "events") loadEvents();
 }
@@ -755,3 +759,153 @@ function closePromptEditor() {
 $("pe-close").addEventListener("click", closePromptEditor);
 $("pe-cancel").addEventListener("click", closePromptEditor);
 $("p-editor").addEventListener("cancel", (e) => { e.preventDefault(); closePromptEditor(); });   // Esc
+
+// ---------- базы NocoDB клиентов (0.21.0) ----------
+// Пользователь 11.11.2026: «возможность переключаться к разным базам данных NocoDB… чтобы переключение происходило
+// без проблем». Карточка клиента: какая база сейчас и откуда; выбор другой базы (из рабочего пространства NocoDB или
+// адресом реестра) → «Проверить» → «Переключить» (с предупреждениями — «Переключить всё равно»).
+
+const bs = { clients: [], checks: {}, busy: "" };
+const SOURCE_TITLE = { admin: "выбрано в админ-панели", env: "из .env (NOCODB_URL_…)", settings: "из настроек проекта" };
+
+function baseLabel(b) {
+  if (!b || !b.base_id) return "—";
+  return (b.base_title ? `«${b.base_title}» · ` : "") + b.base_id;
+}
+
+async function loadBases() {
+  setStatus("b-status", "Загружаю базы…");
+  try {
+    const d = await guarded(() => api("/api/admin/bases"));
+    if (!d) return;
+    bs.clients = d.clients;
+    setStatus("b-status", "");
+    renderBases();
+  } catch (err) { setStatus("b-status", "Не удалось загрузить базы: " + err.message, true); }
+}
+
+function checkView(cid) {
+  const r = bs.checks[cid];
+  if (!r) return null;
+  const box = el("div", { class: "b-check" + (r.ok ? (r.warnings.length ? " warn" : " ok") : " bad") });
+  if (!r.ok) {
+    box.append(el("b", { text: "Переключить нельзя:" }), el("ul", {}, ...r.errors.map((e) => el("li", { text: e }))));
+    return box;
+  }
+  const t = r.target || {};
+  const facts = [
+    `база ${r.base_title ? "«" + r.base_title + "»" : ""} ${t.base_id}`,
+    `реестр «${r.registry_title}» (${t.registry_table_id})`,
+    r.records === null || r.records === undefined ? "" : `записей: ${r.records}`,
+    `таблиц спецификаций: ${r.specs}`,
+  ].filter(Boolean);
+  box.append(el("div", { text: (r.same ? "Это та же база, что сейчас: " : "✓ База доступна: ") + facts.join(" · ") }));
+  if (r.warnings.length) box.append(el("b", { text: "Обратите внимание:" }),
+    el("ul", {}, ...r.warnings.map((w) => el("li", { text: w }))));
+  else if (!r.same) box.append(el("div", { text: "✓ Колонки и представления реестра — как у базы, которая работает сейчас." }));
+  if (!r.same) {
+    const btn = el("button", { type: "button", class: "btn primary", "data-save": cid,
+      text: r.warnings.length ? "Переключить всё равно" : "Переключить" });
+    btn.addEventListener("click", () => saveBase(cid, Boolean(r.warnings.length)));
+    box.append(el("div", { class: "row-actions" }, btn));
+  }
+  return box;
+}
+
+function renderBases() {
+  const cards = [];
+  for (const c of bs.clients) {
+    const cur = c.current;
+    const card = el("div", { class: "u-group b-card", "data-client": c.id });
+    card.append(el("div", { class: "g-head" },
+      el("div", {}, el("h3", { text: c.name }),
+        el("div", { class: "g-sub", text: c.folder ? `папка конкурсов: ${c.folder}` : "папка конкурсов не указана" })),
+      el("span", { class: "pill" + (cur.source === "admin" ? " warn" : ""), text: SOURCE_TITLE[cur.source] || cur.source })));
+    const body = el("div", { class: "b-body" });
+    body.append(el("div", { class: "b-now" }, el("span", { class: "label", text: "Сейчас: " }),
+      el("b", { text: baseLabel(cur) }), el("span", { class: "muted", text: ` · реестр ${cur.registry_table_id}` })));
+    if (c.admin) {
+      const back = c.env || c.settings;
+      const reset = el("button", { type: "button", class: "btn ghost", "data-reset": c.id,
+        text: `Вернуть ${c.env ? "базу из .env" : "базу из настроек проекта"}: ${baseLabel(back)}` });
+      reset.addEventListener("click", () => resetBase(c.id, baseLabel(back)));
+      body.append(el("div", { class: "b-note" },
+        el("span", { class: "muted", text: `Переключил: ${c.admin.updated_by || "—"} · ${when(c.admin.updated_at)}. ` }), reset));
+    } else if (cur.source === "env") {
+      body.append(el("div", { class: "b-note muted",
+        text: `В настройках проекта — ${baseLabel(c.settings)}; сайт работает с базой из .env (NOCODB_URL_${c.id.toUpperCase()}).` }));
+    }
+    const sel = el("select", { "data-base": c.id },
+      el("option", { value: "", text: "— выберите базу —" }),
+      ...c.bases.map((b) => el("option", { value: b.id, text: `${b.title || b.id} · ${b.id}` + (b.id === cur.base_id ? " (сейчас)"
+        : (b.used_by || []).length ? ` (у клиента ${b.used_by.join(", ")})` : "") })));
+    const url = el("input", { type: "url", class: "b-url", "data-url": c.id,
+      placeholder: "или адрес «Реестра конкурсов» из строки браузера NocoDB" });
+    const go = el("button", { type: "button", class: "btn", "data-check": c.id, text: "Проверить" });
+    sel.addEventListener("change", () => { if (sel.value) url.value = ""; delete bs.checks[c.id]; renderCheck(c.id); });
+    url.addEventListener("input", () => { if (url.value) sel.value = ""; delete bs.checks[c.id]; renderCheck(c.id); });
+    go.addEventListener("click", () => checkBase(c.id));
+    body.append(el("div", { class: "b-pick" },
+      el("label", { class: "field" }, el("span", { class: "label", text: "Другая база" }), sel), url, go));
+    body.append(el("div", { class: "b-result", "data-result": c.id }));
+    card.append(body);
+    cards.push(card);
+  }
+  if (!cards.length) cards.push(el("p", { class: "muted", text: "Клиентов нет." }));
+  $("b-clients").replaceChildren(...cards);
+  for (const c of bs.clients) renderCheck(c.id);
+}
+
+function renderCheck(cid) {
+  const slot = document.querySelector(`[data-result="${cid}"]`);
+  if (!slot) return;
+  const v = bs.busy === cid ? el("div", { class: "muted", text: "Проверяю базу в NocoDB…" }) : checkView(cid);
+  slot.replaceChildren(...(v ? [v] : []));
+}
+
+function pickOf(cid) {
+  return { client: cid, base_id: document.querySelector(`[data-base="${cid}"]`).value,
+    url: document.querySelector(`[data-url="${cid}"]`).value.trim() };
+}
+
+async function checkBase(cid) {
+  const pick = pickOf(cid);
+  if (!pick.base_id && !pick.url) { toast("Выберите базу из списка или вставьте адрес реестра", true); return; }
+  bs.busy = cid;
+  renderCheck(cid);
+  try {
+    const r = await guarded(() => api("/api/admin/bases/check", "POST", pick));
+    if (r) bs.checks[cid] = { ...r, pick };
+  } catch (err) {
+    bs.checks[cid] = { ok: false, errors: [err.message], warnings: [], pick };
+  }
+  bs.busy = "";
+  renderCheck(cid);
+}
+
+async function saveBase(cid, confirm) {
+  const r = bs.checks[cid];
+  if (!r) return;
+  const name = (bs.clients.find((c) => c.id === cid) || {}).name || cid;
+  const target = (r.base_title ? `«${r.base_title}» ` : "") + r.target.base_id;
+  if (!window.confirm(`Переключить клиента «${name}» на базу ${target}?\n\nСразу для всех сотрудников этого клиента на этом сайте.`)) return;
+  try {
+    const res = await guarded(() => api("/api/admin/bases/save", "POST", { ...r.pick, confirm }));
+    if (!res) return;
+    if (res.need_confirm) { bs.checks[cid] = { ...res.check, pick: r.pick }; renderCheck(cid); return; }
+    delete bs.checks[cid];
+    toast(`«${name}» теперь работает с базой ${target}`);
+    loadBases();
+  } catch (err) { toast("Не переключено: " + err.message, true); }
+}
+
+async function resetBase(cid, back) {
+  const name = (bs.clients.find((c) => c.id === cid) || {}).name || cid;
+  if (!window.confirm(`Вернуть клиенту «${name}» базу ${back}?`)) return;
+  try {
+    const res = await guarded(() => api("/api/admin/bases/reset", "POST", { client: cid }));
+    if (!res) return;
+    toast(`«${name}»: снова база ${back}`);
+    loadBases();
+  } catch (err) { toast("Не получилось: " + err.message, true); }
+}

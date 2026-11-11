@@ -86,7 +86,9 @@ def _first_url(text) -> str:
 
 # ---------- спецификация NocoDB этого конкурса ----------
 
-_SPEC_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+# (клиент, база NocoDB, папка) → (когда, данные); база — в ключе (0.21.0): после переключения базы в админ-панели
+# прежние строки не показываются.
+_SPEC_CACHE: dict[tuple[str, str, str], tuple[float, dict]] = {}
 
 
 def _spec_row(r: dict) -> dict:
@@ -123,7 +125,7 @@ def _spec_row(r: dict) -> dict:
 async def read_spec(client, folder_name: str, record_id: int | None = None, ttl: float = SPEC_TTL) -> tuple[dict | None, str]:
     """Цены из спецификации NocoDB конкурса: {"table_id", "rows": {№: {...}}} и текст ошибки. Таблица — по записи
     реестра (ссылка на спецификацию), иначе из noco_links, иначе по названию (внутреннему номеру)."""
-    key = (client.id, folder_name)
+    key = (client.id, client.nocodb.base_id, folder_name)
     hit = _SPEC_CACHE.get(key)
     if hit and time.time() - hit[0] < ttl:
         return hit[1], ""
@@ -138,7 +140,8 @@ async def read_spec(client, folder_name: str, record_id: int | None = None, ttl:
             table_id = await own_table_async(client.nocodb, m.group(1)) if m else None
             internal = internal or norm_number(str(rec.get("Внутренний номер") or "")) or ""
         if not table_id and internal:
-            tid = str((db.noco_link(client.id, internal) or {}).get("spec_table_id") or "")
+            link = db.noco_link(client.id, internal, base_id=client.nocodb.base_id) or {}
+            tid = str(link.get("spec_table_id") or "")
             table_id = await own_table_async(client.nocodb, tid) if tid and not tid.startswith("pending:") else None
         if not table_id and internal:
             table_id = await noco.find_table_by_title(internal)
@@ -162,8 +165,8 @@ async def read_spec(client, folder_name: str, record_id: int | None = None, ttl:
     return data, ""
 
 
-def cached_spec(client_id: str, folder_name: str, ttl: float = CHAT_TTL) -> dict | None:
-    hit = _SPEC_CACHE.get((client_id, folder_name))
+def cached_spec(client, folder_name: str, ttl: float = CHAT_TTL) -> dict | None:
+    hit = _SPEC_CACHE.get((client.id, client.nocodb.base_id, folder_name))
     return hit[1] if hit and time.time() - hit[0] < ttl else None
 
 
@@ -184,14 +187,16 @@ def _build_history(client) -> None:
         traceback.print_exc()
     finally:
         with _HIST_LOCK:
-            _HIST_BUILDING.discard(client.id)
+            _HIST_BUILDING.discard(f"{client.id}:{client.nocodb.base_id}")
 
 
 def history_index(client, refresh: bool = True) -> tuple[dict, dict]:
     """Индекс своей базы цен (файл обработчика в папке данных) и сведения о нём: {at, building}. Нет файла или устарел —
-    собирается заново в фоне (чтение всех спецификаций NocoDB — до минуты), страница не ждёт."""
+    собирается заново в фоне (чтение всех спецификаций NocoDB — до минуты), страница не ждёт. Свой у каждой базы
+    NocoDB клиента (0.21.0)."""
     from .prices import history
-    path = history.DATA_DIR / f"price_history_{client.id}.json"
+    path = history.cache_path(client)
+    hkey = f"{client.id}:{client.nocodb.base_id}"
     info = {"at": "", "building": False}
     index: dict = {}
     try:
@@ -199,24 +204,24 @@ def history_index(client, refresh: bool = True) -> tuple[dict, dict]:
     except OSError:
         mtime = None
     if mtime:
-        hit = _HIST_PARSED.get(client.id)
+        hit = _HIST_PARSED.get(hkey)
         if hit and hit[0] == mtime:
             index = hit[1]
         else:
             try:
                 index = json.loads(path.read_text(encoding="utf-8"))
-                _HIST_PARSED[client.id] = (mtime, index)
+                _HIST_PARSED[hkey] = (mtime, index)
             except (OSError, ValueError):
                 index = {}
         info["at"] = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
     stale = mtime is None or time.time() - mtime > history.CACHE_HOURS * 3600
     if stale and refresh:
         with _HIST_LOCK:
-            if client.id in _HIST_BUILDING:
+            if hkey in _HIST_BUILDING:
                 info["building"] = True
-            elif time.time() - _HIST_TRIED.get(client.id, 0) > HIST_RETRY:
-                _HIST_BUILDING.add(client.id)
-                _HIST_TRIED[client.id] = time.time()
+            elif time.time() - _HIST_TRIED.get(hkey, 0) > HIST_RETRY:
+                _HIST_BUILDING.add(hkey)
+                _HIST_TRIED[hkey] = time.time()
                 threading.Thread(target=_build_history, args=(client,), daemon=True).start()
                 info["building"] = True
     return index, info
@@ -328,7 +333,7 @@ def build(folder: Path, spec: dict | None = None, hist_index: dict | None = None
 
 def spec_for_chat(client, folder_name: str) -> dict | None:
     """Цены из NocoDB для чата: прочитанные страницей за последние полчаса, иначе — прочитать сейчас (до 15 с)."""
-    spec = cached_spec(client.id, folder_name)
+    spec = cached_spec(client, folder_name)
     if spec is not None:
         return spec
     try:

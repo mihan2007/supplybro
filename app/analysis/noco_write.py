@@ -143,7 +143,7 @@ def _check_conflicts(client: Client, internal: str, purchase_number: str) -> dic
                 seen.add(rec["Id"])
                 others.append({"id": rec["Id"], "internal": str(rec.get(INTERNAL_COLUMN) or ""),
                                "number": str(rec.get(nc.PURCHASE_NUMBER_COLUMN) or "")})
-    link = db.noco_link(client.id, internal)
+    link = db.noco_link(client.id, internal, base_id=client.nocodb.base_id)
     created_by_site = bool(by_internal and link and link.get("record_id") == by_internal["Id"]
                            and link.get("created_by_site"))
     return {"token": token, "by_internal": by_internal, "duplicates": others, "created_by_site": created_by_site}
@@ -251,11 +251,11 @@ def _save(client: Client, folder_name: str, result: dict, force: bool, progress)
             raise RuntimeError(f"NocoDB: создать запись не удалось: HTTP {status} {body}")
         record_id, action = body.get("Id"), "created"
     created_by_site = action == "created" or state["created_by_site"]
-    link_before = dict(db.noco_link(client.id, internal) or {})
+    link_before = dict(db.noco_link(client.id, internal, base_id=client.nocodb.base_id) or {})
     if link_before.get("spec_table_id") and not str(link_before["spec_table_id"]).startswith("pending:"):
         link_before["spec_table_id"] = own_table(client.nocodb, link_before["spec_table_id"]) or ""
     db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site,
-                      linked_id or link_before.get("spec_table_id") or "")
+                      linked_id or link_before.get("spec_table_id") or "", base_id=client.nocodb.base_id)
 
     # Спецификация. Перезаполняется только таблица, которую создал сайт для этой записи, или новая.
     # Таблица со строками, которую создал не сайт (по ссылке в записи или с таким же названием), не трогается.
@@ -278,14 +278,16 @@ def _save(client: Client, folder_name: str, result: dict, force: bool, progress)
                 "text": "Таблица спецификации уже заполнена — не перезаписана (в ней могут быть цены и данные агента)."}
     elif spec_rows:
         if not candidate:       # таблицы ещё нет — её создаст сайт; пометка на случай перезапуска посередине
-            db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site, f"pending:{title}")
+            db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site, f"pending:{title}",
+                              base_id=client.nocodb.base_id)
         url, table_id, safe_rows = nc.sync_specification(token, internal, spec_rows,
                                                           existing_table_id=linked_id or (candidate if ours else None))
         row[nc.SPEC_LINK_COLUMN] = url
         status, body = nc._request("PATCH", nc.RECORDS_URL, token, {"Id": record_id, nc.SPEC_LINK_COLUMN: url})
         if status != 200:
             raise RuntimeError(f"NocoDB: ссылку на спецификацию записать не удалось: HTTP {status} {body}")
-        db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site, table_id)
+        db.save_noco_link(client.id, internal, folder_name, record_id, created_by_site, table_id,
+                          base_id=client.nocodb.base_id)
         progress("NocoDB: проверка спецификации", 0.96)
         spec = {"status": "written", "url": url, "table_id": table_id,
                 "verification": nc.verify_spec_table(token, table_id, safe_rows)}

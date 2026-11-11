@@ -464,7 +464,7 @@ def _spec_table(client, internal: str) -> tuple[str | None, str]:
     from tools import nocodb_client as nc
     from .analysis import noco_write as nw
     from .noco_tables import own_table, table_id_in_link
-    link = db.noco_link(client.id, internal) or {}
+    link = db.noco_link(client.id, internal, base_id=client.nocodb.base_id) or {}
     tid = str(link.get("spec_table_id") or "")
     if tid and not tid.startswith("pending:"):
         tid = own_table(client.nocodb, tid) or ""

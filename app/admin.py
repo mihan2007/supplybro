@@ -1,7 +1,7 @@
 """
 Админ-панель учётных записей: страница /admin и адреса /api/admin/... (app/auth.py — сами учётные записи).
-С 0.18.0 здесь же промты клиентов и (0.19.0) их юр. лиц (/api/admin/prompts..., app/prompt_store.py) — только
-администратору сайта.
+С 0.18.0 здесь же промты клиентов и (0.19.0) их юр. лиц (/api/admin/prompts..., app/prompt_store.py), с 0.21.0 —
+базы NocoDB клиентов (/api/admin/bases..., app/noco_bases.py) — только администратору сайта.
 
 Подключается при LOGIN_REQUIRED=1 (вход на сайт обязателен — тогда всегда) или ADMIN_PANEL=1. При обязательном входе
 (0.16.0) панель и её адреса открываются только после входа на /login (app/access.py), первого администратора создаёт
@@ -19,7 +19,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
-from . import auth, prompt_store
+from . import auth, noco_bases, prompt_store
 from .config import load_clients
 
 ROOT = Path(__file__).resolve().parent
@@ -288,10 +288,10 @@ def events(request: Request, user_id: int | None = None, limit: int = 200):
 # затем: «чтобы админ мог править промты клиентов, других юр. лиц». Уровни: юр. лицо → клиент → стандартный текст.
 # Только администратор сайта: промт влияет на качество, стоимость и защиту от подложного текста в документах.
 
-def _site_admin(request: Request, change: bool = False) -> dict:
+def _site_admin(request: Request, change: bool = False, what: str = "править промты") -> dict:
     me = _admin(request, change)
     if me["role"] != "admin":
-        raise HTTPException(403, "править промты может только администратор сайта")
+        raise HTTPException(403, f"{what} может только администратор сайта")
     return me
 
 
@@ -383,3 +383,76 @@ def prompts_version(request: Request, client: str, key: str, id: int, entity: st
     if not v:
         raise HTTPException(404, "версия не найдена")
     return v
+
+
+# ---------- базы NocoDB клиентов (0.21.0) ----------
+# Пользователь 11.11.2026: «можем ли мы в админ-панели сделать возможность переключаться к разным базам данных
+# NocoDB… нужно, чтобы переключение происходило без проблем». Только администратор сайта: от базы зависит, куда
+# сайт пишет анализ, цены и заявки всех сотрудников клиента.
+
+def _bases_admin(request: Request, change: bool = False) -> dict:
+    return _site_admin(request, change, "переключать базу NocoDB")
+
+
+def _bwrap(fn):
+    try:
+        return fn()
+    except noco_bases.BaseError as exc:
+        raise HTTPException(400, str(exc))
+
+
+def _base_text(s: dict | None, title: str = "") -> str:
+    if not s:
+        return "—"
+    return f"{title} ({s.get('base_id')})" if title else str(s.get("base_id") or "—")
+
+
+@router.get("/api/admin/bases")
+def bases_state(request: Request):
+    """Клиенты и их базы NocoDB: какая действует, откуда (админ-панель / .env / настройки проекта), список баз."""
+    _bases_admin(request)
+    return {"clients": noco_bases.state()}
+
+
+@router.post("/api/admin/bases/check")
+def bases_check(request: Request, data: dict = Body(...)):
+    """Проверить базу перед переключением (только чтение NocoDB): реестр, колонки, представления, спецификации."""
+    _bases_admin(request, change=True)
+    client = load_clients().get(str(data.get("client") or ""))
+    if not client:
+        raise HTTPException(404, "клиент не найден")
+    return noco_bases.check(client, str(data.get("url") or ""), str(data.get("base_id") or ""))
+
+
+@router.post("/api/admin/bases/save")
+def bases_save(request: Request, data: dict = Body(...)):
+    """Переключить базу клиента. Есть предупреждения — сначала {need_confirm}, затем с confirm: true."""
+    me = _bases_admin(request, change=True)
+    cid = str(data.get("client") or "")
+    clients = load_clients()
+    if cid not in clients:
+        raise HTTPException(404, "клиент не найден")
+    res = _bwrap(lambda: noco_bases.save(cid, str(data.get("url") or ""), str(data.get("base_id") or ""),
+                                         me["login"], bool(data.get("confirm"))))
+    if res.get("saved"):
+        chk = res["check"]
+        old = _base_text(res["before"])
+        new = _base_text(res["after"], chk.get("base_title", ""))
+        auth.event(me, None, "база NocoDB переключена",
+                   f"{clients[cid].name} · {old} → {new} · реестр «{chk.get('registry_title', '')}»", _ip(request))
+    return res
+
+
+@router.post("/api/admin/bases/reset")
+def bases_reset(request: Request, data: dict = Body(...)):
+    """Убрать выбор админ-панели: снова база из .env или из настроек проекта (config/clients.json)."""
+    me = _bases_admin(request, change=True)
+    cid = str(data.get("client") or "")
+    clients = load_clients()
+    if cid not in clients:
+        raise HTTPException(404, "клиент не найден")
+    res = _bwrap(lambda: noco_bases.reset(cid))
+    if res["changed"]:
+        auth.event(me, None, "база NocoDB: как в настройках проекта",
+                   f"{clients[cid].name} · {_base_text(res['before'])} → {_base_text(res['after'])}", _ip(request))
+    return res

@@ -40,9 +40,14 @@ def _price_fields(row: dict) -> list[dict]:
     return out
 
 
+def cache_path(client) -> Path:
+    """Файл своей базы цен — свой у каждой базы NocoDB клиента (0.21.0: базу переключают в админ-панели)."""
+    return DATA_DIR / f"price_history_{client.id}_{client.nocodb.base_id}.json"
+
+
 def load_index(client, progress=None) -> dict[str, list[dict]]:
     """{нормализованный артикул: [{tender, №, name, prices[], updated}]}."""
-    cache = DATA_DIR / f"price_history_{client.id}.json"
+    cache = cache_path(client)
     if cache.is_file() and time.time() - cache.stat().st_mtime < CACHE_HOURS * 3600:
         try:
             return json.loads(cache.read_text(encoding="utf-8"))

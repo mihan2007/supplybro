@@ -68,6 +68,7 @@
         <button type="button" data-tab="users" class="active"><span id="users-tab-title">Сотрудники</span> <span class="muted" id="users-count"></span></button>
         <button type="button" data-tab="roles">Роли и права</button>
         <button type="button" data-tab="prompts" id="prompts-tab-btn" hidden>Промты</button>
+        <button type="button" data-tab="bases" id="bases-tab-btn" hidden>Базы NocoDB</button>
         <button type="button" data-tab="events">Журнал</button>
       </nav>
 
@@ -113,6 +114,17 @@
         <p class="p-level" id="p-level"></p>
         <div class="u-groups" id="p-sections"></div>
         <p class="status" id="p-status"></p>
+      </section>
+
+      <!-- Базы NocoDB клиентов (0.21.0): только администратору сайта -->
+      <section class="panel" id="t-bases" hidden>
+        <p class="muted u-intro">С какой базой NocoDB работает сайт у каждого клиента: откуда берутся конкурсы и куда
+          записываются анализ, цены и заявки. Перед переключением сайт проверяет базу: что ключ NocoDB её видит, что в
+          ней есть реестр конкурсов, и сравнивает колонки и представления с базой, которая работает сейчас.
+          Переключение действует сразу — на странице и у обработчика задач (идущие задачи доделываются со старой
+          базой). Выбор хранится на этом сайте: на ноутбуке и на сервере переключают отдельно.</p>
+        <div class="u-groups" id="b-clients"></div>
+        <p class="status" id="b-status"></p>
       </section>
 
       <section class="panel" id="t-events" hidden>

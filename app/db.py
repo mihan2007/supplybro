@@ -99,6 +99,19 @@ CREATE TABLE IF NOT EXISTS noco_links (
     updated_at      REAL,
     PRIMARY KEY (client_id, internal)
 );
+
+-- База NocoDB клиента, выбранная в админ-панели (0.21.0): главнее .env и config/clients.json (читает config.py).
+CREATE TABLE IF NOT EXISTS client_bases (
+    client_id         TEXT PRIMARY KEY,
+    url               TEXT NOT NULL,            -- адрес NocoDB (https://app.nocodb.com)
+    workspace_id      TEXT NOT NULL,
+    base_id           TEXT NOT NULL,
+    registry_table_id TEXT NOT NULL,
+    base_title        TEXT NOT NULL DEFAULT '',
+    registry_title    TEXT NOT NULL DEFAULT '',
+    updated_by        TEXT NOT NULL DEFAULT '',
+    updated_at        REAL
+);
 """
 
 
@@ -127,6 +140,12 @@ def init() -> None:
         if "user_login" not in {r["name"] for r in con.execute("PRAGMA table_info(chat_messages)")}:
             try:
                 con.execute("ALTER TABLE chat_messages ADD COLUMN user_login TEXT")
+            except sqlite3.OperationalError:
+                pass
+        # 0.21.0: база NocoDB, в которой запись (ссылка из другой базы — не своя запись; '' — до 0.21.0).
+        if "base_id" not in {r["name"] for r in con.execute("PRAGMA table_info(noco_links)")}:
+            try:
+                con.execute("ALTER TABLE noco_links ADD COLUMN base_id TEXT NOT NULL DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
 
@@ -431,18 +450,36 @@ def assign_chat_owners() -> int:
 
 # ---------- записи NocoDB ----------
 
-def noco_link(client_id: str, internal: str) -> dict | None:
+def noco_link(client_id: str, internal: str, *, base_id: str) -> dict | None:
+    """Запись NocoDB конкурса, которую знает сайт, — только в базе base_id (текущей базе клиента, 0.21.0).
+
+    Базу клиента можно переключить в админ-панели: номер записи и «создал сайт» из другой базы здесь не годятся
+    (в копии базы те же Id у других конкурсов — сайт поменял бы чужую запись). Ссылка без базы (до 0.21.0)
+    достаётся той базе, где её впервые спросили, — это база клиента на момент обновления сайта."""
     with connect() as con:
         row = con.execute("SELECT * FROM noco_links WHERE client_id=? AND internal=?", (client_id, internal)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        link = dict(row)
+        own = link.get("base_id") or ""
+        if own and own != base_id:
+            return None
+        if not own and base_id:
+            con.execute("UPDATE noco_links SET base_id=? WHERE client_id=? AND internal=? AND base_id=''",
+                        (base_id, client_id, internal))
+            link["base_id"] = base_id
+        return link
 
 
 def save_noco_link(client_id: str, internal: str, folder: str, record_id, created_by_site: bool,
-                   spec_table_id: str = "") -> None:
+                   spec_table_id: str = "", *, base_id: str) -> None:
+    """Одна строка на конкурс клиента: запись в другой базе заменяет прежнюю (её «создал сайт» в старой базе
+    теряется — при возврате на неё сайт осторожнее, а не смелее)."""
     with connect() as con:
         con.execute("""INSERT OR REPLACE INTO noco_links(client_id, internal, folder, record_id, created_by_site,
-                       spec_table_id, updated_at) VALUES (?,?,?,?,?,?,?)""",
-                    (client_id, internal, folder, record_id, int(bool(created_by_site)), spec_table_id, time.time()))
+                       spec_table_id, updated_at, base_id) VALUES (?,?,?,?,?,?,?,?)""",
+                    (client_id, internal, folder, record_id, int(bool(created_by_site)), spec_table_id, time.time(),
+                     base_id))
 
 
 # ---------- документы ----------
