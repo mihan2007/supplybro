@@ -1,6 +1,6 @@
 # SupplyBro — локальный сайт для работы с конкурсами
 
-Инструкция для Claude при работе с этим проектом. Состояние на 11.11.2026, версия 0.22.0 (этапы 1–3, чат по документации, стоимость, запасной DeepSeek, поиск цен,
+Инструкция для Claude при работе с этим проектом. Состояние на 11.11.2026, версия 0.24.0 (этапы 1–3, чат по документации, стоимость, запасной DeepSeek, поиск цен,
 полная цепочка без кнопок до NocoDB, пять очередей обработчика, состояние обработчика в шапке, отмена и пауза задач,
 вход на сайт по логину и паролю с правами ролей и доступом к клиентам, вкладки-переходы, второй клиент ИП Саргсян,
 прайсы поставщиков через чат с записью в «Отдел закупок», общая таблица цен, цены из выдачи «не проверено»,
@@ -8,7 +8,7 @@
 разделы страницы для каждого сотрудника в админ-панели, клиенты и их сотрудники, администратор клиента, панель
 «Конкурсы» с открытием конкурса в новой вкладке, поиск цен и без анализа на сайте — по спецификации NocoDB, подготовка
 заявки одной кнопкой — по умолчанию на DeepSeek Flash, вход для сайта в интернете: без входа — только страница входа, «кто запустил» у задач, сайт — на копии базы NocoDB, кнопка «наверх», промты клиентов и юр. лиц в админ-панели, личные чаты, право «вносить цены поставщиков», базы NocoDB клиентов в админ-панели с проверкой перед переключением,
-тестовый клиент «Тест» — папка ServerTest и тестовая база NocoDB, Dropbox в контейнере для сервера).
+тестовый клиент «Тест» — папка ServerTest и тестовая база NocoDB, синхронизация с Dropbox на сервере через rclone, сервер двойным щелчком).
 
 ## Общение
 
@@ -50,18 +50,44 @@
 - Сервер (пользователь 08.11.2026): Kamatera, Ubuntu, папка `/opt/supplybro`, только `compose.yml` (без прокси),
   в интернет — через Caddy с HTTPS (`reverse_proxy 127.0.0.1:8000`). Поэтому вход обязателен (0.16.0): без входа —
   только `/login`. uvicorn верит `X-Forwarded-*` от `FORWARDED_ALLOW_IPS` (compose.yml: 127.0.0.1 и сети Docker).
-- Dropbox в контейнере (0.22.0, для сервера): сервис `dropbox` в `compose.yml` с `profiles: ["dropbox"]` — включается
-  только `COMPOSE_PROFILES=dropbox` в `.env` сервера (на ноутбуке — нет: там Dropbox для Windows, второй скачал бы
-  те же папки). `dropbox/Dockerfile` — основа `python:3.12-slim-bookworm` (как у сайта), библиотеки для программы
-  без окна (libglapi-mesa, libxcb-*, libxshmfence1, libxxf86vm1…), программа с dropbox.com в `/opt/dropbox-dist`
-  (версию не закрепить — обновляется сама), `/opt/dropbox.py`; `dropbox/start.sh` (от root: `chown 1000` верхних
-  папок, копия программы в том, если её там нет, затем `setpriv` в UID 1000), `dropbox/dropbox-cli.sh` →
-  `/usr/local/bin/dropbox` (`docker compose exec dropbox dropbox status`). Тома: `dropbox-home` → `/home/dropbox`
-  (привязка `.dropbox`, программа с обновлениями), `DROPBOX_DIR` (по умолчанию `/opt/supplybro-dropbox`) →
-  `/home/dropbox/Dropbox`; сайту `TENDERS_DIR=/opt/supplybro-dropbox/Агент`. `run.sh`: с профилем сначала
-  `docker build … -t supplybro-dropbox:dev dropbox` и `up -d dropbox`; нет `TENDERS_DIR` — подсказка (ссылка в
-  `docker compose logs dropbox`, «Up to date») и выход 0. Образ у Claude не собирался (Docker Hub и dropbox.com из
-  песочницы закрыты).
+- Адрес сайта (12.11.2026): https://www.supplybro.ru — домен в reg.ru (DNS ns1/ns2.reg.ru), A-запись `www` →
+  113.30.189.244; у `supplybro.ru` (без www) A-записи 12.11.2026 не было — рекомендовано добавить `@` → тот же IP,
+  после появления — `systemctl restart caddy` (сразу получить сертификат). Caddy на сервере — v2.11.9 из хранилища
+  Cloudsmith (было 2.6.2 из Ubuntu — без сертификатов на IP). `/etc/caddy/Caddyfile` (копии: `.bak` — только xip,
+  `.bak2` — без блока IP): `www.supplybro.ru` → `reverse_proxy 127.0.0.1:8000`; `supplybro.ru`,
+  `113-30-189-244.eu-cloud-xip.com`, `http://113.30.189.244` → `redir https://www.supplybro.ru{uri}`;
+  `https://113.30.189.244` — тоже redir, сертификат Let's Encrypt на IP (`tls { issuer acme { profile shortlived } }`,
+  160 ч, Caddy продлевает сам; проверено 12.11.2026). Вход (cookie) у каждого адреса свой. В коде сайта адресов нет.
+- Сервер с ноутбука (0.24.0): `server/server.sh` + `server/server.conf` (`SERVER=root@113.30.189.244`,
+  `SERVER_DIR=/opt/supplybro`), `.bat` «Сервер - отправить версию» (deploy: `rsync -av --chmod=D755,F644
+  --exclude .env --exclude secrets/ --exclude .git/ --exclude __pycache__/` + `ssh -t … bash run.sh`), «Сервер -
+  терминал» (console), «Сервер - состояние» (status), «Сервер - подключить Dropbox» (`ssh -t -L
+  53682:127.0.0.1:53682 … docker compose exec dropbox dropbox connect`), «Сервер - вход без пароля» (key:
+  ssh-keygen ed25519 + ssh-copy-id). ssh — через `~/.ssh/config` Ubuntu (`Host 113.30.189.244`, ProxyCommand nc на
+  прокси Windows); из PowerShell напрямую сервер не отвечает. Пользователь часто вставляет команды не в то окно —
+  предлагать эти `.bat`.
+- Синхронизация с Dropbox на сервере (0.22.0; с 0.23.0 — rclone): сервис `dropbox` в `compose.yml` с
+  `profiles: ["dropbox"]` — включается только `COMPOSE_PROFILES=dropbox` в `.env` сервера (на ноутбуке — нет: там
+  Dropbox для Windows). 0.22.0–0.22.1 — программа Dropbox для Linux в контейнере (Debian 12, затем Ubuntu 24.04 с
+  приёмами islamdiaa/dropbox-docker): на сервере после привязки висела на «Starting...» (CPU ≈ 0, сеть < 1 МБ), после
+  перезапуска теряла привязку (`instance2` в `~/.dropbox`), повторная чистая привязка не помогла — 11.11.2026
+  заменена. С 0.23.0 `dropbox/Dockerfile` — `ubuntu:24.04` + rclone 1.75.2 с GitHub (сверка SHA256SUMS; 1.76.0 от
+  06.11 моложе двух недель; версия — `ARG SB_RCLONE_VERSION`: имена `RCLONE_*` rclone читает как свои флаги), пользователь `ubuntu` (UID 1000) удаляется, `dropbox` — UID 1000. `dropbox/start.sh`
+  (root: `chown 1000` `/config` и `/data`, затем `setpriv` в 1000, HOME=/config) → `dropbox/sync.sh`: нет remote
+  `dropbox:` — ждёт (статус «не подключён»); первый раз и после кода 7 — `rclone bisync dropbox:$DROPBOX_FOLDER
+  /data/$DROPBOX_FOLDER --resync --resync-mode newer` (отметка `/config/bisync/resync.done`), иначе bisync раз в
+  `DROPBOX_SYNC_SECONDS` (60) с `--workdir /config/bisync --filters-file /config/dropbox-filters.txt` (копия
+  `/etc/supplybro/dropbox-filters.txt` при запуске: bisync пишет рядом `.md5`, в `/etc` нельзя)
+  --create-empty-src-dirs --resilient --recover --max-lock 2m --conflict-resolve newer --conflict-loser num
+  --max-delete 25 -v`; статус — `/config/status.txt`. `dropbox/dropbox-cli.sh` → `/usr/local/bin/dropbox`:
+  `connect` (`rclone config create dropbox dropbox` — без `--auth-no-open-browser`, его `config create` не знает; строки
+  с token не выводятся; OAuth на
+  127.0.0.1:53682 сервера — `network_mode: host`, с ноутбука туннель `ssh -L 53682:127.0.0.1:53682`), `status`,
+  `ls`, `disconnect`. `dropbox/filters.txt` — `*.tmp`, `*.tmp.xlsx` (временные файлы сайта), `~$*`, `.~lock.*#`,
+  `desktop.ini` и т. п. Тома: `dropbox-config` → `/config`, `DROPBOX_DIR` (`/opt/supplybro-dropbox`) → `/data`;
+  сайту `TENDERS_DIR=/opt/supplybro-dropbox/Агент`. Журнал — json-file 3 × 10 МБ. `run.sh`: с профилем сначала
+  `docker build … -t supplybro-dropbox:dev dropbox` и `up -d dropbox`; нет `TENDERS_DIR` — подсказка и выход 0.
+  У Claude проверено только с подставным rclone (rclone, Docker Hub и dropbox.com из песочницы недоступны).
 
 ## Устройство
 
@@ -601,11 +627,15 @@ API отвечал «credit balance is too low»; пополнен в тот ж�
 
 ## Решения пользователя
 
+- 12.11.2026: к серверу подключён домен supplybro.ru (reg.ru) — «чтобы при обращении к IP появлялся сайт». Главный
+  адрес — www.supplybro.ru (A-запись была только у него); IP (http и https), supplybro.ru и старый адрес xip
+  перекидывают на него. Ради сертификата на IP Caddy обновлён с 2.6.2 до 2.11.9 (см. «Запуск»).
 - 11.11.2026: «давай заменим файловую систему на Dropbox… нам нужно, чтобы в Docker крутилось, — просто перенесём на
   сервер и всё» — Dropbox отдельным контейнером в проекте, на сервере включается одной строкой (0.22.0); на ноутбуке
   не включается (там Dropbox для Windows). Для сервера пользователь предложил учётную запись Dropbox агента (agent@
   домена компании), а не свою — в своей вся «Снабжение России» (сервер открыт в интернет). Пароль от неё был
-  отправлен в чат — рекомендовано сменить; в проект и память не записан.
+  отправлен в чат — рекомендовано сменить; в проект и память не записан. Программа Dropbox для Linux на сервере
+  зависла на «Starting...» и после повторной привязки (пользователь: «давай заново привяжем») — с 0.23.0 rclone.
 - 11.11.2026: «в админ-панели — возможность переключаться к разным базам данных NocoDB… тестовая база всего с двумя
   тендерами… по образу и подобию той, что имеется сейчас, чтобы переключение происходило без проблем»; папка
   `Dropbox\Агент\ServerTest` (на сервере — через Dropbox). Выбрано пользователем: отдельный клиент «Тест»; поле базы
@@ -627,7 +657,8 @@ API отвечал «credit balance is too low»; пополнен в тот ж�
 - 10.11.2026: «давай привяжем пока к копии базы данных» — сайт (ноутбук и сервер) работает с копией «Наша»
   `py03vcjrohur7u7`, агент в приложении — со старой; в `clients.json` — копия (0.17.2). Сведение двух баз — позже.
 - 08.11.2026: страница-приветствие `/start` с переходом на вход и вход, который не надо повторять при каждом посещении
-  (0.17.0). Сайт на сервере открывается по адресу https://113-30-189-244.eu-cloud-xip.com.
+  (0.17.0). Сайт на сервере открывался по адресу https://113-30-189-244.eu-cloud-xip.com; с 12.11.2026 —
+  https://www.supplybro.ru (старый адрес и IP перекидывают на него).
 - 08.11.2026: для сайта — копия базы NocoDB «Наша» (`py03vcjrohur7u7`); базу — «просто поменять данные» одной строкой
   (0.16.1, `NOCODB_URL_MAIN`). Какая база главная — решено 10.11.2026: для сайта пока копия (0.17.2).
 - 08.11.2026: папки конкурсов на сервер — копией сейчас (`/opt/supplybro-tenders`, rsync с ноутбука через прокси
@@ -682,7 +713,8 @@ API отвечал «credit balance is too low»; пополнен в тот ж�
 - Тестовая копия NocoDB так и не решена: 27.10.2026 пользователь попросил сразу «анализ и добавление в базу данных»;
   защита — запрет менять чужие записи без подтверждения (см. «NocoDB»).
 - Доступ сотрудникам с других компьютеров — решено 08.11.2026: сервер Kamatera + Caddy с HTTPS (вход — 0.16.0).
-  Открыто: как на сервер попадёт база сайта (`DATA_DIR`), Caddyfile, резервные копии. Папки конкурсов — Dropbox в
-  контейнере (0.22.0); на сервере ещё не включён: привязать, сверить с копией `/opt/supplybro-tenders`, переключить.
+  Открыто: как на сервер попадёт база сайта (`DATA_DIR`), резервные копии. Папки конкурсов — rclone с
+  Dropbox (0.23.0); на сервере: подключить, дождаться «Up to date», сверить с копией `/opt/supplybro-tenders`,
+  переключить `TENDERS_DIR`.
 - Ключ Claude (`sk-ant-usr-…`) работает с API (проверено 27.10.2026: модели claude-sonnet-5-5, claude-opus-5-5,
   claude-haiku-5-5). Ключ был вставлен в чат — рекомендовано выпустить новый и заменить файл. Ключа OpenAI нет.

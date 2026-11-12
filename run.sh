@@ -78,18 +78,17 @@ BUILD_ARGS=(
   --build-arg APT_MIRROR="${APT_MIRROR:-}"
 )
 
-# 3б-0. Dropbox в контейнере (0.22.0, сервер: COMPOSE_PROFILES=dropbox в .env) — собрать и запустить первым:
-#       папка конкурсов появляется, когда сервер привязан к учётной записи Dropbox и скачал её.
+# 3б-0. Синхронизация с Dropbox (0.22.0, с 0.23.0 — rclone; сервер: COMPOSE_PROFILES=dropbox в .env) — собрать
+#       и запустить первой: папка конкурсов появляется, когда Dropbox подключён и папка скачана.
 if [[ ",${COMPOSE_PROFILES:-}," == *",dropbox,"* ]]; then
   docker build --network host "${BUILD_ARGS[@]}" -t supplybro-dropbox:dev dropbox
   docker compose up -d dropbox
   if [ ! -d "${TENDERS_DIR:-}" ]; then
     echo
-    echo "Dropbox запущен, но папки конкурсов пока нет: ${TENDERS_DIR:-(TENDERS_DIR не указан в .env)}"
-    echo "1. Если сервер ещё не привязан к Dropbox — ссылка для привязки в журнале:"
-    echo "     docker compose logs dropbox"
-    echo "   Откройте её в браузере, где вы вошли в учётную запись Dropbox сервера, и подтвердите."
-    echo "2. Как идёт скачивание (ждать «Up to date»):"
+    echo "Синхронизация с Dropbox запущена, но папки конкурсов пока нет: ${TENDERS_DIR:-(TENDERS_DIR не указан в .env)}"
+    echo "1. Если Dropbox ещё не подключён — подключить (один раз; сеанс ssh с туннелем — см. README):"
+    echo "     docker compose exec dropbox dropbox connect"
+    echo "2. Как идёт сверка (ждать «Up to date»):"
     echo "     docker compose exec dropbox dropbox status"
     echo "3. Когда папка появится — снова: bash run.sh"
     exit 0

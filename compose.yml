@@ -3,7 +3,7 @@
 #   docker compose ps              — посмотреть, запущены ли сайт и обработчик
 #   docker compose logs -f web     — журнал сайта (выход — Ctrl+C)
 #   docker compose logs -f worker  — журнал обработчика документов
-#   docker compose down            — остановить (без -v: том dropbox-home хранит привязку к Dropbox)
+#   docker compose down            — остановить (без -v: том dropbox-config хранит подключение к Dropbox)
 # Настройки (папки, порт, прокси, ключи, модели ИИ) — в файле .env рядом.
 # На этом компьютере дополнительно подключается compose.local.yml (см. COMPOSE_FILE в .env).
 # На сервере ещё и Dropbox (сервис dropbox ниже) — строкой COMPOSE_PROFILES=dropbox в .env.
@@ -167,31 +167,44 @@ services:
           create_host_path: false
     restart: unless-stopped
 
-  # Dropbox (0.22.0): на сервере папки конкурсов приходят через Dropbox — программа Dropbox для Linux в своём
-  # контейнере (dropbox/Dockerfile) синхронизирует папку сервера DROPBOX_DIR, а TENDERS_DIR сайта указывает на
-  # папку конкурсов внутри неё (например, /opt/supplybro-dropbox/Агент).
+  # Синхронизация с Dropbox (0.22.0; с 0.23.0 — rclone): на сервере папки конкурсов приходят из Dropbox — rclone
+  # в своём контейнере (dropbox/Dockerfile) раз в минуту сверяет папку DROPBOX_FOLDER учётной записи Dropbox с папкой
+  # сервера DROPBOX_DIR/DROPBOX_FOLDER в обе стороны; сайт берёт конкурсы оттуда (TENDERS_DIR).
   # Запускается только со строкой COMPOSE_PROFILES=dropbox в .env. На компьютере с Dropbox для Windows эту строку
-  # не добавлять: там папку синхронизирует Dropbox для Windows, второй Dropbox скачал бы её ещё раз.
-  #   docker compose logs dropbox                  — ссылка для привязки к учётной записи Dropbox (один раз)
-  #   docker compose exec dropbox dropbox status   — синхронизация («Up to date» — всё скачано и отправлено)
+  # не добавлять: там папку синхронизирует Dropbox для Windows.
+  #   docker compose exec dropbox dropbox connect  — подключить учётную запись Dropbox (один раз, см. README)
+  #   docker compose exec dropbox dropbox status   — последняя сверка («Up to date» — всё на месте)
+  #   docker compose logs --tail 50 dropbox        — что скачано и отправлено, ошибки
   dropbox:
     profiles: ["dropbox"]
     image: supplybro-dropbox:dev
     build:
       context: ./dropbox
-    # Маленький «init» первым процессом: docker compose stop останавливает Dropbox сразу и аккуратно.
+    # Маленький «init» первым процессом: docker compose stop останавливает сверку сразу и аккуратно.
     init: true
+    # Сеть самого сервера: при подключении учётной записи rclone ждёт ответа Dropbox на 127.0.0.1:53682 сервера
+    # (туда ведёт туннель ssh с ноутбука). Порт открыт только на 127.0.0.1 и только во время подключения.
+    network_mode: host
+    environment:
+      DROPBOX_FOLDER: ${DROPBOX_FOLDER:-Агент}
+      DROPBOX_SYNC_SECONDS: ${DROPBOX_SYNC_SECONDS:-60}
     volumes:
-      # Настройки Dropbox (привязка к учётной записи) и сама программа с обновлениями — переживают перезапуск
-      # и пересборку. Удаляется только «docker compose down -v» — тогда сервер придётся привязать заново.
-      - "dropbox-home:/home/dropbox"
-      # Папка Dropbox — папка сервера (DROPBOX_DIR в .env). Её создаёт Docker, права отдаёт dropbox/start.sh.
+      # Настройки rclone (доступ к учётной записи Dropbox) и списки прошлой сверки — переживают перезапуск и
+      # пересборку. Удаляется только «docker compose down -v» — тогда подключить заново.
+      - "dropbox-config:/config"
+      # Папка сервера (DROPBOX_DIR в .env), в ней — папка DROPBOX_FOLDER. Права отдаёт dropbox/start.sh.
       - type: bind
         source: "${DROPBOX_DIR:-/opt/supplybro-dropbox}"
-        target: /home/dropbox/Dropbox
+        target: /data
         bind:
           create_host_path: true
+    # Журнал — не больше 3 × 10 МБ: сверка раз в минуту пишет в него каждый раз.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
 volumes:
-  dropbox-home:
+  dropbox-config:

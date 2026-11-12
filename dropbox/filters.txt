@@ -1,0 +1,15 @@
+# Что не отправлять в Dropbox и не скачивать оттуда (0.23.0). Правка этого файла = полная сверка при следующем
+# проходе (rclone bisync сам заметит и dropbox-sync её запустит).
+# Временные файлы сайта (запись через «.tmp» и переименование).
+- *.tmp
+- *.tmp.xlsx
+# Временные файлы Word / Excel / LibreOffice.
+- ~$*
+- .~lock.*#
+- ~*.tmp
+# Служебные файлы Windows и Dropbox.
+- desktop.ini
+- Thumbs.db
+- .dropbox
+- .dropbox.attr
+- .dropbox.cache/**
