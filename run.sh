@@ -21,18 +21,56 @@ fi
 
 # 1. Настройки из .env. Если файла нет — создаём из образца; если в образце появились
 #    новые настройки — дописываем их в .env (уже заданные значения не трогаем).
+#    Образец (0.25.0): на ноутбуке (Ubuntu в WSL) — .env.example; на сервере — он же, но настройки машины
+#    (пути, прокси, compose-файлы) — из server/server.env.example. Где мы — по /proc/version
+#    (в WSL там «microsoft»); подсказать вручную — SB_MACHINE=laptop|server bash run.sh.
+SERVER_TEMPLATE=server/server.env.example
+machine="${SB_MACHINE:-}"
+if [ -z "$machine" ]; then
+  if grep -qi microsoft /proc/version 2>/dev/null; then machine=laptop; else machine=server; fi
+fi
+[ "$machine" = server ] && [ ! -f "$SERVER_TEMPLATE" ] && machine=laptop   # старая папка без образца сервера
+
+env_keys() { sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$1"; }
+# Строка новой настройки: на сервере — из образца сервера, если она там есть, иначе — из .env.example.
+template_line() {
+  if [ "$machine" = server ] && grep -q "^$1=" "$SERVER_TEMPLATE"; then
+    grep -m1 "^$1=" "$SERVER_TEMPLATE"
+  else
+    grep -m1 "^$1=" .env.example
+  fi
+}
+
 if [ ! -f .env ]; then
-  cp .env.example .env
-  echo "Создан .env из .env.example — проверьте настройки."
+  if [ "$machine" = server ]; then
+    # .env.example, где строки настроек машины заменены строками образца сервера; настройки, которых
+    # в .env.example нет (COMPOSE_PROFILES), — в конце.
+    awk -v tpl="$SERVER_TEMPLATE" '
+      BEGIN {
+        while ((getline l < tpl) > 0)
+          if (l ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { k = l; sub(/=.*/, "", k); v[k] = l; order[++n] = k }
+      }
+      /^[A-Za-z_][A-Za-z0-9_]*=/ { k = $0; sub(/=.*/, "", k); if (k in v) { print v[k]; used[k] = 1; next } }
+      { print }
+      END {
+        head = 0
+        for (i = 1; i <= n; i++) if (!(order[i] in used)) {
+          if (!head) { print ""; print "# Только для сервера (" tpl ")"; head = 1 }
+          print v[order[i]]
+        }
+      }' .env.example > .env
+    echo "Создан .env для сервера (.env.example + $SERVER_TEMPLATE) — проверьте настройки."
+  else
+    cp .env.example .env
+    echo "Создан .env из .env.example — проверьте настройки."
+  fi
 else
-  while IFS= read -r line; do
-    case "$line" in ''|'#'*) continue ;; esac
-    key="${line%%=*}"
+  while IFS= read -r key; do
     if ! grep -q "^${key}=" .env; then
-      printf '\n%s\n' "$line" >> .env
-      echo "В .env добавлена новая настройка: $key"
+      printf '\n%s\n' "$(template_line "$key")" >> .env
+      echo "В .env добавлена новая настройка: $(template_line "$key")"
     fi
-  done < .env.example
+  done < <({ env_keys .env.example; if [ "$machine" = server ]; then env_keys "$SERVER_TEMPLATE"; fi; } | awk '!seen[$0]++')
 fi
 set -a
 . ./.env

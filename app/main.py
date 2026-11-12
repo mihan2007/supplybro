@@ -35,6 +35,9 @@ from .tenders import (DOC_SUBFOLDERS, FolderError, client_root, create_folder, f
 ROOT = Path(__file__).resolve().parent
 VERSION_FILE = ROOT.parent / "VERSION"
 APP_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev"
+# Коммит git, из которого собрана версия (0.25.0): файл пишет «Сервер - отправить версию»; на ноутбуке его нет.
+COMMIT_FILE = ROOT / "COMMIT"
+APP_COMMIT = COMMIT_FILE.read_text(encoding="utf-8").strip() if COMMIT_FILE.exists() else ""
 DATA_DIR = Path(os.environ.get("DATA_DIR_IN_CONTAINER", "/data"))
 
 # Поля «Реестра конкурсов», которые нужны для списка конкурсов и шапки карточки.
@@ -239,7 +242,10 @@ def health() -> dict:
         data_ok = True
     except Exception:
         data_ok = False
-    return {"status": "ok" if data_ok else "degraded", "version": APP_VERSION}
+    info = {"status": "ok" if data_ok else "degraded", "version": APP_VERSION}
+    if APP_COMMIT:
+        info["commit"] = APP_COMMIT
+    return info
 
 
 # ---------- данные для страницы ----------
