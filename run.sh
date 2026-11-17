@@ -106,6 +106,20 @@ if [ ! -s "$YANDEX_KEY_FILE" ]; then
   [ -e "$YANDEX_KEY_FILE" ] || : > "$YANDEX_KEY_FILE"
 fi
 
+# 3а-3. Ключ шифрования паролей почтовых ящиков сотрудников (0.27.0). Нет — создаём (32 случайных байта, как ключ
+#       Fernet). Сам ключ не выводится. Владелец — пользователь сайта в контейнере (UID 1000), читать может только он.
+if [ -z "${MAIL_KEY_FILE:-}" ]; then
+  echo "В .env не указан MAIL_KEY_FILE" >&2
+  exit 1
+fi
+if [ ! -s "$MAIL_KEY_FILE" ]; then
+  mkdir -p "$(dirname "$MAIL_KEY_FILE")"
+  ( umask 077; head -c 32 /dev/urandom | base64 | tr '+/' '-_' > "$MAIL_KEY_FILE" )
+  echo "Создан ключ шифрования паролей почтовых ящиков: $MAIL_KEY_FILE (храните вместе с другими ключами)."
+fi
+chown 1000:1000 "$MAIL_KEY_FILE" 2>/dev/null || true
+chmod 600 "$MAIL_KEY_FILE" 2>/dev/null || true
+
 # Прокси и зеркало пакетов для сборки «коробок» (сайта и Dropbox).
 #    Прокси передаётся в обоих написаниях: apt читает строчные http_proxy/https_proxy, pip — любые.
 BUILD_ARGS=(

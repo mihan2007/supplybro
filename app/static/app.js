@@ -24,7 +24,7 @@ const state = {
   opened: "",           // какой конкурс показан на странице (его разделы загружены)
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0, bid: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0, bid: 0, rq: 0 };
 let docsTimer = null;
 let anTimer = null;
 let anLastJob = null;   // последняя увиденная задача анализа — чтобы заметить её окончание
@@ -524,6 +524,7 @@ function showTender(t) {
   $("chat").hidden = !(t && t.folder) || blockOff("chat");
   $("card").hidden = !(t && t.source === "nocodb") || blockOff("card");
   $("spec").hidden = !(t && t.source === "nocodb") || blockOff("spec");
+  $("requests").hidden = !(t && t.source === "nocodb") || blockOff("prices");
 }
 
 async function loadTender() {
@@ -543,7 +544,7 @@ async function loadTender() {
   delete $("bid-price").dataset.touched;
   delete $("bid-entity").dataset.touched;
   if (t.source === "nocodb") {
-    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat()]);
+    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat(), loadRequests()]);
   } else {
     renderFolderHead(t);
     await Promise.all([loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat()]);
@@ -2749,16 +2750,18 @@ async function askChat(question) {
 
 // ---------- спецификация ----------
 
-async function loadSpec() {
+async function loadSpec(suppliersFresh = false) {
   const my = ++seq.spec;
   if (blockOff("spec")) return;
   setStatus("spec-status", "Загрузка спецификации…");
   $("spec-table").replaceChildren();
   $("spec-count").textContent = "";
   $("spec-link").hidden = true;
+  $("spec-brands").hidden = true;
+  $("head-brands").hidden = true;
   let d;
   try {
-    d = await api(clientPath(`/tenders/${state.tender}/spec`), { view: state.specView });
+    d = await api(clientPath(`/tenders/${state.tender}/spec`), { view: state.specView, suppliers_fresh: suppliersFresh ? "1" : "" });
   } catch (err) {
     if (my === seq.spec) setStatus("spec-status", "Не удалось загрузить спецификацию: " + err.message, true);
     return;
@@ -2775,31 +2778,504 @@ async function loadSpec() {
   $("spec-link").hidden = false;
   fillSelect($("spec-view"), d.views.map((v) => ({ value: v.id, label: v.title })), d.view ? d.view.id : "");
   state.specView = d.view ? d.view.id : "";
-  renderSpec(d.columns, d.rows);
+  renderSpec(d.columns, d.rows, d.brands);
+  renderBrands(d.brands);
   saveUrl();
 }
 
-function renderSpec(columns, rows) {
+function renderSpec(columns, rows, brands) {
   const table = $("spec-table");
   const sticky = (i) => (i === 0 && columns[0] && columns[0].title === "№") ? "stick0"
     : (i === 1 && columns[0] && columns[0].title === "№" && columns[1].title === "Наименование позиции") ? "stick1" : "";
-  const head = el("tr", {}, ...columns.map((c, i) => el("th", { class: sticky(i) || null, text: c.title })));
+  // Колонка «Наши поставщики» (0.26.0) — сразу после закреплённых «№» и «Наименования».
+  const byRow = new Map(((brands && brands.rows) || []).map((m) => [m.i, m]));
+  const withBrands = byRow.size > 0;
+  const brandAt = !withBrands ? -1 : sticky(1) ? 2 : sticky(0) ? 1 : 0;
+  const brandTh = () => el("th", { class: "sb-col", title: "Поставщики из таблицы NocoDB «Поставщики», у которых есть бренд позиции" }, "Наши поставщики");
+  const headCells = columns.map((c, i) => el("th", { class: sticky(i) || null, text: c.title }));
+  if (withBrands) headCells.splice(brandAt, 0, brandTh());
+  const head = el("tr", {}, ...headCells);
   const body = el("tbody");
-  for (const r of rows) {
-    const tr = el("tr");
+  rows.forEach((r, ri) => {
+    const m = byRow.get(ri);
+    const tr = el("tr", { class: m ? `sb-${m.level}${m.strong ? "" : " sb-weak"}` : null });
     columns.forEach((c, i) => {
+      if (i === brandAt) tr.append(brandCell(m, brands));
       const v = r[c.title];
       const numeric = NUMERIC.has(c.uidt) || typeof v === "number";
       const cls = [sticky(i), numeric ? "num" : ""].filter(Boolean).join(" ") || null;
       tr.append(el("td", { class: cls }, renderValue(v, c.uidt)));
     });
+    if (brandAt >= columns.length) tr.append(brandCell(m, brands));
     body.append(tr);
-  }
+  });
   table.replaceChildren(el("thead", {}, head), body);
   // Вторая закреплённая колонка начинается там, где кончается первая.
   const first = table.querySelector("th.stick0");
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
 }
+
+// ---------- наши поставщики по брендам позиций (0.26.0) ----------
+
+const SB_LEVEL = { green: "✅", yellow: "🟡", grey: "⛔" };
+
+function supStatus(s) {
+  if (s.level === "grey") return "не работаем";
+  return s.status ? s.status.replace(/^Надёжный\.\s*/i, "") : "статус не указан";
+}
+
+function supLine(s) {
+  return `${SB_LEVEL[s.level] || ""} ${s.name} — ${supStatus(s)}` + (s.method ? ` · ${s.method}` : "") + (s.site ? ` · ${s.site}` : "");
+}
+
+// Ячейка: «Siemens → Говэй, Владимир, ещё 9»; подсказка — полный список; «?» — бренд найден только в наименовании.
+function brandCell(m, brands) {
+  const td = el("td", { class: "sb-col" });
+  if (!m) return td;
+  const sup = brands.suppliers || {};
+  for (const b of m.brands) {
+    const list = b.ids.map((id) => sup[id]).filter(Boolean);
+    const ok = list.filter((s) => s.level !== "grey");
+    const names = ok.slice(0, 2).map((s) => s.name).join(", ") + (ok.length > 2 ? `, ещё ${ok.length - 2}` : "");
+    const tip = (b.strong ? "" : "Бренд найден только в наименовании позиции — проверьте.\n") +
+      list.map(supLine).join("\n");
+    td.append(el("div", { class: "sb-item" + (b.strong ? "" : " weak"), title: tip },
+      el("b", { text: b.brand + (b.strong ? "" : "?") }), document.createTextNode(" → " + (names || "только «не работаем»"))));
+  }
+  return td;
+}
+
+// Блок «Кому писать» над спецификацией и строка в шапке конкурса.
+function renderBrands(b) {
+  const box = $("spec-brands");
+  const note = $("head-brands");
+  if (!b || (!b.error && !(b.rows || []).length)) { box.hidden = true; note.hidden = true; return; }
+  if (b.error) {
+    replaceSafe(box, el("div", { class: "muted", text: "Наши поставщики по брендам: " + b.error }));
+    box.hidden = false; note.hidden = true;
+    return;
+  }
+  const s = b.summary;
+  const sup = b.suppliers || {};
+  const green = s.positions_green ? ` (у ${s.positions_green} — поставщик «Работаем»)` : "";
+  const headline = `🏷 Наши бренды: ${s.brands.join(", ")} — ${s.positions_matched} из ${s.positions_total} поз.${green}`;
+  replaceSafe(note, document.createTextNode(headline + " "),
+    el("a", { href: "#spec-brands", text: "Кому писать →" }));
+  note.querySelector("a").addEventListener("click", (e) => {
+    e.preventDefault();
+    box.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  note.hidden = false;
+
+  const SHOW = 8;
+  const items = s.by_supplier.map((e, k) => {
+    const x = sup[e.id];
+    const pos = e.positions.length > 12 ? e.positions.slice(0, 12).join(", ") + ` и ещё ${e.positions.length - 12}` : e.positions.join(", ");
+    const site = x.site ? el("a", { href: x.site, target: "_blank", rel: "noopener", text: shortUrl(x.site) + " ↗" }) : null;
+    return el("li", { class: `sb-sup lvl-${x.level}` + (k >= SHOW ? " more" : "") + (e.strong ? "" : " weak"), title: x.info || null },
+      el("b", { text: `${SB_LEVEL[x.level] || ""} ${x.name}` }),
+      document.createTextNode(` — ${supStatus(x)}` + (x.method ? ` · ${x.method}` : "")),
+      site ? document.createTextNode(" · ") : null, site,
+      el("div", { class: "muted", text: `поз. ${pos} · ${e.brands.join(", ")}` + (e.strong ? "" : " · бренд только в наименовании") }));
+  });
+  const list = el("ul", { class: "sb-list collapsed" }, ...items);
+  const extra = s.by_supplier.length - SHOW + s.more;
+  const toggle = extra > 0 ? el("button", { class: "btn ghost small", type: "button", text: `Показать всех (${s.by_supplier.length + s.more})` }) : null;
+  if (toggle) toggle.addEventListener("click", () => { list.classList.remove("collapsed"); toggle.remove(); });
+  const when = b.loaded_at ? new Date(b.loaded_at * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "";
+  const refresh = el("a", { href: "#", text: "↻ обновить поставщиков" });
+  refresh.addEventListener("click", (e) => { e.preventDefault(); loadSpec(true); });
+  replaceSafe(box, ...[
+    el("div", { class: "sb-head", text: headline }),
+    el("div", { class: "muted small", text: "Кому писать — сначала надёжные (✅ «Работаем», 🟡 «Обязательно запрос» или статус не указан), «?» — бренд найден только в наименовании позиции." }),
+    list, toggle,
+    el("div", { class: "muted small sb-foot" },
+      document.createTextNode(`Из таблицы NocoDB «Поставщики» (поставщиков с брендами: ${b.suppliers_total})` + (when ? `, прочитано в ${when} · ` : " · ")), refresh),
+  ].filter(Boolean));
+  box.hidden = false;
+}
+
+// ---------- почтовые ящики сотрудника (0.27.0) ----------
+
+const mailState = { boxes: [], autoHosts: true };
+const jsonPost = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+
+function smallBtn(text, onClick, cls = "btn ghost small") {
+  const b = el("button", { class: cls, type: "button", text });
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+async function openMailboxes() {
+  resetMailForm();
+  $("mail-dlg").showModal();
+  await loadMailboxes();
+}
+
+async function loadMailboxes() {
+  try {
+    const d = await api("/api/me/mailboxes");
+    mailState.boxes = d.boxes || [];
+    setStatus("mail-status", "");
+  } catch (err) {
+    setStatus("mail-status", "Не удалось загрузить ящики: " + err.message, true);
+    return;
+  }
+  renderMailboxes();
+  fillRqBoxes();
+}
+
+function boxState(b) {
+  if (b.check_ok === null) return { cls: "muted", text: "не проверен" };
+  return b.check_ok ? { cls: "ok-text", text: "✅ " + b.check_text } : { cls: "warn-text", text: "⚠ " + b.check_text };
+}
+
+function renderMailboxes() {
+  const list = $("mail-list");
+  if (!mailState.boxes.length) {
+    list.replaceChildren(el("div", { class: "muted", text: "Ящиков пока нет — добавьте первый ниже." }));
+    return;
+  }
+  list.replaceChildren(...mailState.boxes.map((b) => {
+    const st = boxState(b);
+    const servers = `SMTP ${b.smtp_host}:${b.smtp_port}` + (b.imap_host ? ` · IMAP ${b.imap_host}:${b.imap_port}` : " · IMAP не указан");
+    return el("div", { class: "mb-row" + (b.check_ok === false ? " bad" : "") },
+      el("div", { class: "mb-info" },
+        el("div", {}, el("b", { text: b.address }), b.is_default ? el("span", { class: "badge ok", text: "основной" }) : null),
+        el("div", { class: "muted small", text: (b.sender_name ? b.sender_name + " · " : "") + servers }),
+        el("div", { class: "small " + st.cls, text: st.text })),
+      el("div", { class: "mb-tools" },
+        smallBtn("Проверить", () => mailboxAction(b, "check")),
+        b.is_default ? null : smallBtn("Сделать основным", () => mailboxAction(b, "default")),
+        smallBtn("Изменить", () => editMailbox(b)),
+        smallBtn("Удалить", () => mailboxAction(b, "delete"))));
+  }));
+}
+
+async function mailboxAction(b, action) {
+  if (action === "delete" && !confirm(`Удалить ящик ${b.address}? Отправленные с него запросы останутся в журналах.`)) return;
+  setStatus("mail-status", action === "check" ? `Проверяю ${b.address}…` : "");
+  try {
+    const d = await api(`/api/me/mailboxes/${b.id}/${action}`, {}, jsonPost({}));
+    if (action === "check") setStatus("mail-status", `${b.address}: ${d.check.text}`, !d.check.ok);
+  } catch (err) {
+    setStatus("mail-status", err.message, true);
+  }
+  await loadMailboxes();
+}
+
+function resetMailForm() {
+  for (const id of ["mf-id", "mf-address", "mf-name", "mf-password", "mf-login", "mf-smtp", "mf-smtp-port", "mf-imap", "mf-imap-port", "mf-signature"]) $(id).value = "";
+  $("mf-title").textContent = "Добавить ящик";
+  $("mf-password").placeholder = "пароль приложения, не обычный пароль";
+  $("mf-cancel").hidden = true;
+  $("mf-preset").textContent = "";
+  $("mf-more").open = false;
+  mailState.autoHosts = true;
+}
+
+function editMailbox(b) {
+  resetMailForm();
+  $("mf-id").value = b.id;
+  $("mf-address").value = b.address;
+  $("mf-name").value = b.sender_name;
+  $("mf-login").value = b.login;
+  $("mf-smtp").value = b.smtp_host;
+  $("mf-smtp-port").value = b.smtp_port;
+  $("mf-imap").value = b.imap_host;
+  $("mf-imap-port").value = b.imap_port;
+  $("mf-signature").value = b.signature;
+  $("mf-password").placeholder = "пусто — пароль не меняется";
+  $("mf-title").textContent = "Изменить ящик " + b.address;
+  $("mf-cancel").hidden = false;
+  $("mf-more").open = true;
+  mailState.autoHosts = false;
+  $("mf-address").focus();
+}
+
+// Адрес ввели — серверы по домену (Яндекс, Mail.ru, Gmail…), если сотрудник их не менял.
+async function presetForAddress() {
+  const address = $("mf-address").value.trim();
+  if (!address.includes("@")) { $("mf-preset").textContent = ""; return; }
+  let p;
+  try { p = await api("/api/me/mailboxes/preset", { address }); } catch (_) { return; }
+  if (p.known) {
+    if (mailState.autoHosts || !$("mf-smtp").value) {
+      $("mf-smtp").value = p.smtp_host; $("mf-smtp-port").value = p.smtp_port;
+      $("mf-imap").value = p.imap_host; $("mf-imap-port").value = p.imap_port;
+    }
+    $("mf-preset").textContent = `Серверы определены по адресу: ${p.smtp_host} и ${p.imap_host}.`;
+  } else {
+    $("mf-preset").textContent = "Домен незнакомый — укажите серверы в «Серверы, логин и подпись». Почта компании на Яндекс 360 — " +
+      "smtp.yandex.ru (465) и imap.yandex.ru (993).";
+    $("mf-more").open = true;
+  }
+}
+
+async function saveMailbox(e) {
+  e.preventDefault();
+  const body = {
+    id: $("mf-id").value ? Number($("mf-id").value) : undefined,
+    address: $("mf-address").value.trim(), sender_name: $("mf-name").value.trim(), password: $("mf-password").value,
+    login: $("mf-login").value.trim(), smtp_host: $("mf-smtp").value.trim(), smtp_port: $("mf-smtp-port").value.trim(),
+    imap_host: $("mf-imap").value.trim(), imap_port: $("mf-imap-port").value.trim(), signature: $("mf-signature").value,
+  };
+  $("mf-save").disabled = true;
+  setStatus("mail-status", "Сохраняю и проверяю вход в ящик…");
+  try {
+    const d = await api("/api/me/mailboxes", {}, jsonPost(body));
+    setStatus("mail-status", `${d.box.address}: ${d.check.text}`, !d.check.ok);
+    resetMailForm();
+  } catch (err) {
+    setStatus("mail-status", err.message, true);
+  } finally {
+    $("mf-save").disabled = false;
+    $("mf-password").value = "";
+  }
+  await loadMailboxes();
+}
+
+$("me-mail").addEventListener("click", openMailboxes);
+$("rq-boxes").addEventListener("click", openMailboxes);
+$("mail-close").addEventListener("click", () => $("mail-dlg").close());
+$("mail-dlg").addEventListener("close", () => { $("mf-password").value = ""; });
+$("mf-cancel").addEventListener("click", resetMailForm);
+$("mf-address").addEventListener("change", presetForAddress);
+for (const id of ["mf-smtp", "mf-imap"]) $(id).addEventListener("input", () => { mailState.autoHosts = false; });
+$("mail-form").addEventListener("submit", saveMailbox);
+
+// ---------- запросы цен поставщикам (0.27.0) ----------
+
+const rq = { d: null, sending: false, showAll: false };
+const RQ_SHOW = 12;
+const RQ_LEVEL = { green: "✅", yellow: "🟡", grey: "⛔" };
+const isEmail = (v) => /^[^@\s<>,;"']+@[^@\s<>,;"']+\.[^@\s<>,;"']+$/.test(v);
+const addrList = (v) => String(v || "").split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
+
+async function loadRequests() {
+  const my = ++seq.rq;
+  if (blockOff("prices")) return;
+  const t = currentTender();
+  if (!t || t.source !== "nocodb") return;
+  setStatus("rq-status", "Готовлю письма по позициям спецификации…");
+  for (const id of ["rq-tools", "rq-actions", "rq-jh", "rq-journal-wrap", "rq-hint"]) $(id).hidden = true;
+  $("rq-letters").replaceChildren();
+  $("rq-count").textContent = "";
+  let d;
+  try {
+    d = await api(clientPath(`/tenders/${state.tender}/requests`), { folder: t.folder || "" });
+  } catch (err) {
+    if (my === seq.rq) setStatus("rq-status", "Не удалось подготовить письма: " + err.message, true);
+    return;
+  }
+  if (my !== seq.rq) return;
+  rq.d = d;
+  rq.showAll = false;
+  for (const L of d.letters) { L.dirty = false; L.result = null; }
+  mailState.boxes = d.boxes || [];
+  renderRequests();
+}
+
+function fillRqBoxes() {
+  const sel = $("rq-box");
+  const keep = sel.value;
+  const boxes = mailState.boxes;
+  if (!boxes.length) {
+    fillSelect(sel, [{ value: "", label: "— ящиков нет —" }]);
+  } else {
+    const def = boxes.find((b) => b.is_default) || boxes[0];
+    fillSelect(sel, boxes.map((b) => ({ value: String(b.id), label: b.address + (b.check_ok === false ? " ⚠" : "") })),
+      boxes.some((b) => String(b.id) === keep) ? keep : String(def.id));
+  }
+  if (rq.d) renderRqHint();
+}
+
+function renderRqHint() {
+  const h = $("rq-hint");
+  const parts = [];
+  if (!mailState.boxes.length && rq.d.can_send) parts.push("Чтобы отправлять запросы, добавьте свой почтовый ящик: «✉ Мои ящики».");
+  if (rq.d.brands_error) parts.push("Поставщики по брендам: " + rq.d.brands_error + ".");
+  h.textContent = parts.join(" ");
+  h.hidden = !parts.length;
+}
+
+function rqBody(L) {
+  const by = new Map(rq.d.positions.map((p) => [p.n, p]));
+  const lines = L.positions.map((n) => by.get(n)).filter(Boolean).map((p) => p.line).join("\n");
+  return rq.d.intro + lines + ($("rq-xlsx").checked ? rq.d.outro_xlsx : rq.d.outro_plain);
+}
+
+function renderRequests() {
+  const d = rq.d;
+  fillRqBoxes();
+  if (!d.has_spec) {
+    setStatus("rq-status", "У конкурса нет спецификации в NocoDB — позиции для запроса брать неоткуда.");
+    renderJournal();
+    return;
+  }
+  const sup = d.letters.filter((L) => L.supplier_id);
+  setStatus("rq-status", sup.length ? "" : "По брендам позиций наших поставщиков не нашлось — можно отправить запрос любому адресату (внизу списка).");
+  $("rq-count").textContent = sup.length ? `· ${sup.length} поставщ. по брендам` : "";
+  const can = d.can_send && !document.body.classList.contains("no-purchase");
+  $("rq-tools").hidden = !can || !sup.length;
+  $("rq-actions").hidden = !can;
+  const shown = rq.showAll ? d.letters : [...sup.slice(0, RQ_SHOW), ...d.letters.filter((L) => !L.supplier_id)];
+  const nodes = shown.map((L) => letterCard(L, can));
+  if (!rq.showAll && sup.length > RQ_SHOW) {
+    const more = smallBtn(`Показать всех поставщиков (${sup.length})`, () => { rq.showAll = true; renderRequests(); });
+    nodes.splice(RQ_SHOW, 0, more);
+  }
+  replaceSafe($("rq-letters"), ...nodes);
+  updateSendButton();
+  renderJournal();
+}
+
+function letterCard(L, can) {
+  const card = el("div", { class: `rq-card lvl-${L.level || "none"}` + (L.checked ? " on" : "") });
+  const check = el("input", { type: "checkbox" });
+  check.checked = L.checked;
+  check.disabled = !can;
+  check.addEventListener("change", () => { L.checked = check.checked; card.classList.toggle("on", L.checked); updateSendButton(); });
+  const title = L.supplier_id
+    ? el("span", {}, el("b", { text: `${RQ_LEVEL[L.level] || ""} ${L.supplier_name}` }),
+        document.createTextNode(` — ${L.level === "grey" ? "не работаем" : (L.status || "статус не указан").replace(/^Надёжный\.\s*/i, "")}` +
+          (L.method ? ` · ${L.method}` : "")))
+    : el("b", { text: "Другому адресату (все позиции)" });
+  const pos = L.positions.length > 15 ? L.positions.slice(0, 15).join(", ") + ` и ещё ${L.positions.length - 15}` : L.positions.join(", ");
+  const meta = el("div", { class: "muted small" },
+    document.createTextNode(`поз. ${pos}` + (L.brands.length ? ` · ${L.brands.join(", ")}` : "") + (L.strong ? "" : " · бренд только в наименовании")),
+    L.sent_at ? el("span", { class: "badge ok", text: "запрос отправляли " + new Date(L.sent_at * 1000).toLocaleDateString("ru-RU") }) : null);
+  const to = el("input", { type: "text", value: L.to, placeholder: L.supplier_id ? "адрес почты поставщика" : "адрес почты (несколько — через запятую)" });
+  to.disabled = !can;
+  to.addEventListener("change", () => onAddressChange(L, to, check, card));
+  const head = el("label", { class: "rq-head" }, check, el("div", { class: "rq-title" }, title, meta));
+  const result = el("div", { class: "rq-result small" });
+  if (L.result) {
+    result.className = "rq-result small " + (L.result.ok ? "ok-text" : "warn-text");
+    result.textContent = L.result.ok ? `✅ отправлено (${L.result.tag})` + (L.result.sent_copy ? ` · ${L.result.sent_copy}` : "")
+      : "⚠ " + L.result.error;
+  }
+  card.append(head, el("div", { class: "rq-to" }, el("span", { class: "label", text: "Кому" }), to), result,
+    letterDetails(L, can));
+  return card;
+}
+
+function letterDetails(L, can) {
+  const det = el("details", { class: "rq-text" }, el("summary", { text: "Текст письма и позиции" }));
+  const subject = el("input", { type: "text", value: L.subject });
+  subject.disabled = !can;
+  subject.addEventListener("input", () => { L.subject = subject.value; });
+  const body = el("textarea", { rows: "12" });
+  body.value = L.dirty ? L.body : (L.body = rqBody(L));
+  body.disabled = !can;
+  body.addEventListener("input", () => { L.body = body.value; L.dirty = true; note.hidden = false; });
+  const note = el("div", { class: "muted small", text: "Текст изменён вручную — при смене позиций список в тексте поправьте сами." });
+  note.hidden = !L.dirty;
+  const all = new Set(L.positions);
+  const choices = (L.supplier_id ? L.positions : rq.d.positions.map((p) => p.n)).map((n) => {
+    const p = rq.d.positions.find((x) => x.n === n);
+    const box = el("input", { type: "checkbox" });
+    box.checked = all.has(n);
+    box.disabled = !can;
+    box.addEventListener("change", () => {
+      if (box.checked) all.add(n); else all.delete(n);
+      L.positions = rq.d.positions.map((x) => x.n).filter((x) => all.has(x));
+      if (!L.dirty) body.value = L.body = rqBody(L);
+    });
+    return el("label", { class: "rq-pos small" }, box, document.createTextNode(" " + (p ? p.line : n)));
+  });
+  det.append(el("label", { class: "field" }, el("span", { class: "label", text: "Тема (метка [SB-…] для ответов добавится при отправке)" }), subject),
+    el("label", { class: "field" }, el("span", { class: "label", text: "Текст" }), body), note,
+    el("div", { class: "label", text: "Позиции в письме и во вложении" }), el("div", { class: "rq-poslist" }, ...choices));
+  return det;
+}
+
+async function onAddressChange(L, input, check, card) {
+  L.to = input.value.trim();
+  const ok = addrList(L.to).length > 0 && addrList(L.to).every(isEmail);
+  input.classList.toggle("bad", Boolean(L.to) && !ok);
+  if (ok && !L.checked) { L.checked = true; check.checked = true; card.classList.add("on"); }
+  updateSendButton();
+  if (!ok || !L.supplier_id) return;
+  try {
+    await api(clientPath(`/tenders/${state.tender}/requests/email`), {}, jsonPost({ supplier_id: L.supplier_id, supplier_name: L.supplier_name, email: L.to }));
+    toast(`Адрес ${L.supplier_name} сохранён`);
+  } catch (err) {
+    toast("Адрес не сохранён: " + err.message, true);
+  }
+}
+
+function updateSendButton() {
+  if (!rq.d) return;
+  const n = rq.d.letters.filter((L) => L.checked).length;
+  $("rq-send").textContent = n ? `Отправить выбранные (${n})` : "Отправить выбранные";
+  $("rq-send").disabled = rq.sending || !n || !$("rq-box").value;
+}
+
+async function sendRequests() {
+  const d = rq.d;
+  const chosen = d.letters.filter((L) => L.checked);
+  const box = mailState.boxes.find((b) => String(b.id) === $("rq-box").value);
+  if (!box) return toast("Выберите почтовый ящик (кнопка «✉ Мои ящики»)", true);
+  const bad = chosen.filter((L) => !addrList(L.to).length || !addrList(L.to).every(isEmail));
+  if (bad.length) return toast("Нет адреса или адрес неверный: " + bad.map((L) => L.supplier_name || "другой адресат").join(", "), true);
+  const empty = chosen.filter((L) => !L.positions.length);
+  if (empty.length) return toast("В письме нет позиций: " + empty.map((L) => L.supplier_name || "другой адресат").join(", "), true);
+  if (!confirm(`Отправить ${chosen.length} писем с ящика ${box.address}?`)) return;
+  rq.sending = true;
+  updateSendButton();
+  setStatus("rq-status", `Отправляю ${chosen.length} писем (по одному в секунду)…`);
+  try {
+    const t = currentTender();
+    const r = await api(clientPath(`/tenders/${state.tender}/requests/send`), { folder: (t && t.folder) || "" }, jsonPost({
+      box_id: box.id, with_xlsx: $("rq-xlsx").checked,
+      letters: chosen.map((L) => ({ key: L.key, supplier_id: L.supplier_id, supplier_name: L.supplier_name, to: L.to,
+        subject: L.subject, body: L.dirty ? L.body : rqBody(L), positions: L.positions })),
+    }));
+    const byKey = new Map(r.results.map((x) => [x.key, x]));
+    let ok = 0;
+    for (const L of d.letters) {
+      const x = byKey.get(L.key);
+      if (!x) continue;
+      L.result = x;
+      if (x.ok) { ok++; L.checked = false; L.sent_at = Date.now() / 1000; }
+    }
+    d.journal = r.journal;
+    setStatus("rq-status", `Отправлено ${ok} из ${chosen.length}.` + (ok < chosen.length ? " Причины — в карточках писем." : ""), ok < chosen.length);
+  } catch (err) {
+    setStatus("rq-status", "Не отправлено: " + err.message, true);
+  } finally {
+    rq.sending = false;
+    renderRequests();
+  }
+}
+
+function renderJournal() {
+  const j = (rq.d && rq.d.journal) || [];
+  $("rq-jh").hidden = $("rq-journal-wrap").hidden = !j.length;
+  if (!j.length) return;
+  const head = el("tr", {}, ...["Когда", "С ящика", "Кому", "Поставщик", "Позиции", "Итог", "Метка"].map((x) => el("th", { text: x })));
+  const rows = j.map((r) => el("tr", {},
+    el("td", { text: new Date((r.sent_at || r.created_at) * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) }),
+    el("td", { text: r.mailbox_address + (r.owner ? ` (${r.owner})` : "") }),
+    el("td", { text: r.to_addr }),
+    el("td", { text: r.supplier_name || "—" }),
+    el("td", { text: r.positions.join(", ") }),
+    el("td", { class: r.status === "sent" ? "ok-text" : "warn-text",
+      text: r.status === "sent" ? "✅ отправлено" + (r.sent_copy ? " · " + r.sent_copy : "") : r.status === "sending" ? "отправляется…" : "⚠ " + r.error }),
+    el("td", { class: "muted", text: r.tag })));
+  $("rq-journal").replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
+}
+
+$("rq-send").addEventListener("click", sendRequests);
+$("rq-box").addEventListener("change", updateSendButton);
+$("rq-xlsx").addEventListener("change", () => { if (rq.d) { for (const L of rq.d.letters) if (!L.dirty) L.body = rqBody(L); renderRequests(); } });
+$("rq-all").addEventListener("click", (e) => {
+  e.preventDefault();
+  for (const L of rq.d.letters) if (L.supplier_id && L.level !== "grey" && addrList(L.to).length) L.checked = true;
+  renderRequests();
+});
+$("rq-none").addEventListener("click", (e) => { e.preventDefault(); for (const L of rq.d.letters) L.checked = false; renderRequests(); });
 
 // ---------- обработчик: что выполняется сейчас (шапка) ----------
 
@@ -3252,6 +3728,7 @@ async function loadMe() {
   $("me-name").textContent = d.me.name === d.access.role_title ? d.me.name : `${d.me.name} · ${d.access.role_title}`;
   $("me-name").title = `Логин: ${d.me.login}`;
   $("me-admin").hidden = !d.access.admin_panel;
+  $("me-mail").hidden = !allowed.has("purchase");
   $("me-box").hidden = false;
 }
 $("me-logout").addEventListener("click", async () => {

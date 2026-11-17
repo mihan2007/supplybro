@@ -509,3 +509,61 @@ table.tl-table { width: 100%; }
 }
 /* Длинные сообщения об ошибках (JSON ответа API, ссылки) переносятся — страница не шире экрана телефона (0.15.1). */
 .job-text, .status { overflow-wrap: anywhere; }
+
+/* Наши поставщики по брендам позиций (0.26.0) */
+tbody tr.sb-green td { background: color-mix(in srgb, var(--ok) 10%, var(--panel)); }
+tbody tr.sb-yellow td { background: color-mix(in srgb, var(--warn-bg) 85%, var(--panel)); }
+tbody tr.sb-weak td { background: color-mix(in srgb, var(--chip) 60%, var(--panel)); }
+th.sb-col, td.sb-col { min-width: 170px; max-width: 260px; }
+.sb-item { margin-bottom: 2px; cursor: help; }
+.sb-item.weak { opacity: .75; }
+.sb-box { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 13px; }
+.sb-head { font-weight: 600; margin-bottom: 4px; }
+.sb-list { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+.sb-list.collapsed li.more { display: none; }
+.sb-sup.lvl-grey, .sb-sup.weak { opacity: .7; }
+.sb-foot { margin-top: 6px; }
+.brand-note { margin-top: 10px; font-size: 13px; padding: 6px 10px; border-radius: 8px;
+  background: color-mix(in srgb, var(--ok) 10%, var(--panel)); }
+
+/* Почтовые ящики и запросы поставщикам (0.27.0) */
+.ok-text { color: var(--ok); }
+.dlg { border: 1px solid var(--line); border-radius: 12px; padding: 18px; width: min(760px, 94vw); background: var(--panel);
+  color: var(--text); box-shadow: var(--shadow); }
+.dlg::backdrop { background: rgba(15, 20, 30, .45); }
+.mb-list { display: grid; gap: 8px; margin: 10px 0 16px; }
+.mb-row { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.mb-row.bad { border-color: var(--warn-text); }
+.mb-row .badge { margin-left: 8px; }
+.mb-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+.mb-form { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 10px; }
+.mb-form h3 { margin: 0; font-size: 15px; }
+.mf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.mb-form input[type="email"], .mb-form input[type="password"], .mb-form textarea, .rq-card textarea {
+  width: 100%; min-width: 0; padding: 8px 10px; font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: 8px; box-sizing: border-box; }
+.mf-more summary, .mf-help summary, .rq-text summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+.mf-more[open] { display: grid; gap: 10px; }
+.mf-help ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+.mf-actions { display: flex; gap: 8px; }
+.rq-hint { margin-bottom: 10px; }
+.rq-tools { font-size: 13px; margin-bottom: 8px; }
+.rq-letters { display: grid; gap: 8px; }
+.rq-card { border: 1px solid var(--line); border-left: 4px solid var(--line-strong); border-radius: 8px; padding: 8px 10px;
+  display: grid; gap: 6px; }
+.rq-card.lvl-green { border-left-color: var(--ok); }
+.rq-card.lvl-yellow { border-left-color: var(--warn-text); }
+.rq-card.lvl-grey { opacity: .7; }
+.rq-card.on { background: color-mix(in srgb, var(--accent) 5%, var(--panel)); }
+.rq-head { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.rq-head input { margin-top: 3px; }
+.rq-title .badge { margin-left: 8px; }
+.rq-to { display: grid; grid-template-columns: 60px 1fr; gap: 8px; align-items: center; max-width: 640px; }
+.rq-to input.bad { border-color: var(--bad); }
+.rq-text[open] { display: grid; gap: 8px; }
+.rq-poslist { display: grid; gap: 2px; max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+.rq-pos { display: block; }
+.rq-actions { display: flex; justify-content: flex-end; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
+.rq-jh { margin: 18px 0 8px; font-size: 15px; }
+

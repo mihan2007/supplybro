@@ -157,6 +157,13 @@ echo " Dropbox: $(docker compose exec -T dropbox dropbox status 2>/dev/null </de
 echo
 df -h / | awk 'NR==2 {print " Диск: занято " $3 " из " $2 ", свободно " $4}'
 echo " Docker при старте сервера: $(systemctl is-enabled docker 2>/dev/null || echo '?')"
+echo " Ключ паролей почтовых ящиков: $( [ -s "$(grep '^MAIL_KEY_FILE=' .env | cut -d= -f2-)" ] && echo 'есть' || echo 'нет (создастся при отправке версии)')"
+# Почта (0.27.0): открыты ли с сервера порты почтовых серверов — хостинги иногда закрывают отправку (465 / 587).
+echo " Почтовые серверы с сервера:"
+for hp in smtp.mail.ru:465 imap.mail.ru:993 smtp.yandex.ru:465 imap.yandex.ru:993 smtp.gmail.com:465 smtp.gmail.com:587; do
+  if timeout 6 bash -c "</dev/tcp/${hp%:*}/${hp#*:}" 2>/dev/null; then r="доступен"; else r="НЕ доступен"; fi
+  echo "   $hp — $r"
+done
 EOS
     echo
     env_check

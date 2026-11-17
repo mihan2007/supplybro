@@ -91,6 +91,9 @@ RULES = [
     (re.compile(r"^/pricelists/upload$"), "purchase", "загрузил прайс поставщика"),
     (re.compile(r"^/pricelists/write$"), "purchase", "записал цены поставщика в NocoDB"),
     (re.compile(r"^/pricelists/remove$"), "purchase", "убрал прайс из списка"),
+    # Запросы цен поставщикам по почте (0.27.0) — то же право, что прайсы.
+    (re.compile(r"^/tenders/\d+/requests/send$"), "purchase", "отправил запросы цен поставщикам"),
+    (re.compile(r"^/tenders/\d+/requests/email$"), "purchase", "указал адрес почты поставщика"),
     (re.compile(r"^/chat$"), "chat", "задал вопрос в чате"),
     (re.compile(r"^/chat/clear$"), "chat", "очистил историю чата"),
 ]
@@ -103,6 +106,7 @@ BLOCK_PATHS = [
     (re.compile(r"^/bid(/|$)"), "bid"),
     (re.compile(r"^/(prices|pricelists)(/|$)"), "prices"),
     (re.compile(r"^/tenders/[^/]+/spec$"), "spec"),
+    (re.compile(r"^/tenders/[^/]+/requests(/|$)"), "prices"),
     (re.compile(r"^/chat(/|$)"), "chat"),
 ]
 
@@ -254,6 +258,11 @@ class LoginMiddleware:
                     journal = (rule[2], f"{client_id}{' · ' + folder if folder else ''}")
             elif not can(user, "view"):
                 return await _deny(request, 403, "вашей роли это недоступно")(scope, receive, send)
+        elif path.startswith("/api/me/"):
+            # Своё (0.27.0): почтовые ящики сотрудника — менять может тот, у кого есть право «purchase».
+            if method in MUTATING and not can(user, "purchase"):
+                return await _deny(request, 403, "вашей роли это недоступно: почтовые ящики — для закупщиков")(
+                    scope, receive, send)
         elif path.startswith("/api/") and method in MUTATING and user["role"] != "admin":
             return await _deny(request, 403, "вашей роли это недоступно")(scope, receive, send)
 

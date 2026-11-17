@@ -61,6 +61,8 @@ services:
       CHAT_CACHE_TTL: ${CHAT_CACHE_TTL:-1h}
       # Поиск цен — см. .env.
       YANDEX_KEY_FILE_IN_CONTAINER: /run/secrets/yandex
+      # Ключ шифрования паролей почтовых ящиков (0.27.0): файл в secrets/, отдельно от базы с паролями (DATA_DIR).
+      MAIL_KEY_FILE_IN_CONTAINER: /run/secrets/mail_key
       PRICES_SEARCH: ${PRICES_SEARCH:-deepseek}
       PRICES_JUDGE_MODEL: ${PRICES_JUDGE_MODEL:-claude-haiku-5-5}
       PRICES_ABROAD: ${PRICES_ABROAD:-1}
@@ -122,6 +124,13 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Ключ шифрования паролей почтовых ящиков (0.27.0; создаёт run.sh).
+      - type: bind
+        source: "${MAIL_KEY_FILE:?Укажите MAIL_KEY_FILE в файле .env}"
+        target: /run/secrets/mail_key
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
 
   # Обработчик задач: подготовка документов (распаковка, конвертация, текст, распознавание),
@@ -162,6 +171,13 @@ services:
       - type: bind
         source: "${YANDEX_KEY_FILE:?Укажите YANDEX_KEY_FILE в файле .env}"
         target: /run/secrets/yandex
+        read_only: true
+        bind:
+          create_host_path: false
+      # Ключ шифрования паролей почтовых ящиков (0.27.0; создаёт run.sh).
+      - type: bind
+        source: "${MAIL_KEY_FILE:?Укажите MAIL_KEY_FILE в файле .env}"
+        target: /run/secrets/mail_key
         read_only: true
         bind:
           create_host_path: false

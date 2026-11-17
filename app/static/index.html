@@ -18,6 +18,7 @@
       <!-- Кто вошёл (если вход на сайт включён) -->
       <div class="me-box" id="me-box" hidden>
         <span class="me-name" id="me-name"></span>
+        <button class="btn ghost" id="me-mail" type="button" hidden title="Ящики, с которых отправляются запросы поставщикам">✉ Почтовые ящики</button>
         <a class="btn ghost" id="me-admin" href="/admin" hidden>Админ-панель</a>
         <button class="btn ghost" id="me-logout" type="button">Выйти</button>
       </div>
@@ -93,6 +94,7 @@
         <a class="jump" href="#bid" data-target="bid">Заявка</a>
         <a class="jump" href="#card" data-target="card">NocoDB</a>
         <a class="jump" href="#spec" data-target="spec">Спецификация</a>
+        <a class="jump" href="#requests" data-target="requests">Запросы</a>
         <a class="jump" href="#chat" data-target="chat">Чат</a>
       </nav>
     </div>
@@ -130,6 +132,8 @@
         <div class="links" id="head-links"></div>
       </div>
       <div class="chips" id="head-chips"></div>
+      <!-- Наши бренды (0.26.0): заполняет loadSpec, ссылка ведёт к блоку «Кому писать» в спецификации -->
+      <div class="brand-note" id="head-brands" hidden></div>
     </section>
 
     <!-- Документы конкурса -->
@@ -305,7 +309,34 @@
         </div>
       </div>
       <div class="status" id="spec-status"></div>
+      <!-- Наши поставщики по брендам позиций (0.26.0) -->
+      <div class="sb-box" id="spec-brands" hidden></div>
       <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
+    </section>
+
+    <!-- Запросы цен поставщикам по почте (0.27.0) -->
+    <section class="panel" id="requests" hidden>
+      <div class="section-head">
+        <h2>Запросы поставщикам <span class="muted" id="rq-count"></span></h2>
+        <div class="section-tools">
+          <label class="inline">Отправлять с
+            <select id="rq-box"></select>
+          </label>
+          <button class="btn ghost small need-purchase" id="rq-boxes" type="button">✉ Мои ящики</button>
+        </div>
+      </div>
+      <div class="status" id="rq-status"></div>
+      <div class="rq-hint muted small" id="rq-hint" hidden></div>
+      <div class="rq-tools need-purchase" id="rq-tools" hidden>
+        <a href="#" id="rq-all">выбрать всех с адресом</a> · <a href="#" id="rq-none">снять все</a>
+      </div>
+      <div class="rq-letters" id="rq-letters"></div>
+      <div class="rq-actions need-purchase" id="rq-actions" hidden>
+        <label class="inline"><input type="checkbox" id="rq-xlsx" checked> приложить перечень позиций (Excel)</label>
+        <button class="btn primary" id="rq-send" type="button">Отправить выбранные</button>
+      </div>
+      <h3 class="rq-jh" id="rq-jh" hidden>Отправленные запросы</h3>
+      <div class="table-wrap" id="rq-journal-wrap" hidden><table id="rq-journal"></table></div>
     </section>
 
     <!-- Вопросы по документации (чат): ответы только по документам конкурса, со ссылками -->
@@ -334,6 +365,52 @@
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
   <div class="toast" id="toast" role="status" hidden></div>
+  <!-- Мои почтовые ящики (0.27.0) -->
+  <dialog class="dlg" id="mail-dlg">
+    <div class="section-head">
+      <h2>Мои почтовые ящики</h2>
+      <button class="btn ghost small" id="mail-close" type="button">Закрыть</button>
+    </div>
+    <p class="muted small">С этих ящиков сайт отправляет запросы цен поставщикам (позже — и читает ответы). Ящики и пароли
+      видны только вам; пароль хранится на сервере зашифрованным и обратно на страницу не отдаётся.</p>
+    <div class="status" id="mail-status"></div>
+    <div class="mb-list" id="mail-list"></div>
+    <form class="mb-form" id="mail-form" autocomplete="off">
+      <h3 id="mf-title">Добавить ящик</h3>
+      <input type="hidden" id="mf-id">
+      <div class="mf-grid">
+        <label class="field"><span class="label">Адрес почты</span><input id="mf-address" type="email" placeholder="zakupki@yandex.ru" required></label>
+        <label class="field"><span class="label">Имя отправителя</span><input id="mf-name" type="text" placeholder="Иван Петров, ООО «Простор»"></label>
+        <label class="field"><span class="label">Пароль приложения</span><input id="mf-password" type="password" autocomplete="new-password" placeholder="пароль приложения, не обычный пароль"></label>
+      </div>
+      <div class="muted small" id="mf-preset"></div>
+      <details class="mf-more" id="mf-more">
+        <summary>Серверы, логин и подпись</summary>
+        <div class="mf-grid">
+          <label class="field"><span class="label">Логин (если не совпадает с адресом)</span><input id="mf-login" type="text"></label>
+          <label class="field"><span class="label">Сервер SMTP (отправка)</span><input id="mf-smtp" type="text" placeholder="smtp.yandex.ru"></label>
+          <label class="field"><span class="label">Порт SMTP</span><input id="mf-smtp-port" type="text" placeholder="465"></label>
+          <label class="field"><span class="label">Сервер IMAP (чтение)</span><input id="mf-imap" type="text" placeholder="imap.yandex.ru"></label>
+          <label class="field"><span class="label">Порт IMAP</span><input id="mf-imap-port" type="text" placeholder="993"></label>
+        </div>
+        <label class="field"><span class="label">Подпись письма (пусто — имя, телефон из учётной записи, адрес)</span><textarea id="mf-signature" rows="3"></textarea></label>
+      </details>
+      <details class="mf-help">
+        <summary>Где взять пароль приложения</summary>
+        <ul class="small">
+          <li><b>Яндекс</b> (и почта на своём домене в Яндекс 360): id.yandex.ru → «Безопасность» → «Пароли приложений» →
+            «Почта»; в настройках почты → «Почтовые программы» — разрешить доступ по IMAP.</li>
+          <li><b>Mail.ru</b>: «Настройки» → «Безопасность» → «Пароли для внешних приложений».</li>
+          <li><b>Gmail</b>: включить двухэтапную проверку, затем myaccount.google.com/apppasswords.</li>
+        </ul>
+      </details>
+      <div class="mf-actions">
+        <button class="btn primary" id="mf-save" type="submit">Сохранить и проверить</button>
+        <button class="btn ghost" id="mf-cancel" type="button" hidden>Отменить изменение</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

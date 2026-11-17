@@ -10,6 +10,7 @@ SupplyBro — локальный сайт.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -20,7 +21,7 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, chat, db, price_summary, pricelists, tender_list
+from . import access, chat, db, mail, price_summary, pricelists, supplier_brands, supplier_requests, tender_list
 from .noco_tables import own_table_async
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
@@ -439,19 +440,13 @@ async def api_tender(client_id: str, record_id: int, view: str | None = None, fr
 
 
 @app.get("/api/clients/{client_id}/tenders/{record_id}/spec")
-async def api_spec(client_id: str, record_id: int, view: str | None = None, fresh: bool = False):
-    """Спецификация конкурса: строки выбранного представления его таблицы."""
+async def api_spec(client_id: str, record_id: int, view: str | None = None, fresh: bool = False,
+                   suppliers_fresh: bool = False):
+    """Спецификация конкурса: строки выбранного представления его таблицы + наши поставщики по брендам (0.26.0)."""
     client = get_client(client_id)
     noco = NocoClient(client.nocodb)
     record = await noco.record(client.nocodb.registry_table_id, record_id)
-
-    # Только таблица своей базы (0.16.1): ссылка в чужую базу — таблица с тем же названием в своей или запасной путь.
-    table_id = await own_table_async(client.nocodb, spec_table_id(record.get(F_SPEC_LINK)))
-    if not table_id:
-        # Запасной путь: таблица названа внутренним номером конкурса (К939) или «Спецификация — <номер>».
-        for title in (clean(record.get(F_INTERNAL)), f"Спецификация — {clean(record.get(F_NUMBER))}"):
-            if title and (table_id := await noco.find_table_by_title(title, fresh)):
-                break
+    table_id = await _spec_table(client, noco, record, fresh)
     if not table_id:
         return {"found": False}
 
@@ -462,7 +457,9 @@ async def api_spec(client_id: str, record_id: int, view: str | None = None, fres
     else:
         columns = [{"title": c["title"], "uidt": c["uidt"]} for c in meta["columns"]]
     rows = await noco.records(table_id, view_id=chosen["id"] if chosen else None)
+    brands = await _spec_brands(client, noco, table_id, meta, columns, rows, fresh or suppliers_fresh)
     return {
+        "brands": brands,
         "found": True,
         "table_id": table_id,
         "title": meta["title"],
@@ -472,6 +469,161 @@ async def api_spec(client_id: str, record_id: int, view: str | None = None, fres
         "columns": columns,
         "rows": [{c["title"]: r.get(c["title"]) for c in columns} for r in rows],
     }
+
+
+async def _spec_table(client: Client, noco: NocoClient, record: dict, fresh: bool = False) -> str | None:
+    """Таблица спецификации конкурса. Только таблица своей базы (0.16.1): ссылка в чужую базу — таблица с тем же
+    названием в своей или запасной путь: таблица названа внутренним номером (К939) или «Спецификация — <номер>»."""
+    table_id = await own_table_async(client.nocodb, spec_table_id(record.get(F_SPEC_LINK)))
+    if not table_id:
+        for title in (clean(record.get(F_INTERNAL)), f"Спецификация — {clean(record.get(F_NUMBER))}"):
+            if title and (table_id := await noco.find_table_by_title(title, fresh)):
+                break
+    return table_id if table_id and not str(table_id).startswith("pending:") else None
+
+
+async def _spec_brands(client: Client, noco: NocoClient, table_id: str, meta: dict, columns: list[dict],
+                       rows: list[dict], fresh: bool) -> dict:
+    """Наши поставщики по брендам позиций (0.26.0). Колонки марки / производителя, спрятанные в представлении
+    («Сбор цен» у К939 без «Производителя»), дочитываются одним запросом. Ошибка — {error}, спецификация остаётся."""
+    try:
+        shown = {c["title"] for c in columns}
+        brand_cols = [c["title"] for c in meta["columns"] if supplier_brands.BRAND_COL_RE.search(c["title"])
+                      and "стран" not in c["title"].lower() and "," not in c["title"]]
+        missing = [t for t in brand_cols if t not in shown]
+        src = rows
+        if missing and rows and "Id" in rows[0]:
+            try:
+                full = await noco.records(table_id, fields=["Id", *missing])
+                by_id = {r.get("Id"): r for r in full}
+                src = [{**r, **{k: v for k, v in by_id.get(r.get("Id"), {}).items() if k != "Id"}} for r in rows]
+            except NocoError:
+                pass
+        return await supplier_brands.for_spec(client, src, fresh)
+    except Exception as exc:                       # noqa: BLE001 — без поставщиков спецификация всё равно нужна
+        return {"error": f"поставщики по брендам: {exc}"}
+
+
+# ---------- почтовые ящики сотрудника (0.27.0) ----------
+
+def _mail_call(fn, *args):
+    try:
+        return fn(*args)
+    except (mail.MailError, supplier_requests.RequestError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/me/mailboxes")
+def api_mailboxes():
+    """Свои почтовые ящики (без паролей)."""
+    return {"boxes": _mail_call(mail.list_boxes, mail.owner_key())}
+
+
+@app.get("/api/me/mailboxes/preset")
+def api_mailbox_preset(address: str = ""):
+    return mail.preset(address)
+
+
+@app.post("/api/me/mailboxes")
+def api_mailbox_save(data: dict = Body(...)):
+    """Добавить ящик (без id) или изменить свой (пустой пароль — прежний); после сохранения — проверка входа."""
+    owner = mail.owner_key()
+    box = _mail_call(mail.save_box, owner, data)
+    check = _mail_call(mail.check_box, owner, box["id"])
+    return {"box": _mail_call(mail.get_box, owner, box["id"]), "check": check}
+
+
+@app.post("/api/me/mailboxes/{box_id}/check")
+def api_mailbox_check(box_id: int):
+    owner = mail.owner_key()
+    check = _mail_call(mail.check_box, owner, box_id)
+    return {"box": _mail_call(mail.get_box, owner, box_id), "check": check}
+
+
+@app.post("/api/me/mailboxes/{box_id}/default")
+def api_mailbox_default(box_id: int):
+    _mail_call(mail.set_default, mail.owner_key(), box_id)
+    return {"ok": True}
+
+
+@app.post("/api/me/mailboxes/{box_id}/delete")
+def api_mailbox_delete(box_id: int):
+    _mail_call(mail.delete_box, mail.owner_key(), box_id)
+    return {"ok": True}
+
+
+# ---------- запросы цен поставщикам по почте (0.27.0) ----------
+
+async def _request_context(client: Client, record_id: int) -> dict:
+    """Конкурс, строки спецификации (все колонки) и поставщики по брендам (все, без ограничения сводки)."""
+    noco = NocoClient(client.nocodb)
+    record = await noco.record(client.nocodb.registry_table_id, record_id)
+    internal = clean(record.get(F_INTERNAL)) or f"№{record_id}"
+    table_id = await _spec_table(client, noco, record)
+    rows = await noco.records(table_id) if table_id else []
+    try:
+        brands = await supplier_brands.for_spec(client, rows, limit=None) if rows else {}
+    except Exception as exc:                       # noqa: BLE001 — без поставщиков остаётся письмо «другому адресату»
+        brands = {"error": str(exc)}
+    return {"record": record, "internal": internal, "title": clean(record.get(F_TITLE)), "rows": rows,
+            "brands": brands, "has_spec": bool(table_id)}
+
+
+@app.get("/api/clients/{client_id}/tenders/{record_id}/requests")
+async def api_requests(client_id: str, record_id: int, folder: str = ""):
+    """Черновики писем поставщикам по позициям спецификации, свои ящики и журнал отправленных по конкурсу."""
+    client = get_client(client_id)
+    ctx = await _request_context(client, record_id)
+    owner = mail.owner_key()
+    boxes = mail.list_boxes(owner)
+    box = next((b for b in boxes if b["is_default"]), boxes[0] if boxes else None)
+    data = supplier_requests.drafts(client_id=client.id, base_id=client.nocodb.base_id, internal=ctx["internal"],
+                                    title=ctx["title"], rows=ctx["rows"], brands=ctx["brands"], box=box,
+                                    user=access.current_user())
+    return {
+        **data,
+        "internal": ctx["internal"],
+        "has_spec": ctx["has_spec"],
+        "brands_error": (ctx["brands"] or {}).get("error", ""),
+        "boxes": boxes,
+        "journal": supplier_requests.journal(client.id, ctx["internal"]),
+        "can_send": access.can(access.current_user(), "purchase") if access.LOGIN_REQUIRED else True,
+    }
+
+
+@app.post("/api/clients/{client_id}/tenders/{record_id}/requests/send")
+async def api_requests_send(client_id: str, record_id: int, folder: str = "", data: dict = Body(...)):
+    """Отправить выбранные письма с ящика сотрудника: {box_id, with_xlsx, letters: [{key, supplier_id,
+    supplier_name, to, subject, body, positions}]}. Позиции письма — только из спецификации конкурса."""
+    client = get_client(client_id)
+    ctx = await _request_context(client, record_id)
+    positions = supplier_requests.positions_from_rows(ctx["rows"])
+    try:
+        box_id = int(data.get("box_id") or 0)
+    except (TypeError, ValueError):
+        box_id = 0
+    if not box_id:
+        raise HTTPException(400, "выберите почтовый ящик, с которого отправлять")
+    owner = mail.owner_key()
+
+    def run():
+        return supplier_requests.send(owner=owner, user=access.current_user(), client_id=client.id,
+                                      base_id=client.nocodb.base_id, record_id=record_id, internal=ctx["internal"],
+                                      folder=folder, box_id=box_id, letters=list(data.get("letters") or []),
+                                      positions=positions, with_xlsx=bool(data.get("with_xlsx", True)))
+
+    results = await asyncio.to_thread(_mail_call, run)
+    return {"results": results, "journal": supplier_requests.journal(client.id, ctx["internal"])}
+
+
+@app.post("/api/clients/{client_id}/tenders/{record_id}/requests/email")
+def api_requests_email(client_id: str, record_id: int, data: dict = Body(...)):
+    """Запомнить адрес почты поставщика (без отправки)."""
+    client = get_client(client_id)
+    addrs = _mail_call(supplier_requests.parse_addresses, data.get("email"))
+    supplier_requests.remember_email(client.id, client.nocodb.base_id, str(data.get("supplier_id") or ""),
+                                     str(data.get("supplier_name") or ""), ", ".join(addrs), mail.owner_key())
+    return {"ok": True, "email": ", ".join(addrs)}
 
 
 # ---------- документы конкурса (папка в Dropbox) ----------
