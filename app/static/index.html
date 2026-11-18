@@ -91,6 +91,7 @@
         <a class="jump" href="#docs" data-target="docs">Документы</a>
         <a class="jump" href="#analysis" data-target="analysis">Анализ</a>
         <a class="jump" href="#prices" data-target="prices">Цены</a>
+        <a class="jump" href="#offers" data-target="offers">Предложения</a>
         <a class="jump" href="#bid" data-target="bid">Заявка</a>
         <a class="jump" href="#card" data-target="card">NocoDB</a>
         <a class="jump" href="#spec" data-target="spec">Спецификация</a>
@@ -231,6 +232,26 @@
       <div class="usage" id="pr-usage"></div>
     </section>
 
+    <!-- Предложения поставщиков: сравнение цен перед записью в NocoDB (0.29.0) -->
+    <section class="panel" id="offers" hidden>
+      <div class="section-head">
+        <h2>Предложения поставщиков <span class="muted" id="of-info"></span></h2>
+        <div class="section-tools need-offers" id="of-tools" hidden>
+          <button class="btn ghost small" id="of-best" type="button" title="По каждой позиции отметить самую низкую цену без замечаний">Отметить лучшие</button>
+          <button class="btn primary small" id="of-write" type="button">Записать отмеченные в NocoDB</button>
+        </div>
+      </div>
+      <div class="status" id="of-status"></div>
+      <div class="muted small of-legend" id="of-legend" hidden>
+        <span class="of-key best">лучшая цена</span> <span class="of-key over">выше НМЦ</span> <span class="of-key warn">⚠ с замечанием</span>
+        <span class="of-key written">в NocoDB</span> · отмеченные ☑ цены записываются в «Отдел закупок» спецификации (до 10 поставщиков
+        на позицию) только кнопкой «Записать отмеченные»; 💬 — комментарии, ✏ — исправить цену (исходная сохраняется).
+      </div>
+      <div class="table-wrap of-wrap" id="of-wrap"></div>
+      <h3 class="rq-jh" id="of-comments-h" hidden>Комментарии</h3>
+      <div class="of-comments" id="of-comments"></div>
+    </section>
+
     <!-- Подготовка заявки (0.15.0): одна кнопка — требования, состав заявки, заполненные формы, копии документов -->
     <section class="panel" id="bid" hidden>
       <div class="section-head">
@@ -335,6 +356,9 @@
         <label class="inline"><input type="checkbox" id="rq-xlsx" checked> приложить перечень позиций (Excel)</label>
         <button class="btn primary" id="rq-send" type="button">Отправить выбранные</button>
       </div>
+      <div class="notice rq-unmatched" id="rq-unmatched" hidden></div>
+      <h3 class="rq-jh" id="rq-ih" hidden>Ответы поставщиков</h3>
+      <div class="table-wrap" id="rq-inbox-wrap" hidden><table id="rq-inbox"></table></div>
       <h3 class="rq-jh" id="rq-jh" hidden>Отправленные запросы</h3>
       <div class="table-wrap" id="rq-journal-wrap" hidden><table id="rq-journal"></table></div>
     </section>
@@ -365,16 +389,54 @@
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
   <div class="toast" id="toast" role="status" hidden></div>
+  <!-- Предложения поставщиков: комментарии и исправление цены (0.29.0) -->
+  <dialog class="dlg" id="of-dlg">
+    <div class="section-head">
+      <h2 id="ofd-title">Комментарии</h2>
+      <button class="btn ghost small" id="ofd-close" type="button">Закрыть</button>
+    </div>
+    <div class="ofd-edit" id="ofd-edit" hidden>
+      <div class="muted small" id="ofd-orig"></div>
+      <label class="field"><span class="label">Цена, руб. за единицу (с учётом НДС, как в предложении)</span><input id="ofd-price" type="text"></label>
+      <div class="mf-actions">
+        <button class="btn primary small" id="ofd-save-price" type="button">Сохранить цену</button>
+        <button class="btn ghost small" id="ofd-reset" type="button">Вернуть цену из документа</button>
+      </div>
+    </div>
+    <div class="ofd-list" id="ofd-list"></div>
+    <div class="ofd-add" id="ofd-add">
+      <textarea id="ofd-text" rows="3" placeholder="Комментарий: условия, сроки, договорённости…"></textarea>
+      <button class="btn small" id="ofd-save-comment" type="button">Добавить комментарий</button>
+    </div>
+  </dialog>
+
   <!-- Мои почтовые ящики (0.27.0) -->
   <dialog class="dlg" id="mail-dlg">
     <div class="section-head">
       <h2>Мои почтовые ящики</h2>
       <button class="btn ghost small" id="mail-close" type="button">Закрыть</button>
     </div>
-    <p class="muted small">С этих ящиков сайт отправляет запросы цен поставщикам (позже — и читает ответы). Ящики и пароли
+    <p class="muted small">С этих ящиков сайт отправляет запросы цен поставщикам и читает ответы (раз в несколько минут, письма остаются непрочитанными). Ящики и пароли
       видны только вам; пароль хранится на сервере зашифрованным и обратно на страницу не отдаётся.</p>
     <div class="status" id="mail-status"></div>
     <div class="mb-list" id="mail-list"></div>
+    <!-- Ответы поставщиков (0.28.0): проверка почты и письма, которые сайт не смог отнести к конкурсу -->
+    <div class="mb-inbox" id="mail-inbox">
+      <div class="section-head">
+        <h3>Неразобранная почта <span class="muted" id="ib-count"></span></h3>
+        <button class="btn ghost small" id="ib-poll" type="button" title="Сайт сам проверяет почту раз в несколько минут">📥 Проверить почту сейчас</button>
+      </div>
+      <p class="muted small">Ответы на запросы сайт сам относит к конкурсам (по ответу на письмо, метке [SB-…] в теме,
+        отправителю, номеру конкурса) и отдаёт в разбор цен — карточки появляются в чате конкурса. Здесь — письма от
+        поставщиков, которые не удалось отнести однозначно: выберите конкурс.</p>
+      <div class="ib-list" id="ib-list"></div>
+      <details class="ib-skipped" id="ib-skipped" hidden>
+        <summary id="ib-skipped-title">Пропущенные письма</summary>
+        <p class="muted small">Письма, которые сайт получил, но не счёл ответом поставщика (не ответ на запрос, отправителю
+          запросов не было, нет слов про цены с числами или вложений). Если это ответ — отнесите к конкурсу.</p>
+        <div class="ib-list" id="ib-skipped-list"></div>
+      </details>
+    </div>
     <form class="mb-form" id="mail-form" autocomplete="off">
       <h3 id="mf-title">Добавить ящик</h3>
       <input type="hidden" id="mf-id">

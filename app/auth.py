@@ -107,6 +107,9 @@ PERMISSIONS = {
     # 0.20.0, пользователь 10.11.2026: «у закупщика нет прав вносить цены, нужно, чтобы у него были права на
     # добавление цен в базу данных» — прайсы, КП, счета (файлом или сообщением в чате) → «Отдел закупок» в NocoDB.
     "purchase": "Вносить цены поставщиков в NocoDB (прайсы, КП, счета, сообщения)",
+    # 0.29.0, пользователь 18.11.2026: таблица «Предложения поставщиков» — выбор и запись цен в NocoDB только
+    # «закупщик и администратор» (комментировать — всем с правом purchase).
+    "offers": "Выбирать и записывать цены поставщиков в NocoDB («Предложения поставщиков»)",
     "jobs": "Отменять и приостанавливать задачи",
     "staff": "Сотрудники своего клиента (админ-панель)",
     "users": "Все клиенты и администраторы сайта (админ-панель)",
@@ -127,9 +130,9 @@ BLOCKS = {
 
 ROLE_PERMISSIONS = {
     "admin": set(PERMISSIONS),
-    "client_admin": {"view", "chat", "upload", "analyze", "prices", "purchase", "jobs", "staff"},
+    "client_admin": {"view", "chat", "upload", "analyze", "prices", "purchase", "offers", "jobs", "staff"},
     "tender": {"view", "chat", "upload", "analyze", "prices", "purchase", "jobs"},
-    "buyer": {"view", "chat", "prices", "purchase"},
+    "buyer": {"view", "chat", "prices", "purchase", "offers"},
     "logist": {"view", "chat"},
     "viewer": {"view"},
 }

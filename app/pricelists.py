@@ -420,8 +420,10 @@ def process(client_id: str, folder_name: str, folder: Path, progress, cache_dir:
 
 # ---------- запись в спецификацию NocoDB (задача «noco_purch») ----------
 
-def request_write(folder: Path, file_id: str, positions: list[str], by: str) -> dict:
-    """«Записать в спецификацию»: какие позиции файла записать (отмеченные на странице)."""
+def request_write(folder: Path, file_id: str, positions: list[str], by: str, overrides: dict | None = None) -> dict:
+    """«Записать в спецификацию»: какие позиции файла записать (отмеченные на странице). overrides — исправленные
+    закупщиком цены {№: руб. за ед.} («Предложения поставщиков», 0.29.0). Прежняя запись — в write_history (чтобы
+    было видно, какие цены уже в NocoDB)."""
     def fn(data):
         e = _entry(data, file_id)
         if not e:
@@ -434,7 +436,10 @@ def request_write(folder: Path, file_id: str, positions: list[str], by: str) -> 
             raise ValueError("не отмечено ни одной найденной позиции")
         for m in e["matches"]:
             m["selected"] = m["pos"] in wanted
-        e["write"] = {"status": "requested", "at": time.time(), "by": by, "positions": sorted(wanted & known)}
+        if e.get("write"):
+            e["write_history"] = ((e.get("write_history") or []) + [e["write"]])[-20:]
+        e["write"] = {"status": "requested", "at": time.time(), "by": by, "positions": sorted(wanted & known),
+                      "overrides": {str(k): float(v) for k, v in (overrides or {}).items() if str(k) in wanted}}
         return e
     return update(folder, fn)
 
@@ -542,7 +547,10 @@ def write_noco(client, folder_name: str, folder: Path, progress) -> str:
         supplier = e.get("supplier") or Path(e["name"]).stem
         date = e.get("doc_date") or datetime.fromtimestamp(e.get("uploaded_at") or time.time(), MSK).strftime("%d.%m.%Y")
         updates, written, skipped = [], [], []
+        overrides = (e.get("write") or {}).get("overrides") or {}
         for m in e.get("matches") or []:
+            if m["pos"] in overrides:                     # цена исправлена закупщиком (0.29.0)
+                m = {**m, "price_rub": overrides[m["pos"]], "note": ((m.get("note") or "") + " цена исправлена закупщиком").strip()}
             if not m.get("selected") or not m.get("price_rub"):
                 continue
             targets = by_n.get(m["pos"]) or []

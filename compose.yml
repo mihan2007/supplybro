@@ -63,6 +63,8 @@ services:
       YANDEX_KEY_FILE_IN_CONTAINER: /run/secrets/yandex
       # Ключ шифрования паролей почтовых ящиков (0.27.0): файл в secrets/, отдельно от базы с паролями (DATA_DIR).
       MAIL_KEY_FILE_IN_CONTAINER: /run/secrets/mail_key
+      # Ответы поставщиков (0.28.0): как часто обработчик проверяет почтовые ящики, минут.
+      MAIL_POLL_MINUTES: ${MAIL_POLL_MINUTES:-5}
       PRICES_SEARCH: ${PRICES_SEARCH:-deepseek}
       PRICES_JUDGE_MODEL: ${PRICES_JUDGE_MODEL:-claude-haiku-5-5}
       PRICES_ABROAD: ${PRICES_ABROAD:-1}

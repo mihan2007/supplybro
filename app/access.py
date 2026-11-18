@@ -89,7 +89,11 @@ RULES = [
     (re.compile(r"^/jobs/\d+/resume$"), "jobs", "продолжил задачу"),
     # Прайсы поставщиков — своё право «purchase» (0.20.0): у закупщика оно есть, у логиста и наблюдателя — нет.
     (re.compile(r"^/pricelists/upload$"), "purchase", "загрузил прайс поставщика"),
-    (re.compile(r"^/pricelists/write$"), "purchase", "записал цены поставщика в NocoDB"),
+    # Запись цен поставщиков в NocoDB и выбор в «Предложениях» (0.29.0) — только «offers» (закупщик, администраторы).
+    (re.compile(r"^/pricelists/write$"), "offers", "записал цены поставщика в NocoDB"),
+    (re.compile(r"^/offers/write$"), "offers", "записал выбранные цены поставщиков в NocoDB"),
+    (re.compile(r"^/offers/(select|best|price)$"), "offers", "выбрал / исправил цены поставщиков"),
+    (re.compile(r"^/offers/comment(/delete)?$"), "purchase", "комментарий к предложениям поставщиков"),
     (re.compile(r"^/pricelists/remove$"), "purchase", "убрал прайс из списка"),
     # Запросы цен поставщикам по почте (0.27.0) — то же право, что прайсы.
     (re.compile(r"^/tenders/\d+/requests/send$"), "purchase", "отправил запросы цен поставщикам"),
@@ -104,7 +108,7 @@ BLOCK_PATHS = [
     (re.compile(r"^/docs(/|$)"), "docs"),
     (re.compile(r"^/analysis(/|$)"), "analysis"),
     (re.compile(r"^/bid(/|$)"), "bid"),
-    (re.compile(r"^/(prices|pricelists)(/|$)"), "prices"),
+    (re.compile(r"^/(prices|pricelists|offers)(/|$)"), "prices"),
     (re.compile(r"^/tenders/[^/]+/spec$"), "spec"),
     (re.compile(r"^/tenders/[^/]+/requests(/|$)"), "prices"),
     (re.compile(r"^/chat(/|$)"), "chat"),

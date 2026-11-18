@@ -333,6 +333,11 @@ def main() -> None:
     threading.Thread(target=lane, args=("pricelists",), kwargs={"only": PRICELIST_KINDS}, name="pricelists",
                      daemon=True).start()
     threading.Thread(target=lane, args=("bid",), kwargs={"only": BID_KINDS}, name="bid", daemon=True).start()
+    # Почта закупщиков (0.28.0): ответы поставщиков — опрос ящиков раз в MAIL_POLL_MINUTES, письма — в папку конкурса
+    # и в разбор прайсов (задача «pricelist»). Не очередь задач: свой поток, своё состояние (mail_inbox_state).
+    from . import mail_inbox
+    mail_inbox.init()
+    threading.Thread(target=mail_inbox.poller, name="mail", daemon=True).start()
     lane("docs", skip=PRICE_KINDS + NOCO_KINDS + PRICELIST_KINDS + BID_KINDS)
 
 

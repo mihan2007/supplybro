@@ -21,7 +21,7 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, chat, db, mail, price_summary, pricelists, supplier_brands, supplier_requests, tender_list
+from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, tender_list
 from .noco_tables import own_table_async
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
@@ -515,8 +515,46 @@ def _mail_call(fn, *args):
 
 @app.get("/api/me/mailboxes")
 def api_mailboxes():
-    """Свои почтовые ящики (без паролей)."""
-    return {"boxes": _mail_call(mail.list_boxes, mail.owner_key())}
+    """Свои почтовые ящики (без паролей) и состояние чтения почты (0.28.0)."""
+    owner = mail.owner_key()
+    boxes = _mail_call(mail.list_boxes, owner)
+    st = mail_inbox.states(owner)
+    for b in boxes:
+        s = st.get(b["id"]) or {}
+        b["inbox"] = {"checked_at": s.get("checked_at"), "ok": s.get("ok"), "error": s.get("error", ""),
+                      "new_count": s.get("new_count", 0), "poll_now": bool(s.get("poll_now"))}
+    return {"boxes": boxes, "poll_minutes": mail_inbox.POLL_MINUTES}
+
+
+# ---------- ответы поставщиков: почта (0.28.0) ----------
+
+@app.get("/api/me/inbox")
+def api_inbox():
+    """«Неразобранная почта» сотрудника и конкурсы, по которым он отправлял запросы (для выбора)."""
+    owner = mail.owner_key()
+    return {"letters": mail_inbox.unmatched(owner), "skipped": mail_inbox.skipped(owner),
+            "tenders": mail_inbox.owner_tenders(owner), "skipped_days": mail_inbox.SKIPPED_DAYS}
+
+
+@app.post("/api/me/inbox/poll")
+def api_inbox_poll():
+    """«Проверить почту сейчас»: обработчик проверит ящики в ближайшие 10 с."""
+    return {"boxes": mail_inbox.request_poll(mail.owner_key())}
+
+
+@app.post("/api/me/inbox/{inbox_id}/assign")
+def api_inbox_assign(inbox_id: int, data: dict = Body(...)):
+    """Отнести письмо к конкурсу (из тех, по которым сотрудник отправлял запросы): в папку конкурса и в разбор цен."""
+    client_id, internal = str(data.get("client_id") or ""), str(data.get("internal") or "")
+    if access.LOGIN_REQUIRED and not access.can_client(access.current_user(), client_id):
+        raise HTTPException(403, "у вашей учётной записи нет доступа к этому клиенту")
+    return {"result": _mail_call(mail_inbox.assign, mail.owner_key(), inbox_id, client_id, internal)}
+
+
+@app.post("/api/me/inbox/{inbox_id}/ignore")
+def api_inbox_ignore(inbox_id: int):
+    _mail_call(mail_inbox.ignore, mail.owner_key(), inbox_id)
+    return {"ok": True}
 
 
 @app.get("/api/me/mailboxes/preset")
@@ -587,6 +625,7 @@ async def api_requests(client_id: str, record_id: int, folder: str = ""):
         "brands_error": (ctx["brands"] or {}).get("error", ""),
         "boxes": boxes,
         "journal": supplier_requests.journal(client.id, ctx["internal"]),
+        "inbox": mail_inbox.for_tender(client.id, ctx["internal"]),
         "can_send": access.can(access.current_user(), "purchase") if access.LOGIN_REQUIRED else True,
     }
 
@@ -1104,6 +1143,79 @@ async def api_pricelists_upload(client_id: str, folder: str, files: list[UploadF
     added = pricelists.add_files(base, saved, (user or {}).get("login", ""))
     job_id = db.enqueue(client.id, folder, "pricelist", _with_entity(None, client, entity))
     return {"files": added, "job_id": job_id}
+
+
+# ---------- предложения поставщиков: сравнение перед записью в NocoDB (0.29.0) ----------
+
+def _offers_ctx(client_id: str, folder: str):
+    client = get_client(client_id)
+    base = folder_path(client, folder)
+    user = access.current_user()
+    return client, base, (user or {}).get("login", "")
+
+
+def _offers_call(fn, *args, **kw):
+    try:
+        return fn(*args, **kw)
+    except ValueError as exc:                       # OfferError и ошибки request_write
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/offers")
+async def api_offers(client_id: str, folder: str):
+    """Таблица «Предложения поставщиков»: позиции × поставщики, лучшие цены, комментарии, что уже в NocoDB."""
+    client, base, _ = _offers_ctx(client_id, folder)
+    positions, source = await asyncio.to_thread(pricelists.tender_positions, client.id, folder, base)
+    data = await asyncio.to_thread(offers.build, base, positions)
+    user = access.current_user()
+    return {**data, "positions_source": source,
+            "can_write": access.can(user, "offers") if access.LOGIN_REQUIRED else True,
+            "can_comment": access.can(user, "purchase") if access.LOGIN_REQUIRED else True,
+            "me": (user or {}).get("login", ""),
+            "noco_job": job_view(db.active_job(client.id, folder, "noco_purch"))}
+
+
+@app.post("/api/clients/{client_id}/offers/select")
+def api_offers_select(client_id: str, folder: str, data: dict = Body(...)):
+    client, base, by = _offers_ctx(client_id, folder)
+    return {"changed": _offers_call(offers.select, base, list(data.get("cells") or []), by)}
+
+
+@app.post("/api/clients/{client_id}/offers/best")
+async def api_offers_best(client_id: str, folder: str):
+    client, base, by = _offers_ctx(client_id, folder)
+    positions, _ = await asyncio.to_thread(pricelists.tender_positions, client.id, folder, base)
+    return {"changed": _offers_call(offers.select_best, base, positions, by)}
+
+
+@app.post("/api/clients/{client_id}/offers/price")
+def api_offers_price(client_id: str, folder: str, data: dict = Body(...)):
+    client, base, by = _offers_ctx(client_id, folder)
+    _offers_call(offers.edit_price, base, str(data.get("file") or ""), str(data.get("pos") or ""), data.get("price_rub"), by)
+    return {"ok": True}
+
+
+@app.post("/api/clients/{client_id}/offers/comment")
+def api_offers_comment(client_id: str, folder: str, data: dict = Body(...)):
+    client, base, by = _offers_ctx(client_id, folder)
+    return {"comment": _offers_call(offers.comment, base, str(data.get("target") or ""), str(data.get("text") or ""), by)}
+
+
+@app.post("/api/clients/{client_id}/offers/comment/delete")
+def api_offers_comment_delete(client_id: str, folder: str, data: dict = Body(...)):
+    client, base, by = _offers_ctx(client_id, folder)
+    _offers_call(offers.delete_comment, base, str(data.get("id") or ""), by, admin=access.is_admin())
+    return {"ok": True}
+
+
+@app.post("/api/clients/{client_id}/offers/write")
+async def api_offers_write(client_id: str, folder: str):
+    """Отмеченные цены → «Отдел закупок» спецификации NocoDB (до 10 на позицию), задачей «noco_purch»."""
+    client, base, by = _offers_ctx(client_id, folder)
+    positions, _ = await asyncio.to_thread(pricelists.tender_positions, client.id, folder, base)
+    res = _offers_call(offers.write, base, positions, by)
+    res["job_id"] = db.enqueue(client.id, folder, "noco_purch")
+    return res
 
 
 @app.post("/api/clients/{client_id}/pricelists/write")

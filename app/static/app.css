@@ -66,7 +66,7 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
 .me-box { display: flex; align-items: center; gap: 8px; }
 .me-name { font-size: 13px; color: var(--muted); white-space: nowrap; max-width: 34vw; overflow: hidden; text-overflow: ellipsis; }
 body.no-upload .need-upload, body.no-analyze .need-analyze, body.no-prices .need-prices, body.no-purchase .need-purchase,
-body.no-chat .need-chat, body.no-jobs .job-ctl { display: none !important; }
+body.no-chat .need-chat, body.no-jobs .job-ctl, body.no-offers .need-offers { display: none !important; }
 
 /* Вкладки-переходы: панель под выбором конкурса (как остальные блоки), при прокрутке закреплена под шапкой.
    Нажатие прокручивает к разделу этой же страницы. Подложка цвета фона закрывает щели между панелями. */
@@ -566,4 +566,44 @@ th.sb-col, td.sb-col { min-width: 170px; max-width: 260px; }
 .rq-pos { display: block; }
 .rq-actions { display: flex; justify-content: flex-end; align-items: center; gap: 14px; margin-top: 12px; flex-wrap: wrap; }
 .rq-jh { margin: 18px 0 8px; font-size: 15px; }
+
+/* Ответы поставщиков (0.28.0) */
+.mb-inbox { border-top: 1px solid var(--line); padding-top: 12px; margin-bottom: 12px; }
+.mb-inbox h3 { margin: 0; font-size: 15px; }
+.ib-list { display: grid; gap: 8px; }
+.ib-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 4px; }
+.ib-row.bad { border-color: var(--warn-text); }
+.ib-preview { white-space: pre-wrap; max-height: 60px; overflow: hidden; }
+.ib-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.ib-tools select { width: auto; min-width: 220px; padding: 5px 8px; }
+.rq-unmatched { margin-top: 12px; }
+.ib-skipped { margin-top: 10px; }
+.ib-skipped summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+.ib-skipped[open] { display: grid; gap: 8px; }
+
+/* Предложения поставщиков (0.29.0) */
+.of-legend { margin-bottom: 8px; line-height: 1.8; }
+.of-key { padding: 1px 6px; border-radius: 4px; }
+.of-key.best, .of-cell.best { background: color-mix(in srgb, var(--ok) 16%, var(--panel)) !important; }
+.of-key.over, .of-cell.over .of-price b { color: var(--bad); }
+.of-key.warn, .of-cell.warn { background: color-mix(in srgb, var(--warn-bg) 80%, var(--panel)); }
+.of-key.written { background: var(--chip); }
+.of-cell.best.warn { background: color-mix(in srgb, var(--ok) 12%, var(--warn-bg)) !important; }
+.of-table th.of-sup { min-width: 170px; max-width: 220px; vertical-align: bottom; }
+.of-cell { min-width: 170px; }
+.of-cell.none { color: var(--muted); text-align: center; }
+.of-cell.written .of-price b { text-decoration: underline dotted; }
+.of-price { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.of-price .badge { font-size: 11px; }
+.of-tools { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.of-src { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
+.of-cm { border: none; background: none; cursor: pointer; padding: 0 2px; font-size: 13px; opacity: .55; }
+.of-cm.has, .of-cm:hover { opacity: 1; }
+tr.of-empty td { color: var(--muted); }
+.of-total td { font-weight: 600; background: var(--sticky) !important; }
+.of-comments { display: grid; gap: 6px; }
+.of-comment { border-left: 3px solid var(--line-strong); padding: 2px 8px; }
+.ofd-edit, .ofd-add { display: grid; gap: 8px; margin: 10px 0; }
+.ofd-add textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px; }
+.ofd-list { display: grid; gap: 8px; max-height: 300px; overflow: auto; }
 

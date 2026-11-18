@@ -24,7 +24,7 @@ const state = {
   opened: "",           // какой конкурс показан на странице (его разделы загружены)
 };
 // Счётчики запросов: ответ на устаревший выбор не перерисовывает страницу.
-const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0, bid: 0, rq: 0 };
+const seq = { tenders: 0, card: 0, spec: 0, docs: 0, an: 0, chat: 0, chatStatus: 0, pr: 0, ps: 0, pl: 0, bid: 0, rq: 0, of: 0 };
 let docsTimer = null;
 let anTimer = null;
 let anLastJob = null;   // последняя увиденная задача анализа — чтобы заметить её окончание
@@ -520,6 +520,7 @@ function showTender(t) {
   $("docs").hidden = !t || blockOff("docs");
   $("analysis").hidden = !(t && t.folder) || blockOff("analysis");
   $("prices").hidden = !(t && t.folder) || blockOff("prices");
+  $("offers").hidden = !(t && t.folder) || blockOff("prices");
   $("bid").hidden = !(t && t.folder) || blockOff("bid");
   $("chat").hidden = !(t && t.folder) || blockOff("chat");
   $("card").hidden = !(t && t.source === "nocodb") || blockOff("card");
@@ -536,6 +537,7 @@ async function loadTender() {
   stopAnalysisPolling();
   stopPricesPolling();
   stopBidPolling();
+  stopOffersPolling();
   if (!t) return;
   anLastJob = null;
   prLastJob = null;
@@ -544,10 +546,10 @@ async function loadTender() {
   delete $("bid-price").dataset.touched;
   delete $("bid-entity").dataset.touched;
   if (t.source === "nocodb") {
-    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat(), loadRequests()]);
+    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat(), loadRequests(), loadOffers()]);
   } else {
     renderFolderHead(t);
-    await Promise.all([loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat()]);
+    await Promise.all([loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat(), loadOffers()]);
   }
   state.fresh = false;
 }
@@ -2476,8 +2478,13 @@ function pricelistCard(f) {
   const box = el("div", { class: "msg pricelist" });
   const link = t ? el("a", { href: clientPath("/docs/file") + "?" + new URLSearchParams({ folder: t.folder, path: f.file }),
     target: "_blank", rel: "noopener", text: f.name }) : el("b", { text: f.name });
-  box.append(el("div", { class: "pl-head" }, el("span", { text: "📎 Документ поставщика: " }), link,
+  box.append(el("div", { class: "pl-head" }, el("span", { text: f.mail ? "📧 Письмо поставщика: " : "📎 Документ поставщика: " }), link,
     el("span", { class: "muted", text: " · " + fmtWhen(f.uploaded_at) + (f.by ? " · " + f.by : "") })));
+  if (f.mail) {
+    // Ответ на запрос по почте (0.28.0): от кого, тема и почему письмо отнесено к этому конкурсу.
+    box.append(el("div", { class: "muted small", text: `от ${f.mail.from}` + (f.mail.supplier ? ` (запрос — ${f.mail.supplier})` : "") +
+      ` · «${f.mail.subject}» · отнесено к конкурсу: ${IB_HOW[f.mail.how] || f.mail.how}` }));
+  }
   const status = (cls, text) => el("div", { class: "pl-status " + cls, text });
   if (f.status === "queued") box.append(status("wait", "В очереди на разбор…"));
   if (f.status === "running") box.append(status("wait", "Читаю файл и ищу позиции конкурса… обычно до минуты."));
@@ -2498,18 +2505,11 @@ function pricelistCard(f) {
       const sel = plSel.get(f.id);
       const w = f.write || {};
       const locked = ["requested", "running"].includes(w.status);
-      const writeBtn = el("button", { class: "btn small primary need-purchase", type: "button" });
-      const updBtn = () => {
-        writeBtn.textContent = `Записать в спецификацию (${sel.size})`;
-        writeBtn.disabled = locked || !sel.size;
-      };
       const head = el("tr", {}, ...["", "№", "Позиция конкурса", "Строка документа", "Цена за ед.", "К НМЦ", "Совпадение"].map((h) => el("th", { text: h })));
       const body = el("tbody");
       for (const m of ms) {
-        const cb = el("input", { type: "checkbox", class: "need-purchase" });
-        cb.checked = sel.has(m.pos);
-        cb.disabled = locked;
-        cb.addEventListener("change", () => { if (cb.checked) sel.add(m.pos); else sel.delete(m.pos); updBtn(); });
+        // 0.29.0: выбор и запись — только в «Предложениях поставщиков»; здесь — что найдено.
+        const cb = m.selected ? document.createTextNode("☑") : document.createTextNode("");
         const price = el("td", { class: "num" }, el("b", { text: m.price_rub ? rub(m.price_rub) : "—" }));
         if (m.currency && m.currency !== "RUB" && m.price) price.append(el("div", { class: "muted small", text: `${m.price} ${m.currency}` }));
         if (m.price && !m.price_in_line) price.append(el("div", { class: "muted small", text: "пересчитано", title: "Этой суммы нет в строке документа — модель пересчитала (упаковка, сумма за количество). Проверьте." }));
@@ -2524,17 +2524,10 @@ function pricelistCard(f) {
           price, el("td", { class: "num" }, ratioBadge(m.price_rub, m.nmc)), kind));
       }
       box.append(el("div", { class: "table-wrap pl-wrap" }, el("table", { class: "pl-table" }, el("thead", {}, head), body)));
-      updBtn();
-      writeBtn.addEventListener("click", async () => {
-        writeBtn.disabled = true;
-        try {
-          await api(clientPath("/pricelists/write"), { folder: currentTender().folder }, { method: "POST",
-            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ file: f.id, positions: [...sel] }) });
-          toast("Запись в спецификацию NocoDB поставлена в очередь");
-        } catch (err) { toast("Не удалось: " + err.message, true); }
-        loadPricelists();
-      });
-      const actions = el("div", { class: "pl-actions" }, writeBtn);
+      // Запись в NocoDB — из таблицы «Предложения поставщиков» (сравнение с другими поставщиками, комментарии).
+      const toOffers = el("a", { class: "btn small", href: "#offers", text: "Сравнить и записать — «Предложения поставщиков» →" });
+      toOffers.addEventListener("click", (e) => { e.preventDefault(); $("offers").scrollIntoView({ behavior: "smooth" }); });
+      const actions = el("div", { class: "pl-actions" }, toOffers);
       if (w.status === "requested") actions.append(el("span", { class: "muted", text: "Запись в NocoDB — в очереди…" }));
       if (w.status === "running") actions.append(el("span", { class: "muted", text: "Записываю в спецификацию NocoDB…" }));
       box.append(actions);
@@ -2916,6 +2909,7 @@ async function loadMailboxes() {
   try {
     const d = await api("/api/me/mailboxes");
     mailState.boxes = d.boxes || [];
+    mailState.pollMinutes = d.poll_minutes || 5;
     setStatus("mail-status", "");
   } catch (err) {
     setStatus("mail-status", "Не удалось загрузить ящики: " + err.message, true);
@@ -2923,7 +2917,104 @@ async function loadMailboxes() {
   }
   renderMailboxes();
   fillRqBoxes();
+  loadInbox();
 }
+
+// ---------- ответы поставщиков (0.28.0) ----------
+
+const IB_HOW = { reply: "ответ на наш запрос", tag: "метка запроса в теме", sender: "по отправителю",
+  content: "по номеру конкурса в письме", manual: "выбрано вручную" };
+const ibState = { letters: [], skipped: [], tenders: [], skippedDays: 14 };
+
+function inboxLine(b) {
+  if (!b.imap_host) return el("div", { class: "small muted", text: "почту не читаем — не указан сервер IMAP" });
+  const i = b.inbox || {};
+  if (i.poll_now) return el("div", { class: "small muted", text: "📥 проверка почты запрошена — в ближайшие секунды…" });
+  if (!i.checked_at) return el("div", { class: "small muted", text: `📥 почта ещё не проверялась (сайт проверяет раз в ${mailState.pollMinutes || 5} мин)` });
+  const when = new Date(i.checked_at * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+  return i.ok === 0
+    ? el("div", { class: "small warn-text", text: `📥 почта не прочитана (${when}): ${i.error}` })
+    : el("div", { class: "small ok-text", text: `📥 почта проверена ${when}` + (i.new_count ? ` · писем по делу: ${i.new_count}` : "") });
+}
+
+async function loadInbox() {
+  try {
+    const d = await api("/api/me/inbox");
+    ibState.letters = d.letters || [];
+    ibState.skipped = d.skipped || [];
+    ibState.tenders = d.tenders || [];
+    ibState.skippedDays = d.skipped_days || 14;
+  } catch (err) {
+    $("ib-list").replaceChildren(el("div", { class: "muted", text: "Не удалось загрузить почту: " + err.message }));
+    return;
+  }
+  renderInbox();
+  renderRqUnmatched();
+}
+
+function renderInbox() {
+  $("ib-count").textContent = ibState.letters.length ? `· ${ibState.letters.length}` : "";
+  if (!ibState.letters.length) $("ib-list").replaceChildren(el("div", { class: "muted small", text: "Неразобранных писем нет." }));
+  else $("ib-list").replaceChildren(...ibState.letters.map(ibRow));
+  // Пропущенные (0.28.1): письмо было, но не похоже на ответ поставщика — видно, почему, и можно отнести вручную.
+  $("ib-skipped").hidden = !ibState.skipped.length;
+  $("ib-skipped-title").textContent = `Пропущенные письма за ${ibState.skippedDays} дней · ${ibState.skipped.length}`;
+  $("ib-skipped-list").replaceChildren(...ibState.skipped.map(ibRow));
+}
+
+function ibRow(L) {
+  {
+    const when = new Date(L.received_at * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+    const cands = new Set((L.candidates || []).map((c) => c.client_id + "|" + c.internal));
+    const opts = [{ value: "", label: "— к какому конкурсу? —" },
+      ...ibState.tenders.map((t) => ({ value: t.client_id + "|" + t.internal, label: (cands.has(t.client_id + "|" + t.internal) ? "★ " : "") + t.internal + (t.folder ? " · " + t.folder : "") }))];
+    const sel = el("select");
+    fillSelect(sel, opts, cands.size === 1 ? [...cands][0] : "");
+    const go = smallBtn("Отнести к конкурсу", async () => {
+      if (!sel.value) return toast("Выберите конкурс", true);
+      const [client_id, internal] = sel.value.split("|");
+      go.disabled = true;
+      try {
+        const r = await api(`/api/me/inbox/${L.id}/assign`, {}, jsonPost({ client_id, internal }));
+        toast(r.result.status === "delivered" ? `Письмо отнесено к ${internal} — цены появятся в чате конкурса` : "Не получилось: " + r.result.error, r.result.status !== "delivered");
+      } catch (err) { toast(err.message, true); }
+      loadInbox();
+      if (rq.d) loadRequests();
+    }, "btn small");
+    const skip = smallBtn("Не относится", async () => {
+      try { await api(`/api/me/inbox/${L.id}/ignore`, {}, jsonPost({})); } catch (err) { toast(err.message, true); }
+      loadInbox();
+    });
+    return el("div", { class: "ib-row" + (L.status === "error" ? " bad" : "") },
+      el("div", {}, el("b", { text: L.from_name ? `${L.from_name} <${L.from_addr}>` : L.from_addr }),
+        el("span", { class: "muted small", text: " · " + when })),
+      el("div", { text: L.subject || "(без темы)" }),
+      L.attachments.length ? el("div", { class: "muted small", text: "Вложения: " + L.attachments.join(", ") }) : null,
+      L.preview ? el("div", { class: "ib-preview muted small", text: L.preview.slice(0, 300) }) : null,
+      L.error ? el("div", { class: "small " + (L.status === "skipped" ? "muted" : "warn-text"), text: (L.status === "skipped" ? "" : "⚠ ") + L.error }) : null,
+      cands.size > 1 ? el("div", { class: "small muted", text: "★ — по этим конкурсам вы писали этому отправителю" }) : null,
+      el("div", { class: "ib-tools" }, sel, go, skip));
+  }
+}
+
+function renderRqUnmatched() {
+  const n = ibState.letters.length;
+  const box = $("rq-unmatched");
+  if (!n || !rq.d) { box.hidden = true; return; }
+  const a = el("a", { href: "#", text: "разобрать" });
+  a.addEventListener("click", (e) => { e.preventDefault(); openMailboxes(); });
+  box.replaceChildren(document.createTextNode(`📬 Неразобранная почта: ${n} — письма поставщиков, которые сайт не смог отнести к конкурсу: `), a);
+  box.hidden = false;
+}
+
+$("ib-poll").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/me/inbox/poll", {}, jsonPost({}));
+    toast(r.boxes ? "Почта будет проверена в ближайшие секунды" : "Нет ящиков с сервером IMAP", !r.boxes);
+  } catch (err) { toast(err.message, true); return; }
+  await loadMailboxes();
+  setTimeout(loadMailboxes, 15000);
+});
 
 function boxState(b) {
   if (b.check_ok === null) return { cls: "muted", text: "не проверен" };
@@ -2943,7 +3034,8 @@ function renderMailboxes() {
       el("div", { class: "mb-info" },
         el("div", {}, el("b", { text: b.address }), b.is_default ? el("span", { class: "badge ok", text: "основной" }) : null),
         el("div", { class: "muted small", text: (b.sender_name ? b.sender_name + " · " : "") + servers }),
-        el("div", { class: "small " + st.cls, text: st.text })),
+        el("div", { class: "small " + st.cls, text: st.text }),
+        inboxLine(b)),
       el("div", { class: "mb-tools" },
         smallBtn("Проверить", () => mailboxAction(b, "check")),
         b.is_default ? null : smallBtn("Сделать основным", () => mailboxAction(b, "default")),
@@ -3074,6 +3166,7 @@ async function loadRequests() {
   for (const L of d.letters) { L.dirty = false; L.result = null; }
   mailState.boxes = d.boxes || [];
   renderRequests();
+  if (d.can_send) loadInbox();
 }
 
 function fillRqBoxes() {
@@ -3250,11 +3343,30 @@ async function sendRequests() {
   }
 }
 
+function renderInboxTable() {
+  const rows = (rq.d && rq.d.inbox) || [];
+  $("rq-ih").hidden = $("rq-inbox-wrap").hidden = !rows.length;
+  if (!rows.length) return;
+  const head = el("tr", {}, ...["Получено", "От кого", "Тема", "Как отнесено", "Файлы — в разбор цен", "Итог"].map((x) => el("th", { text: x })));
+  const body = rows.map((r) => el("tr", {},
+    el("td", { text: new Date(r.received_at * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) }),
+    el("td", { text: r.from_name ? `${r.from_name} <${r.from_addr}>` : r.from_addr }),
+    el("td", { text: r.subject }),
+    el("td", { text: IB_HOW[r.how] || r.how }),
+    el("td", { text: r.files.map((f) => f.split("/").pop()).join(", ") || "—" }),
+    el("td", { class: r.status === "error" ? "warn-text" : "ok-text",
+      text: r.status === "delivered" ? "✅ в чате конкурса" + (r.error ? " · " + r.error : "") : r.status === "processing" ? "разбирается…" : "⚠ " + r.error })));
+  $("rq-inbox").replaceChildren(el("thead", {}, head), el("tbody", {}, ...body));
+}
+
 function renderJournal() {
+  renderInboxTable();
   const j = (rq.d && rq.d.journal) || [];
   $("rq-jh").hidden = $("rq-journal-wrap").hidden = !j.length;
   if (!j.length) return;
-  const head = el("tr", {}, ...["Когда", "С ящика", "Кому", "Поставщик", "Позиции", "Итог", "Метка"].map((x) => el("th", { text: x })));
+  const answers = new Map();
+  for (const a of (rq.d && rq.d.inbox) || []) if (a.request_id && !answers.has(a.request_id)) answers.set(a.request_id, a);
+  const head = el("tr", {}, ...["Когда", "С ящика", "Кому", "Поставщик", "Позиции", "Итог", "Ответ", "Метка"].map((x) => el("th", { text: x })));
   const rows = j.map((r) => el("tr", {},
     el("td", { text: new Date((r.sent_at || r.created_at) * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) }),
     el("td", { text: r.mailbox_address + (r.owner ? ` (${r.owner})` : "") }),
@@ -3263,6 +3375,7 @@ function renderJournal() {
     el("td", { text: r.positions.join(", ") }),
     el("td", { class: r.status === "sent" ? "ok-text" : "warn-text",
       text: r.status === "sent" ? "✅ отправлено" + (r.sent_copy ? " · " + r.sent_copy : "") : r.status === "sending" ? "отправляется…" : "⚠ " + r.error }),
+    el("td", { text: answers.has(r.id) ? "📩 " + new Date(answers.get(r.id).received_at * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : r.status === "sent" ? "ждём" : "" }),
     el("td", { class: "muted", text: r.tag })));
   $("rq-journal").replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
 }
@@ -3276,6 +3389,229 @@ $("rq-all").addEventListener("click", (e) => {
   renderRequests();
 });
 $("rq-none").addEventListener("click", (e) => { e.preventDefault(); for (const L of rq.d.letters) L.checked = false; renderRequests(); });
+
+// ---------- предложения поставщиков: сравнение перед записью в NocoDB (0.29.0) ----------
+
+let ofTimer = null;
+const of = { d: null, dlg: null };
+
+function stopOffersPolling() { if (ofTimer) { clearTimeout(ofTimer); ofTimer = null; } }
+
+async function loadOffers() {
+  const my = ++seq.of;
+  stopOffersPolling();
+  if (blockOff("prices")) return;
+  const t = currentTender();
+  if (!t || !t.folder) return;
+  let d;
+  try {
+    d = await api(clientPath("/offers"), { folder: t.folder });
+  } catch (err) {
+    if (my === seq.of) setStatus("of-status", "Не удалось загрузить предложения: " + err.message, true);
+    return;
+  }
+  if (my !== seq.of) return;
+  of.d = d;
+  renderOffers();
+  const busy = d.pending.length || (d.noco_job && ["queued", "running"].includes(d.noco_job.status));
+  if (busy) ofTimer = setTimeout(loadOffers, 5000);
+}
+
+function ofComments(target) { return ((of.d && of.d.comments) || []).filter((c) => c.target === target); }
+
+function ofCommentBtn(target, label) {
+  const n = ofComments(target).length;
+  const b = el("button", { class: "of-cm" + (n ? " has" : ""), type: "button", title: `Комментарии: ${label}`, text: n ? `💬 ${n}` : "💬" });
+  b.addEventListener("click", (e) => { e.stopPropagation(); openOfferDialog({ target, label }); });
+  return b;
+}
+
+function renderOffers() {
+  const d = of.d;
+  const sups = d.suppliers;
+  const withPrices = Object.keys(d.cells).length;
+  $("of-info").textContent = sups.length ? `· поставщиков: ${sups.length} · позиций с ценами: ${withPrices} из ${d.positions.length}` : "";
+  const notes = [];
+  if (d.pending.length) notes.push(`Разбираются документы поставщиков: ${d.pending.map((p) => p.name).join(", ")}…`);
+  const job = d.noco_job;
+  if (job && job.status === "queued") notes.push("Запись в NocoDB — в очереди…");
+  if (job && job.status === "running") notes.push("Записываю выбранные цены в спецификацию NocoDB…");
+  setStatus("of-status", notes.join(" "));
+  $("of-tools").hidden = !sups.length || !d.can_write;
+  $("of-write").textContent = d.selected ? `Записать отмеченные в NocoDB (${d.selected})` : "Записать отмеченные в NocoDB";
+  $("of-write").disabled = !d.selected || Boolean(job && ["queued", "running"].includes(job.status));
+  if (!sups.length) {
+    replaceSafe($("of-wrap"), el("div", { class: "muted", text: "Предложений пока нет. Они появляются, когда поставщики отвечают на запросы по почте " +
+      "(вкладка «Запросы») или когда прайс, КП или счёт кладут в чат конкурса (📎)." }));
+    $("of-legend").hidden = true;
+    renderOfferComments();
+    return;
+  }
+  $("of-legend").hidden = false;
+  const head = el("tr", {}, el("th", { class: "stick0", text: "№" }), el("th", { class: "stick1", text: "Позиция" }),
+    ...sups.map((s) => {
+      const mails = s.files.filter((f) => f.mail).length;
+      const docs = s.files.length - mails;
+      const src = [mails ? `📧 ${mails}` : "", docs ? `📎 ${docs}` : ""].filter(Boolean).join(" ");
+      const th = el("th", { class: "of-sup", title: s.files.map((f) => `${f.name} · ${fmtWhen(f.at)}` + (f.mail ? ` · письмо от ${f.mail.from}` : "")).join("\n") },
+        el("div", { text: s.name }), el("div", { class: "muted small", text: [src, s.vat && s.vat !== "не указано" ? s.vat : "НДС не указан"].filter(Boolean).join(" · ") }),
+        ofCommentBtn("supplier:" + s.key, "поставщик " + s.name));
+      return th;
+    }));
+  const body = el("tbody");
+  for (const p of d.positions) {
+    const best = d.best[p.n];
+    const tr = el("tr", { class: d.cells[p.n] ? null : "of-empty" },
+      el("td", { class: "stick0 num", text: p.n }),
+      el("td", { class: "stick1" }, el("div", { text: p.name }),
+        el("div", { class: "muted small", text: [[p.qty, p.unit].filter(Boolean).join(" "), p.nmc ? "НМЦ " + rub(p.nmc) + " за ед." : ""].filter(Boolean).join(" · ") }),
+        ofCommentBtn("pos:" + p.n, "позиция " + p.n)));
+    for (const s of sups) tr.append(offerCell(p, s, best));
+    body.append(tr);
+  }
+  const foot = el("tr", { class: "of-total" }, el("td", { class: "stick0" }), el("td", { class: "stick1", text: "Итого по поставщику" }),
+    ...sups.map((s) => {
+      const t = d.totals[s.key];
+      return el("td", { class: "num" }, el("div", { text: `${t.positions} поз.` }), el("div", { text: "≈ " + rub(t.sum) }),
+        el("div", { class: "muted small", text: `лучших цен: ${t.best}` }));
+    }));
+  const table = el("table", { class: "of-table" }, el("thead", {}, head), body, el("tfoot", {}, foot));
+  replaceSafe($("of-wrap"), table);
+  const first = table.querySelector("th.stick0");
+  if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
+  renderOfferComments();
+}
+
+function offerCell(p, s, best) {
+  const offers = ((of.d.cells[p.n] || {})[s.key]) || [];
+  if (!offers.length) return el("td", { class: "of-cell none", text: "—" });
+  const o = offers[0];
+  const isBest = best && best.supplier === s.key;
+  const over = p.nmc && o.price_rub && o.price_rub > p.nmc;
+  const cls = ["of-cell", isBest ? "best" : "", over ? "over" : "", o.warn.length ? "warn" : "", o.written ? "written" : ""].filter(Boolean).join(" ");
+  const td = el("td", { class: cls });
+  const line = el("div", { class: "of-price" });
+  if (of.d.can_write && !o.written) {
+    const cb = el("input", { type: "checkbox", title: "Записать эту цену в NocoDB" });
+    cb.checked = o.selected;
+    cb.addEventListener("change", () => offersAction("/offers/select", { cells: [{ file: o.file_id, pos: p.n, selected: cb.checked }] }));
+    line.append(cb);
+  }
+  line.append(el("b", { text: o.price_rub ? rub(o.price_rub) : "цена не найдена" }));
+  if (isBest) line.append(el("span", { class: "badge ok", text: best.with_warn ? "лучшая ⚠" : "лучшая" }));
+  td.append(line);
+  const facts = [];
+  if (o.currency && o.currency !== "RUB" && o.price) facts.push(`${o.price} ${o.currency}`);
+  if (o.edited) facts.push(`исправлено (было ${o.orig_price_rub ? rub(o.orig_price_rub) : "—"}${o.edited_by ? ", " + o.edited_by : ""})`);
+  if (over) facts.push("выше НМЦ");
+  if (o.written) facts.push("✅ в NocoDB");
+  else if (o.write_status === "requested" || o.write_status === "running") facts.push("записывается…");
+  if (facts.length) td.append(el("div", { class: "muted small", text: facts.join(" · ") }));
+  if (o.warn.length) td.append(el("div", { class: "small warn-text", title: o.warn.join("\n"), text: "⚠ " + o.warn[0] + (o.warn.length > 1 ? ` (+${o.warn.length - 1})` : "") }));
+  if (o.note) td.append(el("div", { class: "muted small", text: o.note }));
+  const tools = el("div", { class: "of-tools" });
+  tools.append(el("span", { class: "muted small of-src", title: `«${o.text || ""}»${o.line_no ? " (строка " + o.line_no + ")" : ""}`, text: "📄 " + o.file }));
+  if (offers.length > 1) tools.append(el("span", { class: "muted small", title: offers.slice(1).map((x) => `${x.file}: ${x.price_rub ? rub(x.price_rub) : "—"}`).join("\n"), text: ` · ещё ${offers.length - 1}` }));
+  if (of.d.can_write && !o.written) {
+    const ed = el("button", { class: "of-cm", type: "button", title: "Исправить цену", text: "✏" });
+    ed.addEventListener("click", () => openOfferDialog({ target: `cell:${o.file_id}|${p.n}`, label: `${s.name}, позиция ${p.n}`, edit: { o, p } }));
+    tools.append(ed);
+  }
+  tools.append(ofCommentBtn(`cell:${o.file_id}|${p.n}`, `${s.name}, позиция ${p.n}`));
+  td.append(tools);
+  return td;
+}
+
+function ofTargetLabel(target) {
+  const d = of.d;
+  if (target.startsWith("supplier:")) {
+    const s = d.suppliers.find((x) => "supplier:" + x.key === target);
+    return "Поставщик: " + (s ? s.name : target.slice(9));
+  }
+  if (target.startsWith("pos:")) return "Позиция № " + target.slice(4);
+  const [fid, n] = target.slice(5).split("|");
+  const s = d.suppliers.find((x) => x.files.some((f) => f.id === fid));
+  return `${s ? s.name : "поставщик"}, позиция № ${n}`;
+}
+
+function renderOfferComments() {
+  const list = ((of.d && of.d.comments) || []).slice().sort((a, b) => b.at - a.at);
+  $("of-comments-h").hidden = !list.length;
+  replaceSafe($("of-comments"), ...list.slice(0, 50).map((c) => el("div", { class: "of-comment" },
+    el("div", { class: "muted small", text: `${ofTargetLabel(c.target)} · ${c.by || "—"} · ${fmtWhen(c.at)}` }),
+    el("div", { text: c.text }))));
+}
+
+async function offersAction(path, body, okText) {
+  const t = currentTender();
+  try {
+    const r = await api(clientPath(path), { folder: t.folder }, jsonPost(body || {}));
+    if (okText) toast(typeof okText === "function" ? okText(r) : okText);
+  } catch (err) {
+    toast(err.message, true);
+  }
+  await loadOffers();
+}
+
+// Окно: комментарии (к цене / поставщику / позиции) и исправление цены.
+function openOfferDialog(ctx) {
+  of.dlg = ctx;
+  $("ofd-title").textContent = ctx.edit ? "Цена: " + ctx.label : "Комментарии: " + ctx.label;
+  const box = $("ofd-edit");
+  box.hidden = !ctx.edit;
+  if (ctx.edit) {
+    const o = ctx.edit.o;
+    $("ofd-price").value = o.price_rub || "";
+    $("ofd-orig").textContent = `В документе «${o.file}»: ${o.orig_price_rub ? rub(o.orig_price_rub) : "цена не найдена"}` +
+      (o.text ? ` — «${o.text}»` : "") + (ctx.edit.p.nmc ? ` · НМЦ ${rub(ctx.edit.p.nmc)} за ед.` : "");
+    $("ofd-reset").hidden = !o.edited;
+  }
+  renderOfferDialogComments();
+  $("ofd-text").value = "";
+  $("ofd-add").hidden = !of.d.can_comment;
+  $("of-dlg").showModal();
+}
+
+function renderOfferDialogComments() {
+  const list = ofComments(of.dlg.target);
+  replaceSafe($("ofd-list"), ...(list.length ? list.map((c) => {
+    const row = el("div", { class: "of-comment" }, el("div", { class: "muted small", text: `${c.by || "—"} · ${fmtWhen(c.at)}` }), el("div", { text: c.text }));
+    if (c.by === of.d.me) {
+      const del = smallBtn("Удалить", async () => {
+        await offersAction("/offers/comment/delete", { id: c.id });
+        renderOfferDialogComments();
+      });
+      row.append(del);
+    }
+    return row;
+  }) : [el("div", { class: "muted small", text: "Комментариев пока нет." })]));
+}
+
+$("ofd-close").addEventListener("click", () => $("of-dlg").close());
+$("ofd-save-comment").addEventListener("click", async () => {
+  const text = $("ofd-text").value.trim();
+  if (!text) return;
+  await offersAction("/offers/comment", { target: of.dlg.target, text });
+  $("ofd-text").value = "";
+  renderOfferDialogComments();
+});
+$("ofd-save-price").addEventListener("click", async () => {
+  const { o, p } = of.dlg.edit;
+  await offersAction("/offers/price", { file: o.file_id, pos: p.n, price_rub: $("ofd-price").value.trim() }, "Цена исправлена");
+  $("of-dlg").close();
+});
+$("ofd-reset").addEventListener("click", async () => {
+  const { o, p } = of.dlg.edit;
+  await offersAction("/offers/price", { file: o.file_id, pos: p.n, price_rub: null }, "Цена — как в документе");
+  $("of-dlg").close();
+});
+$("of-best").addEventListener("click", () => offersAction("/offers/best", {}, (r) => r.changed ? "Отмечены лучшие цены по каждой позиции" : "Лучшие уже отмечены"));
+$("of-write").addEventListener("click", async () => {
+  const n = of.d.selected;
+  if (!confirm(`Записать ${n} отмеченных цен в спецификацию NocoDB («Отдел закупок», до ${of.d.max_slots} поставщиков на позицию)?`)) return;
+  await offersAction("/offers/write", {}, (r) => `В очередь на запись: ${r.positions} цен` +
+    (r.over_limit.length ? `; по позициям ${r.over_limit.join(", ")} мест больше нет — записаны самые низкие` : ""));
+});
 
 // ---------- обработчик: что выполняется сейчас (шапка) ----------
 
@@ -3314,6 +3650,7 @@ async function pollActivity() {
     if (!docsTimer) loadDocs();
     if (!anTimer) loadAnalysis();
     if (!prTimer) loadPrices();
+    if (!ofTimer) loadOffers();
     if (!bidTimer) loadBid();
     loadChatStatus();     // документы подготовились — чат готов
   }
@@ -3724,7 +4061,8 @@ async function loadMe() {
   if (off.has("prices")) { allowed.delete("prices"); allowed.delete("purchase"); }
   if (off.has("analysis")) allowed.delete("analyze");
   if (off.has("chat")) allowed.delete("chat");
-  for (const k of ["upload", "analyze", "prices", "purchase", "jobs", "chat"]) document.body.classList.toggle("no-" + k, !allowed.has(k));
+  if (off.has("prices")) allowed.delete("offers");
+  for (const k of ["upload", "analyze", "prices", "purchase", "offers", "jobs", "chat"]) document.body.classList.toggle("no-" + k, !allowed.has(k));
   $("me-name").textContent = d.me.name === d.access.role_title ? d.me.name : `${d.me.name} · ${d.access.role_title}`;
   $("me-name").title = `Логин: ${d.me.login}`;
   $("me-admin").hidden = !d.access.admin_panel;
