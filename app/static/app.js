@@ -2776,6 +2776,37 @@ async function loadSpec(suppliersFresh = false) {
   saveUrl();
 }
 
+// Текст значения NocoDB для подсказки (вложения и объекты — без подсказки).
+function cellText(v) {
+  if (isEmpty(v)) return "";
+  if (Array.isArray(v)) return typeof v[0] === "object" ? "" : v.join(", ");
+  if (typeof v === "object") return "";
+  return String(v);
+}
+
+const SPEC_RH = ["1", "2", "3", "all"];
+function specRowHeight() {
+  let v = "2";
+  try { v = localStorage.getItem("sb.spec.rh") || "2"; } catch (_) { /* хранилище недоступно */ }
+  return SPEC_RH.includes(v) ? v : "2";
+}
+function applySpecRowHeight(v) {
+  const t = $("spec-table");
+  for (const x of SPEC_RH) t.classList.toggle("rh-" + x, x === v);
+  $("spec-rh").value = v;
+}
+$("spec-rh").addEventListener("change", (e) => {
+  try { localStorage.setItem("sb.spec.rh", e.target.value); } catch (_) { /* не запомнится — не страшно */ }
+  applySpecRowHeight(e.target.value);
+});
+// Щелчок по обрезанной ячейке — показать весь текст (ещё раз — свернуть); ссылки и вложения работают как раньше.
+$("spec-table").addEventListener("click", (e) => {
+  if (e.target.closest("a")) return;
+  const cell = e.target.closest("td .cell");
+  if (cell) cell.classList.toggle("open");
+});
+applySpecRowHeight(specRowHeight());
+
 function renderSpec(columns, rows, brands) {
   const table = $("spec-table");
   const sticky = (i) => (i === 0 && columns[0] && columns[0].title === "№") ? "stick0"
@@ -2797,7 +2828,11 @@ function renderSpec(columns, rows, brands) {
       const v = r[c.title];
       const numeric = NUMERIC.has(c.uidt) || typeof v === "number";
       const cls = [sticky(i), numeric ? "num" : ""].filter(Boolean).join(" ") || null;
-      tr.append(el("td", { class: cls }, renderValue(v, c.uidt)));
+      // Высота строк (0.29.1): содержимое — в .cell, её обрезает класс таблицы rh-*; полный текст — подсказкой при
+      // наведении и щелчком по ячейке (развернуть / свернуть).
+      const full = cellText(v);
+      tr.append(el("td", { class: cls, title: full.length > 30 ? full.slice(0, 3000) : null },
+        el("div", { class: "cell" }, renderValue(v, c.uidt))));
     });
     if (brandAt >= columns.length) tr.append(brandCell(m, brands));
     body.append(tr);
@@ -2873,8 +2908,14 @@ function renderBrands(b) {
   });
   const list = el("ul", { class: "sb-list collapsed" }, ...items);
   const extra = s.by_supplier.length - SHOW + s.more;
-  const toggle = extra > 0 ? el("button", { class: "btn ghost small", type: "button", text: `Показать всех (${s.by_supplier.length + s.more})` }) : null;
-  if (toggle) toggle.addEventListener("click", () => { list.classList.remove("collapsed"); toggle.remove(); });
+  // «Показать всех» / «Скрыть» (0.29.2, пользователь 18.11.2026: «нужна кнопка скрыть, чтобы не перегружать интерфейс»).
+  const showText = `Показать всех (${s.by_supplier.length + s.more})`;
+  const toggle = extra > 0 ? el("button", { class: "btn ghost small", type: "button", text: showText }) : null;
+  if (toggle) toggle.addEventListener("click", () => {
+    const hide = list.classList.toggle("collapsed");
+    toggle.textContent = hide ? showText : `Скрыть (оставить первых ${SHOW})`;
+    if (hide) box.scrollIntoView({ block: "nearest" });
+  });
   const when = b.loaded_at ? new Date(b.loaded_at * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "";
   const refresh = el("a", { href: "#", text: "↻ обновить поставщиков" });
   refresh.addEventListener("click", (e) => { e.preventDefault(); loadSpec(true); });
@@ -3214,9 +3255,13 @@ function renderRequests() {
   $("rq-actions").hidden = !can;
   const shown = rq.showAll ? d.letters : [...sup.slice(0, RQ_SHOW), ...d.letters.filter((L) => !L.supplier_id)];
   const nodes = shown.map((L) => letterCard(L, can));
-  if (!rq.showAll && sup.length > RQ_SHOW) {
-    const more = smallBtn(`Показать всех поставщиков (${sup.length})`, () => { rq.showAll = true; renderRequests(); });
-    nodes.splice(RQ_SHOW, 0, more);
+  if (sup.length > RQ_SHOW) {
+    // «Показать всех поставщиков» / «Скрыть» (0.29.2); отмеченные письма при скрытии не теряются — отправятся.
+    const more = rq.showAll
+      ? smallBtn(`Скрыть (оставить первых ${RQ_SHOW})`, () => { rq.showAll = false; renderRequests(); $("requests").scrollIntoView({ block: "start" }); })
+      : smallBtn(`Показать всех поставщиков (${sup.length})` + ((n) => n ? ` · отмечено среди скрытых: ${n}` : "")(
+          sup.slice(RQ_SHOW).filter((L) => L.checked).length), () => { rq.showAll = true; renderRequests(); });
+    nodes.splice(rq.showAll ? sup.length : RQ_SHOW, 0, more);
   }
   replaceSafe($("rq-letters"), ...nodes);
   updateSendButton();

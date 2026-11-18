@@ -326,6 +326,16 @@
           <label class="inline">Представление
             <select id="spec-view"></select>
           </label>
+          <!-- Высота строк (0.29.1, пользователь 18.11.2026: «не могу регулировать высоту строк, иногда это было очень удобно;
+               если не влазит текст — показать при наведении») -->
+          <label class="inline" title="Сколько строк текста показывать в ячейке; полный текст — при наведении или щелчком по ячейке">Высота строк
+            <select id="spec-rh">
+              <option value="1">1 строка</option>
+              <option value="2">3 строки</option>
+              <option value="3">6 строк</option>
+              <option value="all">весь текст</option>
+            </select>
+          </label>
           <a class="btn ghost small" id="spec-link" target="_blank" rel="noopener" hidden>Открыть в NocoDB ↗</a>
         </div>
       </div>

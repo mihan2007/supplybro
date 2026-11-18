@@ -607,3 +607,15 @@ tr.of-empty td { color: var(--muted); }
 .ofd-add textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px; }
 .ofd-list { display: grid; gap: 8px; max-height: 300px; overflow: auto; }
 
+/* Спецификация: высота строк (0.29.1) — сколько строк текста в ячейке; полный — подсказкой и щелчком */
+#spec-table td .cell { overflow: hidden; }
+#spec-table.rh-1 td .cell { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; }
+#spec-table.rh-2 td .cell { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+#spec-table.rh-3 td .cell { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; }
+#spec-table.rh-1 td .cell .files { display: inline; }
+#spec-table td .cell.open { display: block; -webkit-line-clamp: unset; }
+#spec-table:not(.rh-all) td .cell { cursor: pointer; }
+#spec-table .clamp { display: inline; -webkit-line-clamp: unset; cursor: inherit; }
+#spec-table.rh-1 td { white-space: normal; }
+
+#spec-table.rh-1 td.sb-col .sb-item { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
