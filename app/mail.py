@@ -222,7 +222,8 @@ def save_box(owner: str, data: dict) -> dict:
     }
     if not fields["smtp_host"]:
         raise MailError("для этого домена серверы неизвестны — укажите сервер исходящей почты (SMTP)")
-    password = str(data.get("password") or "")
+    # Пробелы по краям — от копирования (пароли приложений их не содержат; у Gmail пробелы внутри — можно).
+    password = str(data.get("password") or "").strip()
     now = time.time()
     with db.connect() as con:
         if data.get("id"):
@@ -281,8 +282,14 @@ def _explain(exc: Exception, what: str) -> str:
     text = str(exc)
     if isinstance(exc, smtplib.SMTPAuthenticationError) or "AUTHENTICATIONFAILED" in text.upper() \
             or "authentication failed" in text.lower() or "invalid credentials" in text.lower():
-        return (f"{what}: неверный логин или пароль. Нужен пароль приложения (создаётся в настройках безопасности "
-                "почты), а не обычный пароль; у Яндекса и Mail.ru ещё должен быть разрешён доступ почтовыми программами.")
+        # Ответ сервера дословно (17.11.2026: без него не понять, что именно не так — пароль приложения нужен,
+        # доступ программам выключен или пароль неверен). Пароля в ответе сервера нет.
+        raw = exc.smtp_error.decode("utf-8", "replace") if isinstance(exc, smtplib.SMTPAuthenticationError) \
+            and isinstance(exc.smtp_error, bytes) else text
+        raw = re.sub(r"\s+", " ", raw).strip()[:200]
+        return (f"{what}: сервер не принял логин или пароль (ответ сервера: «{raw}»). Нужен пароль приложения "
+                "(создаётся в настройках безопасности почты), а не обычный пароль; у Яндекса и Mail.ru ещё должен "
+                "быть разрешён доступ почтовыми программами.")
     if isinstance(exc, (socket.timeout, TimeoutError)):
         return f"{what}: сервер не ответил за {TIMEOUT:.0f} с — нет связи (порт закрыт сетью или хостингом?)"
     if isinstance(exc, socket.gaierror):
