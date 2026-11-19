@@ -347,7 +347,7 @@ def deliver(m: dict, raw: bytes, box: dict, request: dict, how: str, inbox_id: i
     if rels:
         added = add_files(base, rels, request.get("owner") or "")
         info = {"inbox_id": inbox_id, "request_id": request.get("id"), "from": m["from_addr"], "subject": m["subject"],
-                "supplier": request.get("supplier_name") or "", "how": how}
+                "supplier": request.get("supplier_name") or "", "how": how, "from_name": m["from_name"]}
         ids = {e["id"] for e in added}
 
         def tag(data):

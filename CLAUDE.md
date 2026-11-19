@@ -1,6 +1,6 @@
 # SupplyBro — локальный сайт для работы с конкурсами
 
-Инструкция для Claude при работе с этим проектом. Состояние на 18.11.2026, версия 0.29.2 (этапы 1–3, чат по документации, стоимость, запасной DeepSeek, поиск цен,
+Инструкция для Claude при работе с этим проектом. Состояние на 18.11.2026, версия 0.31.1 (этапы 1–3, чат по документации, стоимость, запасной DeepSeek, поиск цен,
 полная цепочка без кнопок до NocoDB, пять очередей обработчика, состояние обработчика в шапке, отмена и пауза задач,
 вход на сайт по логину и паролю с правами ролей и доступом к клиентам, вкладки-переходы, второй клиент ИП Саргсян,
 прайсы поставщиков через чат с записью в «Отдел закупок», общая таблица цен, цены из выдачи «не проверено»,
@@ -107,6 +107,19 @@
 - `app/main.py` — адреса сайта и `/api/...`; `app/nocodb.py` — чтение NocoDB (кэш 2 мин; записи — только с
   `cache=True`; страницы — через одно соединение; 429 — повтор); `app/config.py` — настройки;
   `app/static/` — страница (`index.html`, `app.js`, `app.css`, без внешних библиотек).
+- Вкладки (0.30.0, пользователь 18.11.2026 — новый интерфейс; прежнее решение «страница одна» заменено, старый вид —
+  «☰ одной страницей»): `#jump-wrap` под `#head`, `.jump[data-tab]` tender / purchase / bid / chat / all;
+  `section[data-group]` (docs, analysis, card → tender; spec → tender и purchase (0.30.1, `~=`); offers, requests,
+  prices → purchase; bid; chat; порядок во «Закупке» — CSS `order`);
+  скрытие — CSS по `main[data-tab]`; `setTab` / `goTo(id)` / `tabsNav()` (MutationObserver на hidden), localStorage
+  `sb.tab`, по умолчанию `defaultTab()` (no-upload + purchase → purchase). Строка этапов `#head-stages` —
+  `stg` (docs, analysis, req, offers, bid, brands) из загрузчиков разделов, `renderStages`. Карточки прайсов —
+  `renderSupplierDocs` в `#of-docs` (не в чате), загрузка ещё и `#of-files`. До 0.30.0 — порядок ниже.
+- Вид «По позициям» (0.31.0, вариант 1; переключатель `#view-switch`, localStorage `sb.view`, `body.view-pos`):
+  вкладка `pos` (`#workbench` + `#requests`, data-group `pos`), «Закупка» в этом виде скрыта (`tabVisible`).
+  `wbRows()` собирает строки из `of.d` (предложения), `rq.d` (журнал, письма по брендам, inbox), `psLast` (все цены);
+  `renderWorkbench` / `wbDetail` / `wbAsk(ns)` (письма — только выбранные позиции, `L._all` — исходные). Вызывается из
+  `renderOffers`, `renderRequests`, `loadPriceSummary`. `#of-docs` переносится между `#of-docs-slot` и `#wb-docs-slot`.
 - Порядок разделов страницы (0.6.6): pickers → вкладки → head → docs → analysis → prices → bid → card → spec → chat
   (чат внизу — решение пользователя 03.11.2026); без выбранного конкурса — pickers → `#tlist`.
 - Панель «Конкурсы» (0.13.0, пользователь 04.11.2026: «вместо выпадающего списка при входе — панель с тендерами

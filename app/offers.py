@@ -107,7 +107,7 @@ def cell_key(file_id: str, pos: str) -> str:
 
 def _supplier_of(e: dict) -> str:
     mail = e.get("mail") or {}
-    return (e.get("supplier") or mail.get("supplier") or Path(e.get("name") or "документ").stem).strip()
+    return pricelists.supplier_name(e)
 
 
 def _pos_sort(n: str):

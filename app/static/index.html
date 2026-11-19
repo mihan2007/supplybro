@@ -83,23 +83,6 @@
       </form>
     </section>
 
-    <!-- Вкладки: панель под выбором конкурса, при прокрутке закреплена под шапкой; нажатие — переход к разделу
-         этой же страницы (страница одна, разделы не прячутся; решение пользователя 03.11.2026) -->
-    <div class="jump-wrap" id="jump-wrap" hidden>
-      <nav class="panel jump-nav" id="jump-nav" aria-label="Разделы страницы">
-        <a class="jump" href="#top" data-target="top">Конкурс</a>
-        <a class="jump" href="#docs" data-target="docs">Документы</a>
-        <a class="jump" href="#analysis" data-target="analysis">Анализ</a>
-        <a class="jump" href="#prices" data-target="prices">Цены</a>
-        <a class="jump" href="#offers" data-target="offers">Предложения</a>
-        <a class="jump" href="#bid" data-target="bid">Заявка</a>
-        <a class="jump" href="#card" data-target="card">NocoDB</a>
-        <a class="jump" href="#spec" data-target="spec">Спецификация</a>
-        <a class="jump" href="#requests" data-target="requests">Запросы</a>
-        <a class="jump" href="#chat" data-target="chat">Чат</a>
-      </nav>
-    </div>
-
     <!-- Панель «Конкурсы» (0.13.0, пользователь 04.11.2026): вместо выбора из выпадающего списка при входе;
          конкурс открывается в новой вкладке браузера -->
     <section class="panel tlist" id="tlist" hidden>
@@ -133,12 +116,31 @@
         <div class="links" id="head-links"></div>
       </div>
       <div class="chips" id="head-chips"></div>
-      <!-- Наши бренды (0.26.0): заполняет loadSpec, ссылка ведёт к блоку «Кому писать» в спецификации -->
+      <!-- Этапы конкурса (0.30.0): документы → анализ → запросы → цены → заявка; щелчок — к разделу -->
+      <div class="stages" id="head-stages"></div>
       <div class="brand-note" id="head-brands" hidden></div>
     </section>
 
+    <!-- Вкладки (0.30.0, пользователь 18.11.2026: «интерфейс перегружен — давай новый интерфейс по рекомендациям»):
+         четыре рабочие вкладки вместо перехода по 11 разделам одной страницы; видна одна вкладка; «☰ одной страницей» —
+         как было (все разделы подряд). Вкладка по умолчанию — по роли, выбор запоминается. -->
+    <div class="jump-wrap" id="jump-wrap" hidden>
+      <nav class="panel jump-nav" id="jump-nav" aria-label="Вкладки конкурса">
+        <a class="jump" href="#" data-tab="pos">Позиции</a>
+        <a class="jump" href="#" data-tab="tender">Конкурс</a>
+        <a class="jump" href="#" data-tab="purchase">Закупка</a>
+        <a class="jump" href="#" data-tab="bid">Заявка</a>
+        <a class="jump" href="#" data-tab="chat">Чат</a>
+        <span class="jump-gap"></span>
+        <!-- Вид (0.31.0): «разделы» — вкладки 0.30; «по позициям» — одна таблица позиций (вариант 1) -->
+        <span class="view-switch" id="view-switch" title="Два варианта страницы конкурса — попробуйте оба">Вид:
+          <a href="#" data-view="sections">разделы</a> <a href="#" data-view="pos">по позициям</a></span>
+        <a class="jump jump-all" href="#" data-tab="all" title="Все разделы подряд на одной странице, как раньше">☰ одной страницей</a>
+      </nav>
+    </div>
+
     <!-- Документы конкурса -->
-    <section class="panel" id="docs" hidden>
+    <section class="panel" id="docs" data-group="tender" hidden>
       <div class="section-head">
         <h2>Документы <span class="muted" id="docs-count"></span></h2>
         <div class="section-tools">
@@ -170,7 +172,7 @@
     </section>
 
     <!-- Анализ документов (ИИ): поля блоков 1–7, позиции, проверки, запись в NocoDB -->
-    <section class="panel" id="analysis" hidden>
+    <section class="panel" id="analysis" data-group="tender" hidden>
       <div class="section-head">
         <h2>Анализ документов <span class="muted" id="an-info"></span></h2>
         <div class="section-tools">
@@ -201,8 +203,124 @@
       </div>
     </section>
 
+    <!-- Данные из «Реестра конкурсов» -->
+    <section class="panel" id="card" data-group="tender" hidden>
+      <div class="section-head">
+        <h2>Данные из NocoDB</h2>
+        <div class="section-tools">
+          <label class="inline">Представление
+            <select id="reg-view"></select>
+          </label>
+          <label class="inline check"><input type="checkbox" id="hide-empty" checked> скрыть пустые</label>
+        </div>
+      </div>
+      <div class="status" id="card-status"></div>
+      <dl class="fields" id="fields"></dl>
+    </section>
+
+    <!-- Спецификация -->
+    <section class="panel" id="spec" data-group="tender purchase" hidden>
+      <div class="section-head">
+        <h2>Спецификация <span class="muted" id="spec-count"></span></h2>
+        <div class="section-tools">
+          <label class="inline">Представление
+            <select id="spec-view"></select>
+          </label>
+          <!-- Высота строк (0.29.1, пользователь 18.11.2026: «не могу регулировать высоту строк, иногда это было очень удобно;
+               если не влазит текст — показать при наведении») -->
+          <label class="inline" title="Сколько строк текста показывать в ячейке; полный текст — при наведении или щелчком по ячейке">Высота строк
+            <select id="spec-rh">
+              <option value="1">1 строка</option>
+              <option value="2">3 строки</option>
+              <option value="3">6 строк</option>
+              <option value="all">весь текст</option>
+            </select>
+          </label>
+          <a class="btn ghost small" id="spec-link" target="_blank" rel="noopener" hidden>Открыть в NocoDB ↗</a>
+        </div>
+      </div>
+      <div class="status" id="spec-status"></div>
+      <!-- Наши поставщики по брендам позиций (0.26.0) -->
+      <div class="sb-box" id="spec-brands" hidden></div>
+      <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
+    </section>
+
+    <!-- По позициям (0.31.0, вариант 1): одна таблица позиций — лучшая цена, предложения, интернет, запросы, статус;
+         щелчок по строке — подробности. Видна в виде «по позициям» (вкладка «Позиции»). -->
+    <section class="panel" id="workbench" data-group="pos" hidden>
+      <div class="section-head">
+        <h2>Позиции <span class="muted" id="wb-info"></span></h2>
+        <div class="section-tools">
+          <input id="wb-search" type="text" placeholder="поиск: №, название, марка" class="wb-search">
+          <button class="btn small need-purchase" id="wb-ask" type="button" hidden>✉ Запросить цены по выбранным</button>
+          <button class="btn ghost small" id="wb-best" type="button" hidden title="По каждой позиции отметить самую низкую цену без замечаний">Отметить лучшие</button>
+          <button class="btn primary small" id="wb-write" type="button" hidden>Записать отмеченные в NocoDB</button>
+        </div>
+      </div>
+      <div class="wb-filters" id="wb-filters"></div>
+      <div class="table-wrap wb-wrap" id="wb-wrap"></div>
+      <div id="wb-docs-slot"></div>
+    </section>
+
+    <!-- Предложения поставщиков: сравнение цен перед записью в NocoDB (0.29.0) -->
+    <section class="panel" id="offers" data-group="purchase" hidden>
+      <div class="section-head">
+        <h2>Предложения поставщиков <span class="muted" id="of-info"></span></h2>
+        <div class="section-tools need-offers" id="of-tools" hidden>
+          <button class="btn ghost small" id="of-best" type="button" title="По каждой позиции отметить самую низкую цену без замечаний">Отметить лучшие</button>
+          <button class="btn primary small" id="of-write" type="button">Записать отмеченные в NocoDB</button>
+        </div>
+      </div>
+      <div class="status" id="of-status"></div>
+      <details class="help of-legend" id="of-legend" hidden><summary>ⓘ Как читать таблицу и записывать цены</summary><div class="muted small">
+        <span class="of-key best">лучшая цена</span> <span class="of-key over">выше НМЦ</span> <span class="of-key warn">⚠ с замечанием</span>
+        <span class="of-key written">в NocoDB</span> · отмеченные ☑ цены записываются в «Отдел закупок» спецификации (до 10 поставщиков
+        на позицию) только кнопкой «Записать отмеченные»; 💬 — комментарии, ✏ — исправить цену (исходная сохраняется).
+      </div></details>
+      <div class="table-wrap of-wrap" id="of-wrap"></div>
+      <!-- Документы поставщиков (0.30.0): карточки прайсов, КП, счетов и писем — здесь, а не в чате;
+           в виде «по позициям» блок переносится под таблицу позиций (#wb-docs-slot) -->
+      <div id="of-docs-slot"><details class="of-docs" id="of-docs">
+        <summary><span id="of-docs-title">Документы поставщиков</span></summary>
+        <div class="of-docs-tools need-purchase">
+          <label class="btn small" title="Прайс, КП или счёт поставщика (Excel, Word, PDF, фото): сайт найдёт позиции конкурса и цены">📎 Загрузить прайс / КП<input type="file" id="of-files" multiple hidden></label>
+        </div>
+        <div class="of-docs-list" id="of-docs-list"></div>
+      </details></div>
+      <h3 class="rq-jh" id="of-comments-h" hidden>Комментарии</h3>
+      <div class="of-comments" id="of-comments"></div>
+    </section>
+
+    <!-- Запросы цен поставщикам по почте (0.27.0) -->
+    <section class="panel" id="requests" data-group="purchase pos" hidden>
+      <div class="section-head">
+        <h2>Запросы поставщикам <span class="muted" id="rq-count"></span></h2>
+        <div class="section-tools">
+          <label class="inline">Отправлять с
+            <select id="rq-box"></select>
+          </label>
+          <button class="btn ghost small need-purchase" id="rq-boxes" type="button">✉ Мои ящики</button>
+        </div>
+      </div>
+      <div class="status" id="rq-status"></div>
+      <div class="rq-hint muted small" id="rq-hint" hidden></div>
+      <div class="rq-tools need-purchase" id="rq-tools" hidden>
+        <a href="#" id="rq-all">выбрать всех с адресом</a> · <a href="#" id="rq-none">снять все</a>
+      </div>
+      <div class="rq-letters" id="rq-letters"></div>
+      <div class="rq-actions need-purchase" id="rq-actions" hidden>
+        <label class="inline"><input type="checkbox" id="rq-xlsx" checked> приложить перечень позиций (Excel)</label>
+        <button class="btn primary" id="rq-send" type="button">Отправить выбранные</button>
+      </div>
+      <div class="notice rq-unmatched" id="rq-unmatched" hidden></div>
+      <h3 class="rq-jh" id="rq-ih" hidden>Ответы поставщиков</h3>
+      <div class="table-wrap" id="rq-inbox-wrap" hidden><table id="rq-inbox"></table></div>
+      <h3 class="rq-jh" id="rq-jh" hidden>Отправленные запросы</h3>
+      <div class="table-wrap" id="rq-journal-wrap" hidden><table id="rq-journal"></table></div>
+    </section>
+
     <!-- Поиск цен: Россия (Яндекс) и зарубеж (Claude), по 3 лучшие цены со ссылками, своя база цен -->
-    <section class="panel" id="prices" hidden>
+    <section class="panel" id="prices" data-group="purchase" hidden>
       <div class="section-head">
         <h2>Цены <span class="muted" id="pr-info"></span></h2>
         <div class="section-tools">
@@ -232,28 +350,8 @@
       <div class="usage" id="pr-usage"></div>
     </section>
 
-    <!-- Предложения поставщиков: сравнение цен перед записью в NocoDB (0.29.0) -->
-    <section class="panel" id="offers" hidden>
-      <div class="section-head">
-        <h2>Предложения поставщиков <span class="muted" id="of-info"></span></h2>
-        <div class="section-tools need-offers" id="of-tools" hidden>
-          <button class="btn ghost small" id="of-best" type="button" title="По каждой позиции отметить самую низкую цену без замечаний">Отметить лучшие</button>
-          <button class="btn primary small" id="of-write" type="button">Записать отмеченные в NocoDB</button>
-        </div>
-      </div>
-      <div class="status" id="of-status"></div>
-      <div class="muted small of-legend" id="of-legend" hidden>
-        <span class="of-key best">лучшая цена</span> <span class="of-key over">выше НМЦ</span> <span class="of-key warn">⚠ с замечанием</span>
-        <span class="of-key written">в NocoDB</span> · отмеченные ☑ цены записываются в «Отдел закупок» спецификации (до 10 поставщиков
-        на позицию) только кнопкой «Записать отмеченные»; 💬 — комментарии, ✏ — исправить цену (исходная сохраняется).
-      </div>
-      <div class="table-wrap of-wrap" id="of-wrap"></div>
-      <h3 class="rq-jh" id="of-comments-h" hidden>Комментарии</h3>
-      <div class="of-comments" id="of-comments"></div>
-    </section>
-
     <!-- Подготовка заявки (0.15.0): одна кнопка — требования, состав заявки, заполненные формы, копии документов -->
-    <section class="panel" id="bid" hidden>
+    <section class="panel" id="bid" data-group="bid" hidden>
       <div class="section-head">
         <h2>Заявка <span class="muted" id="bid-info"></span></h2>
         <div class="section-tools">
@@ -303,78 +401,8 @@
       </div>
     </section>
 
-    <!-- Данные из «Реестра конкурсов» -->
-    <section class="panel" id="card" hidden>
-      <div class="section-head">
-        <h2>Данные из NocoDB</h2>
-        <div class="section-tools">
-          <label class="inline">Представление
-            <select id="reg-view"></select>
-          </label>
-          <label class="inline check"><input type="checkbox" id="hide-empty" checked> скрыть пустые</label>
-        </div>
-      </div>
-      <div class="status" id="card-status"></div>
-      <dl class="fields" id="fields"></dl>
-    </section>
-
-    <!-- Спецификация -->
-    <section class="panel" id="spec" hidden>
-      <div class="section-head">
-        <h2>Спецификация <span class="muted" id="spec-count"></span></h2>
-        <div class="section-tools">
-          <label class="inline">Представление
-            <select id="spec-view"></select>
-          </label>
-          <!-- Высота строк (0.29.1, пользователь 18.11.2026: «не могу регулировать высоту строк, иногда это было очень удобно;
-               если не влазит текст — показать при наведении») -->
-          <label class="inline" title="Сколько строк текста показывать в ячейке; полный текст — при наведении или щелчком по ячейке">Высота строк
-            <select id="spec-rh">
-              <option value="1">1 строка</option>
-              <option value="2">3 строки</option>
-              <option value="3">6 строк</option>
-              <option value="all">весь текст</option>
-            </select>
-          </label>
-          <a class="btn ghost small" id="spec-link" target="_blank" rel="noopener" hidden>Открыть в NocoDB ↗</a>
-        </div>
-      </div>
-      <div class="status" id="spec-status"></div>
-      <!-- Наши поставщики по брендам позиций (0.26.0) -->
-      <div class="sb-box" id="spec-brands" hidden></div>
-      <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
-    </section>
-
-    <!-- Запросы цен поставщикам по почте (0.27.0) -->
-    <section class="panel" id="requests" hidden>
-      <div class="section-head">
-        <h2>Запросы поставщикам <span class="muted" id="rq-count"></span></h2>
-        <div class="section-tools">
-          <label class="inline">Отправлять с
-            <select id="rq-box"></select>
-          </label>
-          <button class="btn ghost small need-purchase" id="rq-boxes" type="button">✉ Мои ящики</button>
-        </div>
-      </div>
-      <div class="status" id="rq-status"></div>
-      <div class="rq-hint muted small" id="rq-hint" hidden></div>
-      <div class="rq-tools need-purchase" id="rq-tools" hidden>
-        <a href="#" id="rq-all">выбрать всех с адресом</a> · <a href="#" id="rq-none">снять все</a>
-      </div>
-      <div class="rq-letters" id="rq-letters"></div>
-      <div class="rq-actions need-purchase" id="rq-actions" hidden>
-        <label class="inline"><input type="checkbox" id="rq-xlsx" checked> приложить перечень позиций (Excel)</label>
-        <button class="btn primary" id="rq-send" type="button">Отправить выбранные</button>
-      </div>
-      <div class="notice rq-unmatched" id="rq-unmatched" hidden></div>
-      <h3 class="rq-jh" id="rq-ih" hidden>Ответы поставщиков</h3>
-      <div class="table-wrap" id="rq-inbox-wrap" hidden><table id="rq-inbox"></table></div>
-      <h3 class="rq-jh" id="rq-jh" hidden>Отправленные запросы</h3>
-      <div class="table-wrap" id="rq-journal-wrap" hidden><table id="rq-journal"></table></div>
-    </section>
-
     <!-- Вопросы по документации (чат): ответы только по документам конкурса, со ссылками -->
-    <section class="panel" id="chat" hidden>
+    <section class="panel" id="chat" data-group="chat" hidden>
       <div class="section-head">
         <h2>Вопросы по документации <span class="chat-own" id="chat-own" hidden title="Ваши вопросы и ответы видите только вы: у каждого сотрудника свой чат">· видны только вам</span></h2>
         <div class="section-tools">
@@ -392,6 +420,7 @@
       <div class="chat-cache" id="chat-cache"></div>
       <div class="chat-hint" id="chat-hint"></div>
     </section>
+
   </main>
 
   <!-- Кнопка «наверх» (0.17.3): появляется, когда страница прокручена вниз; нажатие — к началу страницы. -->
@@ -436,9 +465,10 @@
         <h3>Неразобранная почта <span class="muted" id="ib-count"></span></h3>
         <button class="btn ghost small" id="ib-poll" type="button" title="Сайт сам проверяет почту раз в несколько минут">📥 Проверить почту сейчас</button>
       </div>
-      <p class="muted small">Ответы на запросы сайт сам относит к конкурсам (по ответу на письмо, метке [SB-…] в теме,
-        отправителю, номеру конкурса) и отдаёт в разбор цен — карточки появляются в чате конкурса. Здесь — письма от
-        поставщиков, которые не удалось отнести однозначно: выберите конкурс.</p>
+      <details class="help"><summary>ⓘ Как сайт разбирает почту</summary><p class="muted small">Ответы на запросы сайт сам
+        относит к конкурсам (по ответу на письмо, метке [SB-…] в теме, отправителю, номеру конкурса) и отдаёт в разбор
+        цен — они появляются во вкладке «Закупка» конкурса. Здесь — письма от поставщиков, которые не удалось отнести
+        однозначно: выберите конкурс.</p></details>
       <div class="ib-list" id="ib-list"></div>
       <details class="ib-skipped" id="ib-skipped" hidden>
         <summary id="ib-skipped-title">Пропущенные письма</summary>

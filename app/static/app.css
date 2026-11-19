@@ -619,3 +619,69 @@ tr.of-empty td { color: var(--muted); }
 #spec-table.rh-1 td { white-space: normal; }
 
 #spec-table.rh-1 td.sb-col .sb-item { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Вкладки конкурса (0.30.0): видна одна группа разделов */
+main[data-tab="tender"] > section[data-group]:not([data-group~="tender"]),
+main[data-tab="purchase"] > section[data-group]:not([data-group~="purchase"]),
+main[data-tab="bid"] > section[data-group]:not([data-group~="bid"]),
+main[data-tab="chat"] > section[data-group]:not([data-group~="chat"]),
+main[data-tab="pos"] > section[data-group]:not([data-group~="pos"]) { display: none !important; }
+main[data-tab="pos"] > #workbench { order: 1; }
+main[data-tab="pos"] > #requests { order: 2; }
+/* «Закупка»: предложения → запросы → спецификация → цены из интернета (0.30.1) */
+main[data-tab="purchase"] > #offers { order: 1; }
+main[data-tab="purchase"] > #requests { order: 2; }
+main[data-tab="purchase"] > #spec { order: 3; }
+main[data-tab="purchase"] > #prices { order: 4; }
+.jump-gap { flex: 1; }
+.jump.jump-all { font-size: 12px; color: var(--muted); }
+/* Строка этапов (0.30.0) */
+.stages { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.stages[hidden] { display: none; }
+.stage { display: inline-flex; gap: 4px; align-items: baseline; padding: 4px 10px; border-radius: 999px; font-size: 13px;
+  text-decoration: none; color: var(--text); border: 1px solid var(--line); background: var(--panel); }
+.stage:hover { border-color: var(--accent); }
+.stage-l { font-weight: 600; }
+.stage.ok { background: color-mix(in srgb, var(--ok) 12%, var(--panel)); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.stage.busy { background: var(--warn-bg); color: var(--warn-text); }
+.stage.none { color: var(--muted); }
+.stage.info { background: var(--chip); }
+/* Документы поставщиков во «Закупке» (0.30.0) */
+.of-docs { margin-top: 14px; }
+.of-docs > summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+.of-docs[open] { display: grid; gap: 10px; }
+.of-docs-tools { display: flex; gap: 8px; }
+.of-docs-list { display: grid; gap: 10px; }
+/* Пояснения за «ⓘ» (0.30.0) */
+.help > summary { cursor: pointer; font-size: 13px; color: var(--accent); list-style: none; }
+.help > summary::-webkit-details-marker { display: none; }
+.help[open] > summary { margin-bottom: 6px; }
+
+/* Вид «по позициям» (0.31.0) */
+.view-switch { font-size: 12px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; margin-right: 8px; white-space: nowrap; }
+.view-switch a { padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); text-decoration: none; }
+.view-switch a.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wb-search { width: 240px !important; padding: 5px 8px !important; }
+.wb-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.chip-btn { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+.chip-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wb-table { width: 100%; }
+.wb-table th, .wb-table td { vertical-align: top; }
+.wb-row { cursor: pointer; }
+.wb-row:hover td { background: color-mix(in srgb, var(--accent) 5%, var(--panel)) !important; }
+.wb-row.open td { background: color-mix(in srgb, var(--accent) 8%, var(--panel)) !important; border-bottom-color: transparent; }
+.wb-row.empty .wb-name { color: var(--muted); }
+.wb-name { min-width: 260px; max-width: 420px; }
+.wb-best .badge { margin-left: 6px; font-size: 11px; }
+.wb-best.warn b { color: var(--warn-text); }
+.wb-tog { color: var(--muted); white-space: nowrap; text-align: right; }
+.wb-detail > td { background: var(--panel) !important; padding: 0 10px 14px 44px; }
+.wb-detail-box { display: grid; grid-template-columns: minmax(420px, 2fr) minmax(260px, 1fr); gap: 12px 24px; padding-top: 6px; }
+.wb-part h4 { margin: 4px 0 6px; font-size: 13px; }
+.wb-part:first-child { grid-row: span 3; }
+.wb-sub { width: 100%; font-size: 13px; }
+.wb-sub tr.best td { background: color-mix(in srgb, var(--ok) 12%, var(--panel)) !important; }
+.wb-list { display: grid; gap: 4px; }
+.wb-tools { white-space: nowrap; }
+@media (max-width: 900px) { .wb-detail-box { grid-template-columns: 1fr; } .wb-detail > td { padding-left: 10px; } }
+

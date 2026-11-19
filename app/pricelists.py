@@ -456,6 +456,15 @@ def remove(folder: Path, file_id: str, by: str) -> None:
     update(folder, fn)
 
 
+def supplier_name(e: dict) -> str:
+    """Имя поставщика документа: из самого документа (модель) → из запроса, на который это ответ → имя или адрес
+    отправителя письма → имя файла. 0.31.1, пользователь 19.11.2026: «не видно, от какого поставщика пришло письмо» —
+    у ответа без названия компании (запрос «другому адресату», цена в тексте) колонка называлась «Письмо»."""
+    mail = e.get("mail") or {}
+    name = (e.get("supplier") or mail.get("supplier") or mail.get("from_name") or mail.get("from") or "").strip()
+    return name or Path(e.get("name") or "документ").stem
+
+
 def _supplier_key(name: str) -> str:
     t = str(name or "").replace(RED.strip(), "").lower().replace("ё", "е")
     t = re.sub(r"[«»\"'`]", "", t)
@@ -544,7 +553,7 @@ def write_noco(client, folder_name: str, folder: Path, progress) -> str:
     for k, e in enumerate(todo):
         set_write(e["id"], status="running")
         progress(f"NocoDB: цены поставщика из «{e['name']}»", 0.4 + 0.5 * k / len(todo))
-        supplier = e.get("supplier") or Path(e["name"]).stem
+        supplier = supplier_name(e)
         date = e.get("doc_date") or datetime.fromtimestamp(e.get("uploaded_at") or time.time(), MSK).strftime("%d.%m.%Y")
         updates, written, skipped = [], [], []
         overrides = (e.get("write") or {}).get("overrides") or {}
@@ -604,7 +613,7 @@ def supplier_prices(folder: Path) -> dict[str, list[dict]]:
             if not m.get("price_rub"):
                 continue
             out.setdefault(m["pos"], []).append({
-                "supplier": e.get("supplier") or Path(e["name"]).stem, "price_rub": m["price_rub"],
+                "supplier": supplier_name(e), "price_rub": m["price_rub"],
                 "price": m.get("price"), "currency": m.get("currency"), "match": m.get("match"), "ok": m.get("ok"),
                 "file": e["name"], "file_path": e["file"], "written": m["pos"] in written, "vat": e.get("vat"),
                 "note": m.get("note") or "", "problems": m.get("problems") or []})
