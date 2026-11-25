@@ -201,7 +201,7 @@ def reply(client, *, owner: str, client_id: str, internal: str, key: str, to: st
     t = _group(reqs, inbox).get(key)
     if not t:
         raise ThreadError("переписка не найдена")
-    body = str(body or "").strip()
+    body = supplier_requests.clean_links(str(body or "").strip())   # 0.44.0: без ссылок на мессенджеры
     if not body:
         raise ThreadError("пустой ответ")
     if len(body) > MAX_BODY:
@@ -221,6 +221,10 @@ def reply(client, *, owner: str, client_id: str, internal: str, key: str, to: st
         who = (root or {}).get("owner") or (last_in or {}).get("owner") or ""
         raise ThreadError("запрос отправлен с ящика " + ((root or {}).get("mailbox_address") or "другого сотрудника") +
                           (f" ({who})" if who else "") + " — ответить с сайта может только его владелец") from None
+    try:
+        supplier_requests.check_rate(box["address"], 1)
+    except supplier_requests.RequestError as exc:
+        raise ThreadError(str(exc)) from None
     base = (last_in or {}).get("subject") or (root or {}).get("subject") or f"Запрос цен {internal}"
     subject = base if re.match(r"(?i)\s*(re|ответ)\s*:", base) else "Re: " + base
     tag = ""

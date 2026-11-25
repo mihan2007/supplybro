@@ -27,6 +27,7 @@ import socket
 import sqlite3
 import ssl
 import threading
+import random
 import time
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
@@ -415,7 +416,7 @@ def _append_sent(row, password: str, msg: EmailMessage) -> str:
             pass
 
 
-def send_many(owner: str, box_id: int, messages: list[EmailMessage], pause: float = 1.0) -> list[dict]:
+def send_many(owner: str, box_id: int, messages: list[EmailMessage], pause: float | tuple = 1.0) -> list[dict]:
     """Отправить письма одним соединением SMTP. [{ok, error, message_id, sent_copy}] — по порядку."""
     row = _row(owner, box_id)
     password = decrypt(row["secret"])
@@ -431,7 +432,8 @@ def send_many(owner: str, box_id: int, messages: list[EmailMessage], pause: floa
     try:
         for i, msg in enumerate(messages):
             if i:
-                time.sleep(pause)                   # почтовые серверы не любят пачку писем за секунду
+                # почтовые серверы не любят пачку писем подряд; (от, до) — случайная пауза (0.44.0)
+                time.sleep(random.uniform(*pause) if isinstance(pause, (tuple, list)) else pause)
             try:
                 refused = s.send_message(msg)
                 if refused:

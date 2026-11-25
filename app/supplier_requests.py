@@ -66,7 +66,9 @@ CREATE INDEX IF NOT EXISTS mail_requests_msgid ON mail_requests (message_id);
 
 NAME_COL, BRAND_COL, MAKER_COL = "Наименование позиции", "Марка/модель", "Производитель"
 QTY_COL, UNIT_COL = "Кол-во", "Ед. изм."
-MAX_LETTERS = 60          # писем за одно нажатие
+MAX_LETTERS = 25          # писем за одно нажатие (0.44.0: было 60 — Mail.ru счёл пачку одинаковых писем спамом)
+HOURLY_LIMIT = 30         # писем с одного ящика за час (запросы и ответы в переписке)
+SEND_PAUSE = (4.0, 8.0)   # пауза между письмами, с — случайная в этих пределах
 _inited = False
 
 
@@ -123,9 +125,27 @@ def position_line(p: dict) -> str:
     return f"{p['n']}. {p['name']}" + (f" ({extra})" if extra else "") + qty
 
 
+# 0.44.0: ссылки на мессенджеры и сокращатели ссылок — частый признак спама у Mail.ru (ответ поставщика на запрос
+# с подписью «http://t.me/+7911…» вернулся «550 spam message rejected»). В письме — обычным текстом.
+_MESSENGER_RE = re.compile(r"(?:https?://)?(?:www\.)?(t\.me|telegram\.me|wa\.me|api\.whatsapp\.com/send\?phone=)/?([+\w.\-]+)",
+                           re.I)
+_SHORT_RE = re.compile(r"(?:,\s*)?(?:https?://)?(?:bit\.ly|clck\.ru|vk\.cc|tinyurl\.com|goo\.su|cutt\.ly)/\S+", re.I)
+_SCHEME_RE = re.compile(r"\bhttps?://(?=[^\s/]+\.[^\s/]+)", re.I)
+
+
+def clean_links(text: str) -> str:
+    """Ссылки в тексте письма — без «http://», мессенджеры — словами, сокращённые ссылки убираются."""
+    def messenger(m):
+        name = "WhatsApp" if "wa" in m.group(1).lower() else "Telegram"
+        return f"{name}: {m.group(2)}"
+    text = _MESSENGER_RE.sub(messenger, str(text or ""))
+    text = _SHORT_RE.sub("", text)
+    return _SCHEME_RE.sub("", text)
+
+
 def default_signature(box: dict | None, user: dict | None) -> str:
     if box and box.get("signature"):
-        return box["signature"]
+        return clean_links(box["signature"])
     lines = []
     name = (box or {}).get("sender_name") or (user or {}).get("name") or ""
     if name:
@@ -134,7 +154,7 @@ def default_signature(box: dict | None, user: dict | None) -> str:
         lines.append("тел. " + user["phone"])
     if box:
         lines.append(box["address"])
-    return "\n".join(["С уважением,"] + lines) if lines else "С уважением"
+    return clean_links("\n".join(["С уважением,"] + lines) if lines else "С уважением")
 
 
 INTRO = ("Добрый день!\n\n"
@@ -143,14 +163,86 @@ ASK = ("Просим указать по каждой позиции: цену �
        "страну происхождения, срок действия предложения. Если позиция недоступна — предложите, пожалуйста, аналог.\n")
 XLSX_LINE = "\nПеречень позиций — также во вложении (Excel): цены можно указать прямо в нём.\n"
 
+# 0.44.0: письма разным поставщикам не должны быть одинаковыми — фильтр Mail.ru узнаёт рассылку по тексту и
+# отклоняет потом и ответы с цитатой. У каждого письма — обращение с названием поставщика и свой вариант
+# формулировок (выбор — по ключу письма, у одного поставщика он не меняется).
+GREETINGS = ("Добрый день!", "Здравствуйте!", "Добрый день, коллеги!")
+INTROS = (
+    "Просим предоставить коммерческое предложение на поставку следующих позиций:",
+    "Рассматриваем закупку оборудования и просим {to}прислать цены на позиции ниже:",
+    "Подскажите, пожалуйста, {to}стоимость и сроки поставки по следующим позициям:",
+    "Прошу {to}направить предложение по цене и срокам на позиции из списка:",
+)
+ASKS = (
+    ASK,
+    "По каждой позиции нужны: цена за единицу с НДС (ставка НДС), наличие или срок поставки, страна происхождения "
+    "и срок действия цены. Если чего-то нет — можно предложить аналог.\n",
+    "Пожалуйста, укажите цену за штуку с НДС и ставку НДС, срок поставки (или наличие на складе), страну "
+    "происхождения и до какой даты действует предложение. Аналоги тоже рассмотрим.\n",
+)
+XLSX_LINES = (
+    XLSX_LINE,
+    "\nВо вложении — тот же список в Excel, цены можно вписать прямо туда.\n",
+    "\nСписок продублирован в файле Excel во вложении — так будет удобнее заполнить.\n",
+)
 
-def outro(signature: str, with_xlsx: bool = True) -> str:
-    return "\n\n" + ASK + (XLSX_LINE if with_xlsx else "") + "\n" + signature + "\n"
+
+def _pick(key: str, options: tuple, salt: str = "") -> str:
+    import hashlib
+    h = int(hashlib.sha1((salt + "|" + str(key or "")).encode("utf-8")).hexdigest()[:8], 16)
+    return options[h % len(options)]
 
 
-def letter_body(positions: list[dict], signature: str, with_xlsx: bool = True) -> str:
+def _company(name: str) -> str:
+    """«ООО «Ромашка»» → «ООО «Ромашка»» для обращения «просим ООО «Ромашка» …»; пусто — без обращения."""
+    n = re.sub(r"\s+", " ", str(name or "")).strip()
+    return (n + " ") if n and len(n) <= 60 else ""
+
+
+def intro_of(key: str = "", supplier_name: str = "") -> str:
+    if not key:
+        return INTRO
+    to = _company(supplier_name)
+    intro = _pick(key, INTROS, "intro").replace("{to}", to)
+    if not to:
+        intro = intro.replace("  ", " ")
+    return _pick(key, GREETINGS, "hello") + "\n\n" + intro + "\n\n"
+
+
+def outro(signature: str, with_xlsx: bool = True, key: str = "") -> str:
+    ask = _pick(key, ASKS, "ask") if key else ASK
+    xl = _pick(key, XLSX_LINES, "xlsx") if key else XLSX_LINE
+    return "\n\n" + ask + (xl if with_xlsx else "") + "\n" + signature + "\n"
+
+
+def letter_body(positions: list[dict], signature: str, with_xlsx: bool = True, key: str = "",
+                supplier_name: str = "") -> str:
     """Текст письма; страница собирает его так же (intro + строки позиций + outro), когда меняют набор позиций."""
-    return INTRO + "\n".join(position_line(p) for p in positions) + outro(signature, with_xlsx)
+    return (intro_of(key, supplier_name) + "\n".join(position_line(p) for p in positions)
+            + outro(signature, with_xlsx, key))
+
+
+def _letter_parts(key: str, supplier_name: str, signature: str) -> dict:
+    return {"intro": intro_of(key, supplier_name), "outro_xlsx": outro(signature, True, key),
+            "outro_plain": outro(signature, False, key)}
+
+
+def sent_last_hour(address: str) -> int:
+    """Сколько писем ушло с ящика за последний час (у всех сотрудников, кто им пользуется)."""
+    with db.connect() as con:
+        row = con.execute("SELECT COUNT(*) FROM mail_requests WHERE lower(mailbox_address)=lower(?) AND status='sent' "
+                          "AND sent_at > ?", (str(address or ""), time.time() - 3600)).fetchone()
+    return int(row[0] or 0)
+
+
+def check_rate(address: str, count: int) -> None:
+    done = sent_last_hour(address)
+    if done + count > HOURLY_LIMIT:
+        left = max(0, HOURLY_LIMIT - done)
+        raise RequestError(
+            f"с ящика {address} за последний час уже отправлено {done} писем; не больше {HOURLY_LIMIT} в час — "
+            f"иначе Mail.ru и другие почтовые службы принимают запросы за рассылку спама и потом отклоняют ответы "
+            f"поставщиков. Сейчас можно отправить ещё {left}" + ("" if left else " — подождите немного") + ".")
 
 
 def subject_of(internal: str, title: str) -> str:
@@ -273,12 +365,15 @@ def drafts(*, client_id: str, base_id: str, internal: str, title: str, rows: lis
             # и одно нажатие «Отправить» ушло бы всем. Выбор — фильтром брендов и «выбрать всех с адресом».
             "to": email, "emails": base_emails, "checked": False,
             "sent_at": sent.get(e["id"]),
-            "subject": subject, "positions": [p["n"] for p in pos], "body": letter_body(pos, signature),
+            "subject": subject, "positions": [p["n"] for p in pos],
+            "body": letter_body(pos, signature, key="s" + e["id"], supplier_name=s["name"]),
+            **_letter_parts("s" + e["id"], s["name"], signature),
         })
     letters.append({
         "key": "other", "supplier_id": "", "supplier_name": "", "level": "", "status": "", "method": "", "site": "",
         "brands": [], "strong": True, "to": "", "emails": [], "checked": False, "sent_at": None,
         "subject": subject, "positions": [p["n"] for p in positions], "body": letter_body(positions, signature),
+        **_letter_parts("", "", signature),
     })
     for p in positions:
         p["line"] = position_line(p)
@@ -288,7 +383,8 @@ def drafts(*, client_id: str, base_id: str, internal: str, title: str, rows: lis
         if r.get("n") in by_n:
             pos_brands[r["n"]] = [b["brand"] for b in r.get("brands", [])]
     return {"positions": positions, "letters": letters, "pos_brands": pos_brands, "signature": signature, "intro": INTRO,
-            "outro_xlsx": outro(signature, True), "outro_plain": outro(signature, False)}
+            "outro_xlsx": outro(signature, True), "outro_plain": outro(signature, False),
+            "limits": {"per_click": MAX_LETTERS, "per_hour": HOURLY_LIMIT, "pause": list(SEND_PAUSE)}}
 
 
 def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_id: int, internal: str, folder: str,
@@ -301,6 +397,7 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
     if len(letters) > MAX_LETTERS:
         raise RequestError(f"за один раз — не больше {MAX_LETTERS} писем")
     box_row = mail._row(owner, box_id)
+    check_rate(box_row["address"], len(letters))
     by_n = {p["n"]: p for p in positions}
     prepared = []
     for L in letters:
@@ -308,7 +405,7 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
         if not to:
             raise RequestError(f"не указан адрес: {L.get('supplier_name') or 'другой адресат'}")
         subject = str(L.get("subject") or "").strip()[:250]
-        body = str(L.get("body") or "").strip()
+        body = clean_links(str(L.get("body") or "").strip())
         if not subject or not body:
             raise RequestError(f"пустая тема или текст письма: {L.get('supplier_name') or ', '.join(to)}")
         pos = [by_n[str(n)] for n in L.get("positions") or [] if str(n) in by_n]
@@ -337,7 +434,7 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
                         (full_subject, tag, msg["Message-ID"], attach[0][0] if attach else "", rid))
         messages.append(msg)
         ids.append((rid, tag))
-    results = mail.send_many(owner, box_id, messages)
+    results = mail.send_many(owner, box_id, messages, pause=SEND_PAUSE)
     out = []
     for (L, to, *_), (rid, tag), r in zip(prepared, ids, results):
         with db.connect() as con:

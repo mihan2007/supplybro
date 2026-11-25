@@ -4012,7 +4012,11 @@ function renderRqHint() {
 function rqBody(L) {
   const by = new Map(rq.d.positions.map((p) => [p.n, p]));
   const lines = L.positions.map((n) => by.get(n)).filter(Boolean).map((p) => p.line).join("\n");
-  return rq.d.intro + lines + ($("rq-xlsx").checked ? rq.d.outro_xlsx : rq.d.outro_plain);
+  // 0.44.0: у каждого письма своё обращение и формулировки (не одинаковые письма — не рассылка для Mail.ru)
+  const intro = L.intro != null ? L.intro : rq.d.intro;
+  const outro = $("rq-xlsx").checked ? (L.outro_xlsx != null ? L.outro_xlsx : rq.d.outro_xlsx)
+    : (L.outro_plain != null ? L.outro_plain : rq.d.outro_plain);
+  return intro + lines + outro;
 }
 
 function renderRequests() {
@@ -4160,10 +4164,13 @@ async function sendRequests() {
   if (bad.length) return toast("Нет адреса или адрес неверный: " + bad.map((L) => L.supplier_name || "другой адресат").join(", "), true);
   const empty = chosen.filter((L) => !L.positions.length);
   if (empty.length) return toast("В письме нет позиций: " + empty.map((L) => L.supplier_name || "другой адресат").join(", "), true);
-  if (!confirm(`Отправить ${chosen.length} писем с ящика ${box.address}?`)) return;
+  const lim = d.limits || { per_click: 25, per_hour: 30, pause: [4, 8] };
+  if (chosen.length > lim.per_click) return toast(`За один раз — не больше ${lim.per_click} писем: почтовые службы принимают большую пачку одинаковых писем за спам. Отметьте часть поставщиков и отправьте, остальных — следующим заходом.`, true);
+  const mins = Math.max(1, Math.round(chosen.length * (lim.pause[0] + lim.pause[1]) / 2 / 60));
+  if (!confirm(`Отправить ${chosen.length} писем с ящика ${box.address}?\nМежду письмами — пауза ${lim.pause[0]}–${lim.pause[1]} с, это займёт около ${mins} мин. Не больше ${lim.per_hour} писем с ящика в час.`)) return;
   rq.sending = true;
   updateSendButton();
-  setStatus("rq-status", `Отправляю ${chosen.length} писем (по одному в секунду)…`);
+  setStatus("rq-status", `Отправляю ${chosen.length} писем с паузами, около ${mins} мин — страницу не закрывайте…`);
   try {
     const t = currentTender();
     const r = await api(clientPath(`/tenders/${state.tender}/requests/send`), { folder: (t && t.folder) || "" }, jsonPost({
