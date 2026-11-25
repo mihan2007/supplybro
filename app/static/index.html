@@ -114,6 +114,7 @@
           <div class="tender-no-row">
             <div class="tender-no" id="head-no"></div>
             <button class="btn ghost small need-upload" id="head-rename" type="button" title="Сменить внутренний номер конкурса: папка, реестр NocoDB, таблица спецификации">✎ номер</button>
+            <button class="btn ghost small admin-only spec-del" id="head-delete" type="button" hidden title="Удалить конкурс из NocoDB: запись реестра и спецификацию (только администратор сайта; перед удалением сайт сохранит копию)">🗑 Удалить из NocoDB</button>
           </div>
           <h1 id="head-title"></h1>
         </div>
@@ -535,6 +536,34 @@
       </table>
     </div>
     <div class="muted small" id="sup-more"></div>
+  </dialog>
+
+  <!-- Удаление конкурса из NocoDB: запись реестра и спецификация вместе (0.37.0, только администратор сайта) -->
+  <dialog class="dlg rn-dlg" id="sd-dlg">
+    <div class="section-head">
+      <h2 id="sd-h">Удалить конкурс из NocoDB</h2>
+      <button class="btn ghost small" id="sd-close" type="button">Закрыть</button>
+    </div>
+    <form id="sd-form" autocomplete="off">
+      <p id="sd-lead">Будут удалены <b>вместе</b>:</p>
+      <ul class="small">
+        <li id="sd-rec-li">запись конкурса <b id="sd-num"></b> в «Реестре конкурсов»;</li>
+        <li id="sd-folder-li" hidden>папка конкурса <b id="sd-folder"></b> — переедет в «#Удалённые конкурсы» внутри папки
+          клиента (файлы не стираются, вернуть можно, перетащив обратно);</li>
+        <li id="sd-spec-li">таблица спецификации <b id="sd-title"></b> (<span id="sd-rows"></span>) — с ценами, «Отделом закупок» и
+          комментариями агента.</li>
+      </ul>
+      <p class="muted small" id="sd-note">Перед удалением сайт сохранит запись и все строки спецификации копией (в папке данных сайта и
+        в AIExtract\history конкурса). Папка конкурса в Dropbox, документы, анализ, чат и письма на сайте остаются.</p>
+      <label class="check small" id="sd-with-folder-box" hidden><input type="checkbox" id="sd-with-folder"> и папку конкурса тоже —
+        в «#Удалённые конкурсы» (файлы не стираются)</label>
+      <label class="field"><span class="label">Для подтверждения впишите номер конкурса: <b id="sd-need"></b></span>
+        <input id="sd-confirm" type="text" required></label>
+      <div class="status" id="sd-status"></div>
+      <div class="mf-actions">
+        <button class="btn primary danger" id="sd-go" type="submit" disabled>Удалить</button>
+      </div>
+    </form>
   </dialog>
 
   <!-- Смена внутреннего номера конкурса (0.34.0) -->

@@ -518,6 +518,8 @@ function showTender(t) {
   if (!t) renderTenderList();
   $("head").hidden = !t;
   $("head-rename").hidden = !(t && t.internal);
+  $("head-delete").hidden = !t || USER_MODE;
+  if (t) $("head-delete").textContent = t.source === "nocodb" ? "🗑 Удалить из NocoDB" : "🗑 Удалить конкурс";
   $("docs").hidden = !t || blockOff("docs");
   $("analysis").hidden = !(t && t.folder) || blockOff("analysis");
   $("prices").hidden = !(t && t.folder) || blockOff("prices");
@@ -2784,6 +2786,70 @@ async function askChat(question) {
 
 // ---------- спецификация ----------
 
+// Удаление конкурса из NocoDB (0.37.0): запись реестра и спецификация вместе; только администратор сайта (кнопка —
+// на его странице, сервер проверяет сам).
+let specInfo = null;
+function specNeed() { const t = currentTender(); return (t && (t.internal || t.number || t.folder)) || ""; }
+$("head-delete").addEventListener("click", () => {
+  const t = currentTender();
+  if (!t) return;
+  const noco = t.source === "nocodb";
+  // Конкурс-папка (нет записи в NocoDB, 0.37.0): удаляется только папка — в «#Удалённые конкурсы».
+  $("sd-h").textContent = noco ? "Удалить конкурс из NocoDB" : "Удалить конкурс";
+  $("sd-rec-li").hidden = !noco;
+  $("sd-lead").replaceChildren(...(noco ? [document.createTextNode("Будут удалены "), el("b", { text: "вместе" }), document.createTextNode(":")]
+    : [document.createTextNode("Конкурса нет в NocoDB — с сайта уберётся только папка:")]));
+  $("sd-note").hidden = !noco;
+  $("sd-go").textContent = noco ? "Удалить запись и спецификацию" : "Убрать папку конкурса";
+  $("sd-folder-li").hidden = noco;
+  $("sd-folder").textContent = t.folder ? `«${t.folder}»` : "";
+  $("sd-with-folder-box").hidden = !(noco && t.folder);
+  $("sd-with-folder").checked = false;
+  $("sd-num").textContent = specNeed() || "без номера";
+  const has = noco && specInfo && !specInfo.none;
+  $("sd-spec-li").hidden = !noco || (specInfo && specInfo.none);
+  $("sd-title").textContent = has ? `«${specInfo.title}»` : "";
+  $("sd-rows").textContent = has ? `${specInfo.rows} строк` : "проверю перед удалением";
+  $("sd-need").textContent = specNeed();
+  $("sd-confirm").value = "";
+  $("sd-go").disabled = true;
+  setStatus("sd-status", "");
+  $("sd-dlg").showModal();
+  $("sd-confirm").focus();
+});
+$("sd-close").addEventListener("click", () => $("sd-dlg").close());
+$("sd-confirm").addEventListener("input", () => {
+  const norm = (x) => String(x || "").trim().toUpperCase().replace(/^K/, "К").replace(/\s|-/g, "");
+  $("sd-go").disabled = norm($("sd-confirm").value) !== norm(specNeed());
+});
+$("sd-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("sd-go").disabled = true;
+  const t = currentTender();
+  const noco = t && t.source === "nocodb";
+  setStatus("sd-status", noco ? "Сохраняю копию, удаляю спецификацию и запись…" : "Убираю папку конкурса…");
+  let r;
+  try {
+    r = noco
+      ? await api(clientPath(`/tenders/${state.tender}/delete`), {}, jsonPost({ confirm: $("sd-confirm").value, with_folder: $("sd-with-folder").checked }))
+      : await api(clientPath("/folders/delete"), {}, jsonPost({ folder: t.folder, confirm: $("sd-confirm").value }));
+  } catch (err) {
+    setStatus("sd-status", "Не удалено: " + err.message, true);
+    $("sd-go").disabled = false;
+    return;
+  }
+  $("sd-dlg").close();
+  toast((noco ? "Удалено из NocoDB: " : "Удалено: ") + r.done.join("; ") + (r.warnings.length ? ". ⚠ " + r.warnings.join("; ") : "") +
+    (noco ? ". Копия сохранена." : ""));
+  specInfo = null;
+  // Записи больше нет: есть папка — конкурс открывается как «папка без записи в NocoDB», нет — список конкурсов.
+  state.tender = r.folder ? "f:" + r.folder : "";
+  state.opened = "";
+  state.fresh = true;
+  saveUrl();
+  await loadTenders();
+});
+
 async function loadSpec(suppliersFresh = false) {
   const my = ++seq.spec;
   if (blockOff("spec")) return;
@@ -2791,6 +2857,7 @@ async function loadSpec(suppliersFresh = false) {
   $("spec-table").replaceChildren();
   $("spec-count").textContent = "";
   $("spec-link").hidden = true;
+  specInfo = null;
   $("spec-brands").hidden = true;
   $("head-brands").hidden = true;
   let d;
@@ -2802,6 +2869,7 @@ async function loadSpec(suppliersFresh = false) {
   }
   if (my !== seq.spec) return;
   if (!d.found) {
+    specInfo = { none: true };
     setStatus("spec-status", "У этого конкурса нет таблицы спецификации в NocoDB.");
     fillSelect($("spec-view"), []);
     return;
@@ -2810,6 +2878,7 @@ async function loadSpec(suppliersFresh = false) {
   $("spec-count").textContent = `· ${d.title} · ${d.rows.length} поз.`;
   $("spec-link").href = d.link;
   $("spec-link").hidden = false;
+  specInfo = { title: d.title, rows: d.rows.length };
   fillSelect($("spec-view"), d.views.map((v) => ({ value: v.id, label: v.title })), d.view ? d.view.id : "");
   state.specView = d.view ? d.view.id : "";
   renderSpec(d.columns, d.rows, d.brands);

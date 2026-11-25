@@ -783,3 +783,9 @@ details.rq-more[hidden] { display: none; }
   #rq-pos tr { display: block; border-bottom: 1px solid var(--line); padding: 6px 0; }
   #rq-pos td { display: block; border: 0; padding: 2px 6px; }
 }
+
+/* Удаление спецификации (0.37.0) */
+.btn.spec-del { color: var(--bad, #b42318); }
+.btn.primary.danger { background: #b42318; border-color: #b42318; color: #fff; }
+.btn.primary.danger:disabled { opacity: .55; }
+.btn.primary.danger:hover:not(:disabled) { background: #912018; border-color: #912018; color: #fff; }

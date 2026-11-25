@@ -21,7 +21,7 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, supplier_threads, tender_list, tender_rename, supplier_base
+from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, supplier_threads, tender_list, tender_rename, supplier_base, spec_delete
 from .noco_tables import own_table_async
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
@@ -437,6 +437,70 @@ async def api_tender(client_id: str, record_id: int, view: str | None = None, fr
         "fields": fields if card_on else [],
         "card_off": not card_on,
     }
+
+
+@app.post("/api/clients/{client_id}/tenders/{record_id}/delete")
+async def api_tender_delete(client_id: str, record_id: int, data: dict = Body(...)):
+    """Удалить конкурс из NocoDB (0.37.0) — спецификацию и запись реестра вместе; только администратор сайта.
+    data: {confirm: внутренний номер конкурса — как его ввёл администратор}. Перед удалением — копия (spec_delete)."""
+    if not access.is_admin():
+        raise HTTPException(403, "удалять конкурсы из NocoDB может только администратор сайта")
+    client = get_client(client_id)
+    noco = NocoClient(client.nocodb)
+    record = await noco.record(client.nocodb.registry_table_id, record_id, fresh=True)
+    internal, number = clean(record.get(F_INTERNAL)), clean(record.get(F_NUMBER))
+    want = norm_number(internal) or internal
+    got = str(data.get("confirm") or "").strip()
+    if not got or (norm_number(got) or got) != want:
+        raise HTTPException(400, f"для подтверждения впишите номер конкурса: {internal or record_id}")
+    table_id = await _spec_table(client, noco, record, True)
+    rows, columns = [], []
+    if table_id:
+        meta = await noco.table_meta(table_id, True)
+        rows = await noco.records(table_id, fresh=True)
+        columns = [c["title"] for c in meta["columns"]]
+    folder = _folders_by_number(list_folders(client)).get(norm_number(internal) or "")
+    fpath = None
+    if folder:
+        try:
+            fpath = folder_path(client, folder)
+        except FolderError:
+            fpath = None
+    me = access.current_user() or {}
+    try:
+        res = await asyncio.to_thread(spec_delete.delete, client, record=record, table_id=table_id, internal=internal,
+                                       number=number, folder_path=fpath, rows=rows, columns=columns,
+                                       actor=me.get("login", ""))
+    except spec_delete.SpecDeleteError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    res["folder"] = folder or ""
+    if folder and data.get("with_folder"):
+        try:
+            res["trash"] = await asyncio.to_thread(spec_delete.trash_folder, client, folder)
+            res["done"].append(f"папка «{folder}» → «{res['trash']}»")
+            res["folder"] = ""
+        except spec_delete.SpecDeleteError as exc:
+            res["warnings"].append(f"папка не перемещена: {exc}")
+    return res
+
+
+@app.post("/api/clients/{client_id}/folders/delete")
+def api_folder_delete(client_id: str, data: dict = Body(...)):
+    """Конкурс без записи в NocoDB (только папка): папка → «#Удалённые конкурсы» (0.37.0) — только администратор
+    сайта. data: {folder, confirm: номер конкурса или имя папки}."""
+    if not access.is_admin():
+        raise HTTPException(403, "удалять конкурсы может только администратор сайта")
+    client = get_client(client_id)
+    folder = str(data.get("folder") or "")
+    want = norm_number(folder) or folder
+    got = str(data.get("confirm") or "").strip()
+    if not got or (norm_number(got) or got) != want:
+        raise HTTPException(400, f"для подтверждения впишите: {want}")
+    try:
+        trash = spec_delete.trash_folder(client, folder)
+    except spec_delete.SpecDeleteError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return {"done": [f"папка «{folder}» → «{trash}»"], "warnings": [], "trash": trash, "folder": ""}
 
 
 @app.get("/api/clients/{client_id}/tenders/{record_id}/spec")

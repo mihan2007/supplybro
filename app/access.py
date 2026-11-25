@@ -77,6 +77,9 @@ RULES = [
     (re.compile(r"^/docs/process$"), "upload", "запустил обработку документов"),
     (re.compile(r"^/folders$"), "upload", "создал конкурс"),
     (re.compile(r"^/rename$"), "upload", "сменил внутренний номер конкурса"),
+    # Удаление конкурса из NocoDB (0.37.0): право здесь — только для журнала; пускает лишь администратора сайта адрес.
+    (re.compile(r"^/tenders/\d+/delete$"), "users", "удалил конкурс из NocoDB (запись и спецификацию)"),
+    (re.compile(r"^/folders/delete$"), "users", "убрал папку конкурса в «#Удалённые конкурсы»"),
     (re.compile(r"^/analysis/run$"), "analyze", "запустил анализ"),
     (re.compile(r"^/analysis/save$"), "analyze", "запустил запись в NocoDB"),
     (re.compile(r"^/analysis/changes/run$"), "analyze", "запустил разбор изменений документации"),
