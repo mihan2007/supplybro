@@ -262,21 +262,32 @@ def drafts(*, client_id: str, base_id: str, internal: str, title: str, rows: lis
         pos = [by_n[n] for n in e["positions"] if n in by_n]
         if not pos:
             continue
-        email = known.get(e["id"], "")
+        # Адрес: сохранённый на сайте (последний, на который отправляли / который ввели руками), иначе — все почты
+        # поставщика из NocoDB («Поставщики», колонка E-mail; несколько адресов — письмо уйдёт на все).
+        base_emails = s.get("emails") or []
+        email = known.get(e["id"]) or ", ".join(base_emails)
         letters.append({
             "key": "s" + e["id"], "supplier_id": e["id"], "supplier_name": s["name"], "level": s["level"],
             "status": s["status"], "method": s["method"], "site": s["site"], "brands": e["brands"], "strong": e["strong"],
-            "to": email, "checked": bool(email) and s["level"] != "grey", "sent_at": sent.get(e["id"]),
+            # 0.33.1: ничего не отмечено заранее — с почтами из NocoDB адрес есть почти у всех (К947: 146 из 150),
+            # и одно нажатие «Отправить» ушло бы всем. Выбор — фильтром брендов и «выбрать всех с адресом».
+            "to": email, "emails": base_emails, "checked": False,
+            "sent_at": sent.get(e["id"]),
             "subject": subject, "positions": [p["n"] for p in pos], "body": letter_body(pos, signature),
         })
     letters.append({
         "key": "other", "supplier_id": "", "supplier_name": "", "level": "", "status": "", "method": "", "site": "",
-        "brands": [], "strong": True, "to": "", "checked": False, "sent_at": None,
+        "brands": [], "strong": True, "to": "", "emails": [], "checked": False, "sent_at": None,
         "subject": subject, "positions": [p["n"] for p in positions], "body": letter_body(positions, signature),
     })
     for p in positions:
         p["line"] = position_line(p)
-    return {"positions": positions, "letters": letters, "signature": signature, "intro": INTRO,
+    # Бренды позиций (0.33.0): {№: [бренд]} — фильтр «по брендам» на странице сужает письма до этих позиций.
+    pos_brands = {}
+    for r in (brands or {}).get("rows", []):
+        if r.get("n") in by_n:
+            pos_brands[r["n"]] = [b["brand"] for b in r.get("brands", [])]
+    return {"positions": positions, "letters": letters, "pos_brands": pos_brands, "signature": signature, "intro": INTRO,
             "outro_xlsx": outro(signature, True), "outro_plain": outro(signature, False)}
 
 

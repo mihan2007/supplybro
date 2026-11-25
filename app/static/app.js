@@ -2428,12 +2428,40 @@ function renderChatLog() {
   $("chat-log").replaceChildren(...chatMsgs.map(renderChatMessage));
 }
 
+// Письмо поставщика (или вложение письма), где цен не нашлось, — не карточкой, а в строке «Письма без цен» со
+// ссылкой на переписку (0.32.1: вопросы поставщиков читают и отвечают в окне переписки).
+const plQuiet = (f) => Boolean(f.mail) && f.status === "done" && !(f.matches || []).length;
+
+function quietMailRow(files) {
+  const by = new Map();
+  for (const f of files) {
+    const k = f.mail.inbox_id || f.mail.from + "|" + f.mail.subject;
+    if (!by.has(k)) by.set(k, { f, names: [] });
+    by.get(k).names.push(f.name);
+  }
+  const items = [...by.values()].map(({ f, names }) => {
+    const who = f.supplier || f.mail.supplier || f.mail.from_name || f.mail.from;
+    const key = thKeyOfInbox({ request_id: f.mail.request_id, from_addr: f.mail.from });
+    const t = thFind(key);
+    const label = `${who}${t && t.waiting ? " · ждёт ответа" : ""} 💬`;
+    const b = thOpenBtn(key, label);
+    b.title = `Открыть переписку · ${fmtWhen(f.uploaded_at)} · разобрано: ${names.join(", ")}`;
+    return b;
+  });
+  const row = el("div", { class: "pl-quiet small" }, el("span", { class: "muted", text: `📧 Письма без цен (${items.length}): ` }));
+  items.forEach((b, i) => { if (i) row.append(document.createTextNode(" · ")); row.append(b); });
+  return row;
+}
+
 function renderSupplierDocs() {
-  const files = ((plData && plData.files) || []).slice().sort((a, b) => (b.uploaded_at || 0) - (a.uploaded_at || 0));
+  const all = ((plData && plData.files) || []).slice().sort((a, b) => (b.uploaded_at || 0) - (a.uploaded_at || 0));
+  const files = all.filter((f) => !plQuiet(f));
+  const quiet = all.filter(plQuiet);
   plCards.clear();
   const nodes = files.map((f) => { const n = pricelistCard(f); plCards.set(f.id, n); return n; });
+  if (quiet.length) nodes.unshift(quietMailRow(quiet));
   const busy = files.filter(PL_BUSY).length;
-  $("of-docs-title").textContent = `Документы поставщиков · ${files.length}` + (busy ? ` · разбирается: ${busy}` : "");
+  $("of-docs-title").textContent = `Документы поставщиков · ${files.length}` + (quiet.length ? ` · писем без цен: ${new Set(quiet.map((f) => f.mail.inbox_id || f.mail.from)).size}` : "") + (busy ? ` · разбирается: ${busy}` : "");
   replaceSafe($("of-docs-list"), ...(nodes.length ? nodes : [el("div", { class: "muted small", text: "Прайсов, КП, счетов и писем поставщиков пока нет." })]));
   if (busy) $("of-docs").open = true;
 }
@@ -2457,6 +2485,7 @@ async function loadPricelists() {
     if (!old) { added = true; continue; }
     if (JSON.stringify(old) === JSON.stringify(f)) continue;
     if (old.status !== f.status || (old.write || {}).status !== (f.write || {}).status) changedPrices = true;
+    if (plQuiet(f) !== plQuiet(old)) { added = true; continue; }
     const card = plCards.get(f.id);
     if (card) {
       const fresh = pricelistCard(f);
@@ -3153,7 +3182,7 @@ $("mail-form").addEventListener("submit", saveMailbox);
 
 // ---------- запросы цен поставщикам (0.27.0) ----------
 
-const rq = { d: null, sending: false, showAll: false };
+const rq = { d: null, sending: false, showAll: false, brands: new Set(), brandsAll: false };
 const RQ_SHOW = 12;
 const RQ_LEVEL = { green: "✅", yellow: "🟡", grey: "⛔" };
 const isEmail = (v) => /^[^@\s<>,;"']+@[^@\s<>,;"']+\.[^@\s<>,;"']+$/.test(v);
@@ -3165,7 +3194,7 @@ async function loadRequests() {
   const t = currentTender();
   if (!t || t.source !== "nocodb") return;
   setStatus("rq-status", "Готовлю письма по позициям спецификации…");
-  for (const id of ["rq-tools", "rq-actions", "rq-jh", "rq-journal-wrap", "rq-hint"]) $(id).hidden = true;
+  for (const id of ["rq-tools", "rq-actions", "rq-jh", "rq-journal-wrap", "rq-hint", "rq-threads-box"]) $(id).hidden = true;
   $("rq-letters").replaceChildren();
   $("rq-count").textContent = "";
   let d;
@@ -3178,13 +3207,18 @@ async function loadRequests() {
   if (my !== seq.rq) return;
   rq.d = d;
   rq.showAll = false;
+  rq.brands = new Set();
+  rq.brandsAll = false;
   for (const L of d.letters) { L.dirty = false; L.result = null; }
   mailState.boxes = d.boxes || [];
   const sentTo = new Set(d.journal.filter((j) => j.status === "sent").map((j) => j.supplier_id || j.to_addr));
   const answered = new Set(d.inbox.filter((x) => x.request_id).map((x) => x.request_id));
-  stg.req = { sent: sentTo.size, answered: d.journal.filter((j) => answered.has(j.id)).length, letters: d.inbox.length };
+  const threads = d.threads || [];
+  stg.req = { sent: sentTo.size, answered: threads.length || d.journal.filter((j) => answered.has(j.id)).length,
+    letters: d.inbox.length, waiting: threads.filter((x) => x.waiting).length };
   renderStages();
   renderRequests();
+  if (plData) renderSupplierDocs();      // «Письма без цен» — ссылки на переписку нужны нити из запросов
   if (d.can_send) loadInbox();
 }
 
@@ -3225,13 +3259,17 @@ function renderRequests() {
     renderJournal();
     return;
   }
-  const sup = d.letters.filter((L) => L.supplier_id);
-  setStatus("rq-status", sup.length ? "" : "По брендам позиций наших поставщиков не нашлось — можно отправить запрос любому адресату (внизу списка).");
-  $("rq-count").textContent = sup.length ? `· ${sup.length} поставщ. по брендам` : "";
+  renderRqBrands();
+  const sup = d.letters.filter((L) => L.supplier_id && rqVisible(L));
+  const allSup = d.letters.filter((L) => L.supplier_id).length;
+  setStatus("rq-status", allSup ? "" : "По брендам позиций наших поставщиков не нашлось — можно отправить запрос любому адресату (внизу списка).");
+  $("rq-count").textContent = !allSup ? "" : rq.brands.size
+    ? `· ${[...rq.brands].join(", ")}: ${sup.length} поставщ., ${rqBrandPositions().length} поз.`
+    : `· ${allSup} поставщ. по брендам`;
   const can = d.can_send && !document.body.classList.contains("no-purchase");
   $("rq-tools").hidden = !can || !sup.length;
   $("rq-actions").hidden = !can;
-  const shown = rq.showAll ? d.letters : [...sup.slice(0, RQ_SHOW), ...d.letters.filter((L) => !L.supplier_id)];
+  const shown = rq.showAll ? [...sup, ...d.letters.filter((L) => !L.supplier_id)] : [...sup.slice(0, RQ_SHOW), ...d.letters.filter((L) => !L.supplier_id)];
   const nodes = shown.map((L) => letterCard(L, can));
   if (sup.length > RQ_SHOW) {
     // «Показать всех поставщиков» / «Скрыть» (0.29.2); отмеченные письма при скрытии не теряются — отправятся.
@@ -3257,7 +3295,7 @@ function letterCard(L, can) {
     ? el("span", {}, el("b", { text: `${RQ_LEVEL[L.level] || ""} ${L.supplier_name}` }),
         document.createTextNode(` — ${L.level === "grey" ? "не работаем" : (L.status || "статус не указан").replace(/^Надёжный\.\s*/i, "")}` +
           (L.method ? ` · ${L.method}` : "")))
-    : el("b", { text: "Другому адресату (все позиции)" });
+    : el("b", { text: rq.brands && rq.brands.size ? `Другому адресату (позиции брендов: ${[...rq.brands].join(", ")})` : "Другому адресату (все позиции)" });
   const pos = L.positions.length > 15 ? L.positions.slice(0, 15).join(", ") + ` и ещё ${L.positions.length - 15}` : L.positions.join(", ");
   const meta = el("div", { class: "muted small" },
     document.createTextNode(`поз. ${pos}` + (L.brands.length ? ` · ${L.brands.join(", ")}` : "") + (L.strong ? "" : " · бренд только в наименовании")),
@@ -3272,7 +3310,18 @@ function letterCard(L, can) {
     result.textContent = L.result.ok ? `✅ отправлено (${L.result.tag})` + (L.result.sent_copy ? ` · ${L.result.sent_copy}` : "")
       : "⚠ " + L.result.error;
   }
-  card.append(head, el("div", { class: "rq-to" }, el("span", { class: "label", text: "Кому" }), to), result,
+  // Почты из NocoDB (0.31.2): если в поле другой адрес — показать их и дать подставить; несколько — письмо уйдёт на все.
+  const baseList = L.emails || [];
+  const same = baseList.length && addrList(L.to).map((a) => a.toLowerCase()).sort().join() === baseList.map((a) => a.toLowerCase()).sort().join();
+  let hint = null;
+  if (baseList.length && !same) {
+    const use = el("a", { href: "#", text: "подставить" });
+    use.addEventListener("click", (e) => { e.preventDefault(); to.value = baseList.join(", "); onAddressChange(L, to, check, card).then(renderRequests); });
+    hint = el("div", { class: "muted small" }, document.createTextNode(`в базе: ${baseList.join(", ")} · `), use);
+  } else if (baseList.length > 1) {
+    hint = el("div", { class: "muted small", text: `в базе ${baseList.length} адреса — письмо уйдёт на все; лишние можно убрать` });
+  }
+  card.append(head, el("div", { class: "rq-to" }, el("span", { class: "label", text: "Кому" }), to), ...(hint ? [hint] : []), result,
     letterDetails(L, can));
   return card;
 }
@@ -3324,14 +3373,14 @@ async function onAddressChange(L, input, check, card) {
 
 function updateSendButton() {
   if (!rq.d) return;
-  const n = rq.d.letters.filter((L) => L.checked).length;
+  const n = rq.d.letters.filter((L) => L.checked && rqVisible(L)).length;
   $("rq-send").textContent = n ? `Отправить выбранные (${n})` : "Отправить выбранные";
   $("rq-send").disabled = rq.sending || !n || !$("rq-box").value;
 }
 
 async function sendRequests() {
   const d = rq.d;
-  const chosen = d.letters.filter((L) => L.checked);
+  const chosen = d.letters.filter((L) => L.checked && rqVisible(L));
   const box = mailState.boxes.find((b) => String(b.id) === $("rq-box").value);
   if (!box) return toast("Выберите почтовый ящик (кнопка «✉ Мои ящики»)", true);
   const bad = chosen.filter((L) => !addrList(L.to).length || !addrList(L.to).every(isEmail));
@@ -3374,7 +3423,7 @@ function renderInboxTable() {
   const head = el("tr", {}, ...["Получено", "От кого", "Тема", "Как отнесено", "Файлы — в разбор цен", "Итог"].map((x) => el("th", { text: x })));
   const body = rows.map((r) => el("tr", {},
     el("td", { text: new Date(r.received_at * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) }),
-    el("td", { text: r.from_name ? `${r.from_name} <${r.from_addr}>` : r.from_addr }),
+    el("td", {}, thOpenBtn(thKeyOfInbox(r), r.from_name ? `${r.from_name} <${r.from_addr}>` : r.from_addr)),
     el("td", { text: r.subject }),
     el("td", { text: IB_HOW[r.how] || r.how }),
     el("td", { text: r.files.map((f) => f.split("/").pop()).join(", ") || "—" }),
@@ -3384,6 +3433,7 @@ function renderInboxTable() {
 }
 
 function renderJournal() {
+  renderThreads();
   renderInboxTable();
   const j = (rq.d && rq.d.journal) || [];
   $("rq-jh").hidden = $("rq-journal-wrap").hidden = !j.length;
@@ -3396,20 +3446,228 @@ function renderJournal() {
     el("td", { text: r.mailbox_address + (r.owner ? ` (${r.owner})` : "") }),
     el("td", { text: r.to_addr }),
     el("td", { text: r.supplier_name || "—" }),
-    el("td", { text: r.positions.join(", ") }),
+    el("td", { text: r.kind === "reply" ? "↩ ответ поставщику" : r.positions.join(", ") }),
     el("td", { class: r.status === "sent" ? "ok-text" : "warn-text",
       text: r.status === "sent" ? "✅ отправлено" + (r.sent_copy ? " · " + r.sent_copy : "") : r.status === "sending" ? "отправляется…" : "⚠ " + r.error }),
-    el("td", { text: answers.has(r.id) ? "📩 " + new Date(answers.get(r.id).received_at * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : r.status === "sent" ? "ждём" : "" }),
+    el("td", {}, answers.has(r.id) ? thOpenBtn(thKeyOfRequest(r), "📩 " + new Date(answers.get(r.id).received_at * 1000).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }))
+      : document.createTextNode(r.status === "sent" && r.kind !== "reply" ? "ждём" : "")),
     el("td", { class: "muted", text: r.tag })));
   $("rq-journal").replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
 }
+
+// ---------- запросы: фильтр по брендам (0.33.0) ----------
+// Пользователь 24.11.2026: «нужно, чтобы можно было отправлять запросы по брендам — какая-то возможность
+// отфильтровать». Выбранные бренды: видны только поставщики с ними, в письмах — только позиции этих брендов
+// (из L._all — исходного набора письма), «Другому адресату» — тоже только они. Скрытые письма не отправляются.
+
+const RQ_BRANDS_SHOW = 16;
+
+function rqBrandPositions() {
+  const pb = (rq.d && rq.d.pos_brands) || {};
+  return Object.keys(pb).filter((n) => pb[n].some((b) => rq.brands.has(b)));
+}
+
+function rqVisible(L) {
+  if (!rq.brands || !rq.brands.size || !L.supplier_id) return true;
+  return L.positions.length > 0;
+}
+
+function applyRqBrands() {
+  const d = rq.d;
+  const want = rq.brands.size ? new Set(rqBrandPositions()) : null;
+  for (const L of d.letters) {
+    L._all = L._all || L.positions.slice();
+    const base = L.supplier_id ? L._all : d.positions.map((p) => p.n);
+    L.positions = want ? base.filter((n) => want.has(String(n))) : (L.supplier_id ? L._all.slice() : base);
+    if (want && L.supplier_id && !L.positions.length) L.checked = false;
+    L.dirty = false;
+  }
+  renderRequests();
+}
+
+function renderRqBrands() {
+  const box = $("rq-brands");
+  const pb = (rq.d && rq.d.pos_brands) || {};
+  const stat = new Map();
+  for (const [n, list] of Object.entries(pb)) for (const b of list) {
+    if (!stat.has(b)) stat.set(b, { pos: new Set(), sup: new Set() });
+    stat.get(b).pos.add(n);
+  }
+  for (const L of (rq.d && rq.d.letters) || []) if (L.supplier_id) for (const b of L.brands || []) if (stat.has(b)) stat.get(b).sup.add(L.supplier_id);
+  const list = [...stat.entries()].sort((a, b) => b[1].pos.size - a[1].pos.size || a[0].localeCompare(b[0], "ru"));
+  box.hidden = list.length < 2;
+  if (box.hidden) return;
+  const shown = rq.brandsAll ? list : list.filter(([b], i) => i < RQ_BRANDS_SHOW || rq.brands.has(b));
+  const chip = (b, st) => {
+    const c = el("button", { type: "button", class: "rq-brand" + (rq.brands.has(b) ? " on" : ""), title: `Позиции: ${[...st.pos].join(", ")}` },
+      document.createTextNode(b), el("span", { class: "muted", text: `${st.pos.size} поз. · ${st.sup.size} пост.` }));
+    c.addEventListener("click", () => { if (rq.brands.has(b)) rq.brands.delete(b); else rq.brands.add(b); applyRqBrands(); });
+    return c;
+  };
+  const nodes = [el("span", { class: "muted", text: "Бренды:" })];
+  const all = el("button", { type: "button", class: "rq-brand" + (rq.brands.size ? "" : " on"), text: "все" });
+  all.addEventListener("click", () => { rq.brands.clear(); applyRqBrands(); });
+  nodes.push(all, ...shown.map(([b, st]) => chip(b, st)));
+  if (list.length > RQ_BRANDS_SHOW) {
+    const more = el("a", { href: "#", text: rq.brandsAll ? "свернуть" : `ещё ${list.length - shown.length}` });
+    more.addEventListener("click", (e) => { e.preventDefault(); rq.brandsAll = !rq.brandsAll; renderRqBrands(); });
+    nodes.push(more);
+  }
+  replaceSafe(box, ...nodes);
+}
+
+// ---------- переписка с поставщиками (0.32.0) ----------
+// Строка на ответившего поставщика в «Запросах» (ждущие ответа — сверху и с отметкой), щелчок — окно #th-dlg:
+// письма по времени (наши справа), ответ с того ящика, с которого ушёл запрос, «Ответ не нужен».
+
+const TH_SHOW = 8;
+const th = { key: null, d: null, showAll: false };
+
+function thKeyOfRequest(j) {
+  if (j.supplier_id) return "s" + j.supplier_id;
+  const a = addrList(j.to_addr).filter((x) => x.includes("@"));
+  return "a" + (a.length ? a[0].toLowerCase() : j.id);
+}
+
+function thKeyOfInbox(m) {
+  const j = ((rq.d && rq.d.journal) || []).find((x) => x.id === m.request_id);
+  if (j) return thKeyOfRequest(j);
+  const byAddr = ((rq.d && rq.d.journal) || []).find((x) => addrList(x.to_addr).map((a) => a.toLowerCase()).includes(m.from_addr));
+  return byAddr ? thKeyOfRequest(byAddr) : "a" + m.from_addr;
+}
+
+function thFind(key) { return ((rq.d && rq.d.threads) || []).find((t) => t.key === key) || null; }
+
+function thOpenBtn(key, text) {
+  const b = el("button", { type: "button", class: "th-open", title: "Открыть переписку", text });
+  b.addEventListener("click", (e) => { e.stopPropagation(); openThread(key); });
+  return b;
+}
+
+function renderThreads() {
+  const list = (rq.d && rq.d.threads) || [];
+  $("rq-threads-box").hidden = !list.length;
+  if (!list.length) return;
+  const wait = list.filter((t) => t.waiting).length;
+  $("rq-th-count").textContent = `· ответили: ${list.length}` + (wait ? ` · ждут ответа: ${wait}` : "");
+  if (stg.req && stg.req.waiting !== wait) { stg.req.waiting = wait; renderStages(); }
+  const shown = th.showAll ? list : list.slice(0, TH_SHOW);
+  const nodes = shown.map((t) => {
+    const b = el("button", { type: "button", class: "th-item" + (t.waiting ? " wait" : "") },
+      el("span", { class: "th-name", text: t.supplier_name }),
+      el("span", { class: "muted small", text: `📩 ${t.in} · ✉ ${t.out} · ${fmtWhen(t.last_at)} · ${t.last_from === "supplier" ? "последнее — от поставщика" : "последнее — наше"}` }),
+      t.waiting ? el("span", { class: "badge warn", text: "ждёт ответа" }) : null);
+    b.addEventListener("click", () => openThread(t.key));
+    return b;
+  });
+  if (list.length > TH_SHOW) nodes.push(smallBtn(th.showAll ? "Свернуть" : `Показать всех (${list.length})`, () => { th.showAll = !th.showAll; renderThreads(); }));
+  replaceSafe($("rq-threads"), ...nodes);
+}
+
+async function openThread(key) {
+  th.key = key;
+  th.d = null;
+  $("thd-title").textContent = (thFind(key) || {}).supplier_name || "Переписка";
+  $("thd-info").textContent = "Загружаю письма…";
+  $("thd-reply").hidden = true;
+  replaceSafe($("thd-msgs"));
+  setStatus("thd-status", "");
+  if (!$("th-dlg").open) $("th-dlg").showModal();
+  const t = currentTender();
+  try {
+    th.d = await api(clientPath(`/tenders/${state.tender}/requests/thread`), { key, folder: (t && t.folder) || "" });
+  } catch (err) {
+    $("thd-info").textContent = "Не удалось загрузить переписку: " + err.message;
+    return;
+  }
+  if (th.key === key) renderThread(true);
+}
+
+function thMsg(m, i) {
+  const long = (m.text || "").length > 500 || (m.text || "").split("\n").length > 9;
+  const text = el("div", { class: "th-text" + (long ? " cut" : ""), text: m.text || "(текста в письме нет)" });
+  const who = m.dir === "in" ? m.who : `${m.kind === "reply" ? "Наш ответ" : "Наш запрос"} · ${m.who}` + (m.to ? ` → ${m.to}` : "");
+  const box = el("div", { class: "th-msg " + m.dir + (m.status === "error" ? " err" : "") },
+    el("div", { class: "th-meta", text: `${who} · ${fmtWhen(m.at)}` }),
+    i === 0 && m.subject ? el("div", { class: "th-meta", text: "Тема: " + m.subject }) : null,
+    text);
+  if (long) {
+    const more = el("a", { href: "#", class: "th-more", text: "показать полностью" });
+    more.addEventListener("click", (e) => { e.preventDefault(); more.textContent = text.classList.toggle("cut") ? "показать полностью" : "свернуть"; });
+    box.append(more);
+  }
+  if (m.attachments.length) box.append(el("div", { class: "muted small", text: "📎 " + m.attachments.join(", ") }));
+  if (m.status === "error" && m.error) box.append(el("div", { class: "small warn-text", text: "⚠ " + m.error }));
+  return box;
+}
+
+function renderThread(fresh) {
+  const d = th.d;
+  const t = d.thread;
+  $("thd-title").textContent = t.supplier_name;
+  $("thd-info").textContent = [t.positions.length ? "позиции запроса: " + t.positions.join(", ") : "",
+    t.waiting ? "⚠ поставщик ждёт ответа" : ""].filter(Boolean).join(" · ");
+  replaceSafe($("thd-msgs"), ...d.messages.map(thMsg));
+  const box = $("thd-msgs");
+  box.scrollTop = box.scrollHeight;
+  const can = Boolean(rq.d && rq.d.can_send) && !document.body.classList.contains("no-purchase");
+  const mine = (d.boxes || []).find((b) => b.id === t.mailbox_id) || (!t.mailbox_id && (d.boxes || [])[0]);
+  $("thd-reply").hidden = !can;
+  if (fresh) {
+    const lastIn = d.messages.filter((m) => m.dir === "in").pop();
+    $("thd-text").value = "";
+    $("thd-to").value = (lastIn && lastIn.addr) || t.to || "";
+  }
+  $("thd-from").textContent = mine ? `уйдёт с ящика ${mine.address}, ответом на письмо поставщика`
+    : `запрос ушёл с ящика ${t.mailbox_address || "другого сотрудника"}${t.owner ? " (" + t.owner + ")" : ""} — ответить отсюда может только его владелец`;
+  $("thd-send").disabled = !mine;
+  $("thd-done").hidden = !t.waiting;
+}
+
+$("thd-close").addEventListener("click", () => $("th-dlg").close());
+$("thd-send").addEventListener("click", async () => {
+  const body = $("thd-text").value.trim();
+  const to = $("thd-to").value.trim();
+  if (!body) return setStatus("thd-status", "Напишите текст ответа.", true);
+  if (!addrList(to).length || !addrList(to).every(isEmail)) return setStatus("thd-status", "Проверьте адрес получателя.", true);
+  const key = th.key;
+  $("thd-send").disabled = true;
+  setStatus("thd-status", "Отправляю…");
+  try {
+    const t = currentTender();
+    const r = await api(clientPath(`/tenders/${state.tender}/requests/reply`), { folder: (t && t.folder) || "" }, jsonPost({ key, to, body }));
+    if (rq.d) rq.d.threads = r.threads;
+    if (th.key === key) {
+      th.d = { thread: r.thread, messages: r.messages, boxes: th.d.boxes };
+      renderThread(true);
+      setStatus("thd-status", "✅ Отправлено" + (r.sent_copy ? " · " + r.sent_copy : "") + ". Ответ поставщика появится здесь, когда сайт проверит почту.");
+    }
+    renderThreads();
+    toast("Ответ поставщику отправлен");
+  } catch (err) {
+    setStatus("thd-status", "Не отправлено: " + err.message, true);
+    $("thd-send").disabled = false;
+  }
+});
+$("thd-done").addEventListener("click", async () => {
+  const key = th.key;
+  try {
+    const t = currentTender();
+    const r = await api(clientPath(`/tenders/${state.tender}/requests/done`), { folder: (t && t.folder) || "" }, jsonPost({ key }));
+    if (rq.d) rq.d.threads = r.threads;
+    if (th.d && th.key === key) { th.d.thread.waiting = false; renderThread(false); }
+    renderThreads();
+  } catch (err) {
+    setStatus("thd-status", "Не получилось: " + err.message, true);
+  }
+});
 
 $("rq-send").addEventListener("click", sendRequests);
 $("rq-box").addEventListener("change", updateSendButton);
 $("rq-xlsx").addEventListener("change", () => { if (rq.d) { for (const L of rq.d.letters) if (!L.dirty) L.body = rqBody(L); renderRequests(); } });
 $("rq-all").addEventListener("click", (e) => {
   e.preventDefault();
-  for (const L of rq.d.letters) if (L.supplier_id && L.level !== "grey" && addrList(L.to).length) L.checked = true;
+  for (const L of rq.d.letters) if (L.supplier_id && rqVisible(L) && L.level !== "grey" && addrList(L.to).length) L.checked = true;
   renderRequests();
 });
 $("rq-none").addEventListener("click", (e) => { e.preventDefault(); for (const L of rq.d.letters) L.checked = false; renderRequests(); });
@@ -3839,7 +4097,11 @@ function wbDetail(r) {
   // Запросы
   const req = [];
   const answered = new Set(((rq.d && rq.d.inbox) || []).filter((x) => x.request_id).map((x) => x.request_id));
-  for (const j of r.reqs) req.push(el("div", {}, document.createTextNode(`${answered.has(j.id) ? "📩" : "⏳"} ${j.supplier_name || j.to_addr} · ${new Date(j.sent_at * 1000).toLocaleDateString("ru-RU")}`)));
+  for (const j of r.reqs) {
+    const text = `${answered.has(j.id) ? "📩" : "⏳"} ${j.supplier_name || j.to_addr} · ${new Date(j.sent_at * 1000).toLocaleDateString("ru-RU")}`;
+    const t = thFind(thKeyOfRequest(j));
+    req.push(el("div", {}, t ? thOpenBtn(t.key, text + (t.waiting ? " · ждёт ответа" : "") + " 💬") : document.createTextNode(text)));
+  }
   if (r.notAsked.length) req.push(el("div", { class: "muted" }, document.createTextNode("Наши поставщики по бренду, кому не писали: " + r.notAsked.slice(0, 6).map((L) => L.supplier_name).join(", ") + (r.notAsked.length > 6 ? ` и ещё ${r.notAsked.length - 6}` : ""))));
   const ask = smallBtn("✉ Запросить цену по этой позиции", (e) => { e.stopPropagation(); wbAsk([r.n]); });
   box.append(el("div", { class: "wb-part" }, el("h4", { text: "Запросы" }), el("div", { class: "wb-list small" }, ...(req.length ? req : [el("div", { class: "muted", text: "Не запрашивали." })])),
@@ -3857,6 +4119,7 @@ function wbDetail(r) {
 function wbAsk(ns) {
   if (!rq.d) return toast("Запросы ещё загружаются — попробуйте через секунду", true);
   const want = new Set(ns.map(String));
+  rq.brands = new Set();                  // выбор позиций в таблице главнее фильтра по брендам
   for (const L of rq.d.letters) {
     L._all = L._all || L.positions.slice();
     const base = L.supplier_id ? L._all : rq.d.positions.map((p) => p.n);
@@ -4209,7 +4472,8 @@ function renderStages() {
   const add = (id, label, text, cls) => { if (!$(id) || $(id).hidden) return; items.push({ id, label, text, cls }); };
   if (stg.docs) add("docs", "Документы", stg.docs.n ? `${stg.docs.n} файл.` + (stg.docs.pending ? ` · ждут ${stg.docs.pending}` : "") : "нет", stg.docs.n ? (stg.docs.pending ? "busy" : "ok") : "none");
   if (stg.analysis) add("analysis", "Анализ", { done: "готов", busy: "идёт…", none: "не делали" }[stg.analysis], { done: "ok", busy: "busy", none: "none" }[stg.analysis]);
-  if (stg.req) add("requests", "Запросы", stg.req.sent ? `ответили ${stg.req.answered} из ${stg.req.sent}` : "не отправляли", stg.req.sent ? (stg.req.answered ? "ok" : "busy") : "none");
+  if (stg.req) add("requests", "Запросы", stg.req.sent ? `ответили ${stg.req.answered} из ${stg.req.sent}` + (stg.req.waiting ? ` · ждут ответа ${stg.req.waiting}` : "") : "не отправляли",
+    stg.req.sent ? (stg.req.answered && !stg.req.waiting ? "ok" : "busy") : "none");
   if (stg.offers) add("offers", "Цены поставщиков", stg.offers.withPrices ? `${stg.offers.withPrices} из ${stg.offers.total} поз.` + (stg.offers.written ? ` · в NocoDB ${stg.offers.written}` : "") : "нет", stg.offers.withPrices ? "ok" : "none");
   if (stg.bid) add("bid", "Заявка", { done: "собрана", draft: "черновик", busy: "готовится…", none: "не готовили" }[stg.bid], { done: "ok", draft: "busy", busy: "busy", none: "none" }[stg.bid]);
   if (stg.brands) add("spec", "Наши бренды", `${stg.brands.positions_matched} из ${stg.brands.positions_total} поз.`, "info");

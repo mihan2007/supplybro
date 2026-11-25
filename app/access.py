@@ -98,6 +98,8 @@ RULES = [
     # Запросы цен поставщикам по почте (0.27.0) — то же право, что прайсы.
     (re.compile(r"^/tenders/\d+/requests/send$"), "purchase", "отправил запросы цен поставщикам"),
     (re.compile(r"^/tenders/\d+/requests/email$"), "purchase", "указал адрес почты поставщика"),
+    (re.compile(r"^/tenders/\d+/requests/reply$"), "purchase", "ответил поставщику"),
+    (re.compile(r"^/tenders/\d+/requests/done$"), "purchase", "отметил: ответ поставщику не нужен"),
     (re.compile(r"^/chat$"), "chat", "задал вопрос в чате"),
     (re.compile(r"^/chat/clear$"), "chat", "очистил историю чата"),
 ]

@@ -9,7 +9,7 @@
         "url": "https://app.nocodb.com",
         "workspace_id": "wzs963xn",
         "base_id": "py03vcjrohur7u7",
-        "registry_table_id": "m9w2qkxcvt02nkb",
+        "registry_table_id": "m9w2qkxcvt02nkb", "suppliers_table_id": "mgf91gdj8fxail7",
         "token_file": "/run/secrets/nocodb_main",
         "participant_column": "Участник",
         "default_registry_view": "Вся таблица",

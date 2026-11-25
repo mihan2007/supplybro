@@ -133,6 +133,9 @@ class NocoSettings:
     # Представления по умолчанию (если такие есть в NocoDB).
     default_registry_view: str = "Вся таблица"
     default_spec_view: str = "Сбор цен"
+    # Таблица «Поставщики» (0.31.2): id таблицы NocoDB (m…), из которой брать поставщиков — бренды, статус, почты.
+    # Пусто — таблица «Поставщики» в базе клиента. Тот же ключ NocoDB; таблица может быть в другой базе.
+    suppliers_table_id: str = ""
     # Откуда база (0.21.0): settings — config/clients.json, env — NOCODB_URL_<КЛИЕНТ> в .env, admin — админ-панель.
     source: str = "settings"
 

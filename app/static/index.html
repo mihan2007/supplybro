@@ -304,6 +304,13 @@
       </div>
       <div class="status" id="rq-status"></div>
       <div class="rq-hint muted small" id="rq-hint" hidden></div>
+      <!-- Переписка с поставщиками (0.32.0): строка на ответившего поставщика, щелчок — окно переписки -->
+      <div class="th-box" id="rq-threads-box" hidden>
+        <h3 class="rq-jh">Переписка с поставщиками <span class="muted" id="rq-th-count"></span></h3>
+        <div class="th-list" id="rq-threads"></div>
+      </div>
+      <!-- Фильтр по брендам (0.33.0): только поставщики выбранных брендов и только позиции этих брендов -->
+      <div class="rq-brands small" id="rq-brands" hidden></div>
       <div class="rq-tools need-purchase" id="rq-tools" hidden>
         <a href="#" id="rq-all">выбрать всех с адресом</a> · <a href="#" id="rq-none">снять все</a>
       </div>
@@ -446,6 +453,26 @@
     <div class="ofd-add" id="ofd-add">
       <textarea id="ofd-text" rows="3" placeholder="Комментарий: условия, сроки, договорённости…"></textarea>
       <button class="btn small" id="ofd-save-comment" type="button">Добавить комментарий</button>
+    </div>
+  </dialog>
+
+  <!-- Переписка с поставщиком (0.32.0) -->
+  <dialog class="dlg th-dlg" id="th-dlg">
+    <div class="section-head">
+      <h2 id="thd-title">Переписка</h2>
+      <button class="btn ghost small" id="thd-close" type="button">Закрыть</button>
+    </div>
+    <div class="muted small" id="thd-info"></div>
+    <div class="th-msgs" id="thd-msgs"></div>
+    <div class="th-reply need-purchase" id="thd-reply">
+      <textarea id="thd-text" rows="4" placeholder="Ответ поставщику: уточнения, ответы на вопросы, просьба назвать цену…"></textarea>
+      <div class="th-to"><span class="label">Кому</span><input id="thd-to" type="text"></div>
+      <div class="mf-actions">
+        <button class="btn primary small" id="thd-send" type="button">Отправить</button>
+        <button class="btn ghost small" id="thd-done" type="button" title="Убрать отметку «ждёт ответа» — например, ответили по телефону">Ответ не нужен</button>
+        <span class="muted small" id="thd-from"></span>
+      </div>
+      <div class="status" id="thd-status"></div>
     </div>
   </dialog>
 

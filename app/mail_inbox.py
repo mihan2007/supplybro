@@ -58,6 +58,8 @@ SKIPPED_DAYS = 14                      # пропущенные письма —
 STATE_VERSION = 2                      # 0.28.1: ящики перечитываются один раз с даты первого запроса                    # писем за один заход в ящик (остальные — в следующий)
 RAW_DIR = db.DATA_DIR / "mail_inbox"
 MAIL_SUBDIR = "Почта"
+INLINE_IMAGE_KB = 40                   # 0.32.1: картинки в тексте письма (логотип, подпись) до 40 КБ в разбор цен не идут;
+#                                        скриншот таблицы цен обычно больше — он разбирается
 PUBLIC_DOMAINS = {"mail.ru", "bk.ru", "inbox.ru", "list.ru", "internet.ru", "yandex.ru", "ya.ru", "yandex.com",
                   "gmail.com", "googlemail.com", "rambler.ru", "outlook.com", "hotmail.com", "icloud.com", "me.com",
                   "yahoo.com", "qip.ru", "lenta.ru", "ro.ru"}
@@ -121,6 +123,11 @@ def init() -> None:
     supplier_requests.init()
     with db.connect() as con:
         con.executescript(SCHEMA)
+        if "body" not in {r["name"] for r in con.execute("PRAGMA table_info(mail_inbox)")}:
+            try:                                   # 0.32.0: текст письма без цитаты — для переписки на сайте
+                con.execute("ALTER TABLE mail_inbox ADD COLUMN body TEXT NOT NULL DEFAULT ''")
+            except Exception:                      # noqa: BLE001 — колонку добавил другой процесс
+                pass
         if "version" not in {r["name"] for r in con.execute("PRAGMA table_info(mail_inbox_state)")}:
             try:
                 con.execute("ALTER TABLE mail_inbox_state ADD COLUMN version INTEGER NOT NULL DEFAULT 0")
@@ -155,7 +162,7 @@ def parse(raw: bytes) -> dict:
         date = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
     except (TypeError, ValueError, IndexError):
         date = time.time()
-    plain, html_text, attachments = [], [], []
+    plain, html_text, attachments, inline = [], [], [], set()
     for part in msg.walk():
         if part.is_multipart():
             continue
@@ -167,7 +174,11 @@ def parse(raw: bytes) -> dict:
                 data = part.get_payload(decode=True) or b""
             except Exception:                   # noqa: BLE001 — битая часть письма
                 continue
-            attachments.append((_dec(fname) or f"вложение.{ctype.split('/')[-1]}", data))
+            name = _dec(fname) or f"вложение.{ctype.split('/')[-1]}"
+            attachments.append((name, data))
+            # Картинка внутри текста письма (логотип, подпись: image001.png с Content-ID) — не документ поставщика.
+            if ctype.startswith("image/") and (disp == "inline" or part.get("Content-ID")) and len(data) <= INLINE_IMAGE_KB * 1024:
+                inline.add(name)
             continue
         if ctype in ("text/plain", "text/html"):
             try:
@@ -181,7 +192,7 @@ def parse(raw: bytes) -> dict:
         "from_addr": addr.strip().lower(), "from_name": _dec(name),
         "to": [a.lower() for _, a in getaddresses([str(msg.get("To") or ""), str(msg.get("Cc") or "")]) if a],
         "subject": _dec(msg.get("Subject")), "date": date, "refs": refs,
-        "text": text[:200_000], "attachments": attachments,
+        "text": text[:200_000], "attachments": attachments, "inline": inline,
     }
 
 
@@ -338,6 +349,8 @@ def deliver(m: dict, raw: bytes, box: dict, request: dict, how: str, inbox_id: i
             skipped.append(f"{fname} (больше {MAX_FILE_MB} МБ)")
             continue
         p = _write_unique(dest / fname, data)
+        if name in m.get("inline", ()):
+            continue                               # логотип / подпись — сохранён, но не разбирается
         if _readable(fname):
             files.append(p)
         else:
@@ -368,7 +381,7 @@ def _save_row(box: dict, uid: int | None, m: dict, **fields) -> int:
         "mailbox_id": box["id"], "owner": box["owner"], "uid": uid, "message_id": m["message_id"] or f"uid:{box['id']}:{uid}",
         "from_addr": m["from_addr"], "from_name": m["from_name"][:200], "subject": m["subject"][:500],
         "received_at": m["date"], "attachments": json.dumps([n for n, _ in m["attachments"]], ensure_ascii=False),
-        "preview": m["text"][:600], "created_at": now, "updated_at": now, **fields,
+        "preview": m["text"][:600], "body": own_text(m["text"])[:20000], "created_at": now, "updated_at": now, **fields,
     }
     for k in ("candidates", "files"):
         if not isinstance(row.get(k, "[]"), str):
@@ -519,6 +532,7 @@ def for_tender(client_id: str, internal: str) -> list[dict]:
     for r in rows:
         d = _public(r)
         d.pop("preview", None)
+        d.pop("body", None)
         out.append(d)
     return out
 

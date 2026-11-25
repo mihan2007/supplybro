@@ -21,7 +21,7 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, tender_list
+from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, supplier_threads, tender_list
 from .noco_tables import own_table_async
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
@@ -626,6 +626,8 @@ async def api_requests(client_id: str, record_id: int, folder: str = ""):
         "boxes": boxes,
         "journal": supplier_requests.journal(client.id, ctx["internal"]),
         "inbox": mail_inbox.for_tender(client.id, ctx["internal"]),
+        "threads": supplier_threads.threads(client.id, ctx["internal"]),
+        "me": mail.owner_key(),
         "can_send": access.can(access.current_user(), "purchase") if access.LOGIN_REQUIRED else True,
     }
 
@@ -653,6 +655,54 @@ async def api_requests_send(client_id: str, record_id: int, folder: str = "", da
 
     results = await asyncio.to_thread(_mail_call, run)
     return {"results": results, "journal": supplier_requests.journal(client.id, ctx["internal"])}
+
+
+# ---------- переписка с поставщиками (0.32.0) ----------
+
+async def _internal_of(client: Client, record_id: int) -> str:
+    record = await NocoClient(client.nocodb).record(client.nocodb.registry_table_id, record_id)
+    return clean(record.get(F_INTERNAL)) or f"№{record_id}"
+
+
+def _thread_call(fn, *args, **kw):
+    try:
+        return fn(*args, **kw)
+    except (mail.MailError, supplier_requests.RequestError, supplier_threads.ThreadError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/tenders/{record_id}/requests/thread")
+async def api_requests_thread(client_id: str, record_id: int, key: str, folder: str = ""):
+    """Письма переписки с одним поставщиком по конкурсу (наши и его), по времени."""
+    client = get_client(client_id)
+    internal = await _internal_of(client, record_id)
+    data = _thread_call(supplier_threads.messages, client, client.id, internal, key)
+    data["boxes"] = mail.list_boxes(mail.owner_key())
+    return data
+
+
+@app.post("/api/clients/{client_id}/tenders/{record_id}/requests/reply")
+async def api_requests_reply(client_id: str, record_id: int, folder: str = "", data: dict = Body(...)):
+    """Ответить поставщику: {key, to, body, box_id?} — с ящика, с которого ушёл запрос."""
+    client = get_client(client_id)
+    internal = await _internal_of(client, record_id)
+    key = str(data.get("key") or "")
+    res = await asyncio.to_thread(_thread_call, supplier_threads.reply, client, owner=mail.owner_key(),
+                                  client_id=client.id, internal=internal, key=key, to=str(data.get("to") or ""),
+                                  body=str(data.get("body") or ""), box_id=data.get("box_id"))
+    if not res["ok"]:
+        raise HTTPException(400, "не отправлено: " + res["error"])
+    return {**res, **_thread_call(supplier_threads.messages, client, client.id, internal, key),
+            "threads": supplier_threads.threads(client.id, internal)}
+
+
+@app.post("/api/clients/{client_id}/tenders/{record_id}/requests/done")
+async def api_requests_done(client_id: str, record_id: int, folder: str = "", data: dict = Body(...)):
+    """«Ответ не нужен»: письма поставщика до этой минуты больше не ждут ответа."""
+    client = get_client(client_id)
+    internal = await _internal_of(client, record_id)
+    supplier_threads.mark_done(client.id, internal, str(data.get("key") or ""), mail.owner_key())
+    return {"threads": supplier_threads.threads(client.id, internal)}
 
 
 @app.post("/api/clients/{client_id}/tenders/{record_id}/requests/email")
