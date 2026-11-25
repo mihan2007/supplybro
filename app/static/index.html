@@ -224,7 +224,12 @@
     <section class="panel" id="spec" data-group="spec" hidden>
       <div class="section-head">
         <h2>Спецификация <span class="muted" id="spec-count"></span></h2>
-        <div class="section-tools">
+        <!-- Позиции / Цены (0.40.0): одна таблица позиций — что о них показать; «Цены» — бывшие «Все цены» из «Закупки» -->
+        <div class="seg" id="spec-mode" role="tablist">
+          <button type="button" data-mode="pos" title="Таблица спецификации из NocoDB: ТЗ, аналоги, марка, производитель, страна">Позиции</button>
+          <button type="button" data-mode="prices" title="Все цены по позициям: НМЦ, интернет, поставщики, лучшая цена и к НМЦ">Цены</button>
+        </div>
+        <div class="section-tools spec-pos-only">
           <label class="inline">Представление
             <select id="spec-view"></select>
           </label>
@@ -241,10 +246,24 @@
           <a class="btn ghost small" id="spec-link" target="_blank" rel="noopener" hidden>Открыть в NocoDB ↗</a>
         </div>
       </div>
-      <div class="status" id="spec-status"></div>
-      <!-- Наши поставщики по брендам позиций (0.26.0) -->
-      <div class="sb-box" id="spec-brands" hidden></div>
-      <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
+      <!-- Быстрые отборы и сброс фильтров колонок (0.40.0); фильтр колонки — «▾» в её заголовке, как в Excel -->
+      <div class="cf-bar" id="cf-bar">
+        <div class="chip-row small" id="cf-chips"></div>
+        <input type="search" id="cf-search" placeholder="Поиск: №, позиция, марка, бренд">
+        <span class="muted small" id="cf-info"></span>
+        <button class="btn ghost small" id="cf-clear" type="button" hidden>Сбросить фильтры</button>
+      </div>
+      <div class="spec-pos-only">
+        <div class="status" id="spec-status"></div>
+        <!-- Наши поставщики по брендам позиций (0.26.0) -->
+        <div class="sb-box" id="spec-brands" hidden></div>
+        <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
+      </div>
+      <!-- Цены по позициям (0.8.0 «Все цены»; с 0.40.0 — здесь, а не в «Закупке») -->
+      <div class="spec-prices-only" hidden>
+        <div class="status" id="ps-status"></div>
+        <div class="table-wrap an-wrap" id="ps-wrap"><table id="ps-table"></table></div>
+      </div>
     </section>
 
     <!-- Предложения поставщиков: сравнение цен перед записью в NocoDB (0.29.0) -->
@@ -259,9 +278,19 @@
       <div class="status" id="of-status"></div>
       <details class="help of-legend" id="of-legend" hidden><summary>ⓘ Как читать таблицу и записывать цены</summary><div class="muted small">
         <span class="of-key best">лучшая цена</span> <span class="of-key over">выше НМЦ</span> <span class="of-key warn">⚠ с замечанием</span>
-        <span class="of-key written">в NocoDB</span> · отмеченные ☑ цены записываются в «Отдел закупок» спецификации (до 10 поставщиков
-        на позицию) только кнопкой «Записать отмеченные»; 💬 — комментарии, ✏ — исправить цену (исходная сохраняется).
+        <span class="of-key written">в NocoDB</span> · <b>щелчок по цене</b> — отметить её (☑) для записи или снять отметку; отмеченные
+        цены записываются в «Отдел закупок» спецификации (до 10 поставщиков на позицию) только кнопкой «Записать отмеченные».
+        <b>✏ у номера позиции</b> — окно позиции: все предложения, исправить цену (исходная сохраняется), комментарии.
+        «▾» в заголовке колонки — фильтр, как в Excel.
       </div></details>
+      <!-- Быстрые отборы и фильтры колонок (0.41.0), как в «Спецификации» -->
+      <div class="notice of-unsaved" id="of-unsaved" hidden></div>
+      <div class="cf-bar" id="of-cf-bar" hidden>
+        <div class="chip-row small" id="of-cf-chips"></div>
+        <input type="search" id="of-cf-search" placeholder="Поиск: №, позиция, марка, бренд, поставщик">
+        <span class="muted small" id="of-cf-info"></span>
+        <button class="btn ghost small" id="of-cf-clear" type="button" hidden>Сбросить фильтры</button>
+      </div>
       <div class="table-wrap of-wrap" id="of-wrap"></div>
       <!-- Документы поставщиков (0.30.0): карточки прайсов, КП, счетов и писем — здесь, а не в чате -->
       <div id="of-docs-slot"><details class="of-docs" id="of-docs">
@@ -335,7 +364,7 @@
     <!-- Поиск цен: Россия (Яндекс) и зарубеж (Claude), по 3 лучшие цены со ссылками, своя база цен -->
     <section class="panel" id="prices" data-group="purchase" hidden>
       <div class="section-head">
-        <h2>Цены <span class="muted" id="pr-info"></span></h2>
+        <h2>Поиск цен в интернете <span class="muted" id="pr-info"></span></h2>
         <div class="section-tools">
           <label class="inline admin-only" title="Чем искать цены по России (выбор запоминается в этом браузере)">Поиск <select id="pr-engine"></select></label>
           <label class="inline check" title="Искать и за рубежом (Германия, Китай, США и др.) — поиском DeepSeek"><input type="checkbox" id="pr-abroad" checked> за рубежом</label>
@@ -352,13 +381,7 @@
       <div class="notice warn" id="pr-stale" hidden>Анализ документов обновился после поиска цен — цены перенесены, где позиции не изменились; при сомнениях повторите поиск.</div>
       <div id="pr-noco"></div>
       <ul class="checks" id="pr-checks"></ul>
-      <!-- Все цены (0.8.0): интернет, «не проверено» из выдачи, поставщики (прайсы и «Отдел закупок» NocoDB) -->
-      <div class="tabs" id="pr-tabs" role="tablist" hidden>
-        <button class="tab active" type="button" data-ptab="summary">Все цены</button>
-        <button class="tab" type="button" data-ptab="search">Поиск в интернете</button>
-      </div>
-      <div class="status" id="ps-status"></div>
-      <div class="table-wrap an-wrap" id="ps-wrap" hidden><table id="ps-table"></table></div>
+      <!-- «Все цены» с 0.40.0 — во вкладке «Спецификация» → «Цены»; здесь — итоги поиска в интернете -->
       <div class="table-wrap an-wrap" id="pr-wrap" hidden><table id="pr-table"></table></div>
       <div class="usage" id="pr-usage"></div>
     </section>
@@ -459,6 +482,51 @@
     <div class="ofd-add" id="ofd-add">
       <textarea id="ofd-text" rows="3" placeholder="Комментарий: условия, сроки, договорённости…"></textarea>
       <button class="btn small" id="ofd-save-comment" type="button">Добавить комментарий</button>
+    </div>
+  </dialog>
+
+  <!-- Окно позиции (0.41.0): все предложения по позиции, выбор, исправление цены, комментарии; ← → — соседние позиции -->
+  <dialog class="dlg op-dlg" id="op-dlg">
+    <div class="section-head">
+      <h2 id="op-title">Позиция</h2>
+      <div class="op-nav">
+        <button class="btn ghost small" id="op-prev" type="button" title="Предыдущая позиция (с учётом фильтров)">← предыдущая</button>
+        <span class="muted small" id="op-pos"></span>
+        <button class="btn ghost small" id="op-next" type="button" title="Следующая позиция (с учётом фильтров)">следующая →</button>
+        <button class="btn ghost small" id="op-close" type="button">Закрыть</button>
+      </div>
+    </div>
+    <div class="op-facts" id="op-facts"></div>
+    <!-- Бренд и страна позиции (0.42.0): правка на сайте → в NocoDB кнопкой «Записать в NocoDB» -->
+    <div class="op-fields need-offers" id="op-fields">
+      <label class="field"><span class="label">Бренд (производитель)</span><input id="op-maker" type="text" list="op-maker-list"></label>
+      <label class="field"><span class="label">Страна происхождения</span><input id="op-country" type="text" list="op-country-list"></label>
+      <button class="btn small" id="op-save-fields" type="button">Сохранить</button>
+      <button class="btn ghost small" id="op-reset-fields" type="button" hidden>Как в NocoDB</button>
+      <span class="op-unsaved small" id="op-fields-note" hidden></span>
+      <datalist id="op-maker-list"></datalist><datalist id="op-country-list"></datalist>
+    </div>
+    <h3 class="op-h">Предложения поставщиков</h3>
+    <div class="table-wrap op-offers" id="op-offers"></div>
+    <!-- Цена вручную (0.42.0): поставщик, цена, НДС — колонка «Ввод вручную — поставщик», сразу отмечена к записи -->
+    <details class="op-manual need-offers" id="op-manual">
+      <summary>✍ Добавить цену вручную</summary>
+      <div class="op-manual-grid">
+        <label class="field"><span class="label">Поставщик</span><input id="opm-supplier" type="text" list="opm-sup-list" placeholder="ООО «Ромашка»"></label>
+        <label class="field"><span class="label">Цена за ед., руб.</span><input id="opm-price" type="text" placeholder="12 345,50"></label>
+        <label class="field"><span class="label">НДС</span><select id="opm-vat"><option value="с НДС">с НДС</option><option value="без НДС">без НДС</option><option value="">не указано</option></select></label>
+        <label class="field op-wide"><span class="label">Откуда цена (по телефону, сайт, письмо…)</span><input id="opm-note" type="text"></label>
+        <button class="btn primary small" id="opm-add" type="button">Добавить</button>
+      </div>
+      <datalist id="opm-sup-list"></datalist>
+      <div class="muted small">Цена попадёт в колонку «Ввод вручную — поставщик», сразу отмеченная к записи. В NocoDB — кнопкой «Записать в NocoDB».</div>
+    </details>
+    <div class="op-net" id="op-net"></div>
+    <h3 class="op-h">Комментарии к позиции</h3>
+    <div class="ofd-list" id="op-comments"></div>
+    <div class="ofd-add" id="op-add">
+      <textarea id="op-text" rows="2" placeholder="Комментарий к позиции: что уточнить, договорённости, сроки…"></textarea>
+      <button class="btn small" id="op-save-comment" type="button">Добавить комментарий</button>
     </div>
   </dialog>
 

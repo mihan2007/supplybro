@@ -770,3 +770,60 @@ details.rq-more[hidden] { display: none; }
   #an-fields { max-height: none; overflow: visible; }
   #an-fields-table th { top: var(--sticky-h, 120px); }
 }
+
+/* Спецификация: «Позиции / Цены» и фильтры колонок, как в Excel (0.40.0) */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; margin-left: 12px; }
+.seg[hidden] { display: none; }
+.seg button { font: inherit; font-size: 13px; padding: 4px 14px; border: 0; background: var(--panel); color: var(--text); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent); color: #fff; }
+.seg button[hidden] { display: none; }
+.cf-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 10px; }
+.cf-bar .chip-row { margin: 0; }
+.cf-bar input[type=search] { min-width: 260px; padding: 5px 10px; }
+.chip-btn[disabled] { opacity: .45; cursor: default; }
+.cf-btn { font: inherit; font-size: 11px; line-height: 1; margin-left: 4px; padding: 2px 4px; border: 1px solid transparent; border-radius: 4px;
+  background: none; color: var(--muted); cursor: pointer; vertical-align: 1px; }
+.cf-btn:hover { border-color: var(--line); color: var(--text); }
+.cf-btn.on { background: var(--accent); color: #fff; }
+.cf-pop { position: absolute; z-index: 60; width: 280px; max-height: 360px; display: flex; flex-direction: column; gap: 6px; padding: 10px;
+  background: var(--panel); border: 1px solid var(--line-strong, #ccc); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .16); font-size: 13px; }
+.cf-pop input[type=search] { padding: 4px 8px; }
+.cf-title { font-weight: 600; }
+.cf-list { overflow: auto; display: grid; gap: 2px; }
+.cf-item { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+.cf-item:hover { background: var(--row-alt); }
+.cf-item[hidden] { display: none; }
+.cf-all { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.cf-btn { white-space: nowrap; }
+
+/* «Предложения поставщиков» как спецификация + окно позиции (0.41.0) */
+.op-open { border: 1px solid var(--line); background: var(--panel); border-radius: 4px; cursor: pointer; font-size: 12px; padding: 0 4px; margin-left: 6px; color: var(--accent); }
+.op-open:hover { border-color: var(--accent); }
+.of-cell.pick { cursor: pointer; }
+.of-cell.pick:hover { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -2px; }
+.of-cell.sel { box-shadow: inset 3px 0 0 var(--accent); }
+.of-mark { color: var(--accent); font-size: 14px; }
+.op-dlg { width: min(1100px, 96vw); max-width: 96vw; }
+.op-nav { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.op-facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.op-h { margin: 12px 0 6px; font-size: 15px; }
+.op-offers { max-height: 46vh; }
+.op-table td { vertical-align: top; }
+.op-table tr.op-best td { background: color-mix(in srgb, var(--ok) 12%, var(--panel)) !important; }
+.op-table tr.op-sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.op-act { white-space: nowrap; }
+.op-act .btn { margin: 0 4px 4px 0; }
+.op-price-in { width: 120px; padding: 3px 6px; margin-bottom: 4px; }
+.op-net { margin: 8px 0; }
+
+/* 0.42.0: правки на сайте, ещё не записанные в NocoDB */
+.op-unsaved { color: #9a6700; font-size: 12px; }
+td.of-pend { background: #fff8e1; }
+.notice.of-unsaved { background: #fff8e1; border: 1px solid #f0d48a; color: #6b4e00; padding: 6px 10px; border-radius: 6px; margin: 6px 0; font-size: 13px; }
+#op-fields { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin: 8px 0; }
+#op-fields input { width: 180px; }
+#op-manual { margin: 10px 0; border: 1px dashed var(--line, #ccd); border-radius: 6px; padding: 6px 10px; }
+#op-manual summary { cursor: pointer; font-weight: 600; }
+#op-manual .op-manual-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 6px; }
+#op-manual input#opm-price { width: 120px; }

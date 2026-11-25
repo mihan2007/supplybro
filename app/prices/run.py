@@ -176,7 +176,9 @@ def noco_positions(client, folder_name: str) -> list[dict]:
 def positions_from_spec(spec: dict | None) -> list[dict]:
     """Строки спецификации (price_summary.read_spec) → позиции для поиска цен; без наименования — пропуск."""
     out = [{"№": s["n"], "Наименование позиции": s["name"], "Марка/модель": s["brand_model"], "Кол-во": s["qty"],
-            "Ед. изм.": s["unit"], "Стоимость НМЦ": s["nmc"]}
+            "Ед. изм.": s["unit"], "Стоимость НМЦ": s["nmc"],
+            # 0.41.0: бренд и страна — для «Предложений поставщиков» (поиску цен не мешают)
+            "Производитель": s.get("maker") or "", "Страна происхождения": s.get("country") or ""}
            for s in ((spec or {}).get("rows") or {}).values() if s.get("n") and (s.get("name") or s.get("brand_model"))]
     return sorted(out, key=lambda r: [(0, int(x), "") if x.isdigit() else (1, 0, x)
                                       for x in re.split(r"(\d+)", str(r["№"])) if x])

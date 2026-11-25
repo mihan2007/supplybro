@@ -527,12 +527,15 @@ function showTender(t) {
   $("bid").hidden = !(t && t.folder) || blockOff("bid");
   $("chat").hidden = !(t && t.folder) || blockOff("chat");
   $("card").hidden = !(t && t.source === "nocodb") || blockOff("card");
-  $("spec").hidden = !(t && t.source === "nocodb") || blockOff("spec");
+  // «Спецификация» (0.40.0): «Позиции» — таблица NocoDB, «Цены» — все цены по позициям (нужна папка конкурса)
+  $("spec").hidden = !(t && ((t.source === "nocodb" && !blockOff("spec")) || (t.folder && !blockOff("prices"))));
+  specModeInit(t);
   $("requests").hidden = !(t && t.source === "nocodb") || blockOff("prices");
 }
 
 async function loadTender() {
   const t = currentTender();
+  if (state.opened !== state.tender) { cfReset(); specData = null; psLast = null; }   // фильтры — свои у конкурса (0.40.0)
   state.opened = t ? state.tender : "";
   showTender(t);
   saveUrl();
@@ -1766,17 +1769,10 @@ function unverifiedList(items) {
 // ---------- все цены (0.8.0): интернет, поставщики, лучшая цена ----------
 
 let psLast = null;          // /prices/summary
-let prTab = "summary";      // вкладка раздела «Цены»: summary — все цены, search — поиск в интернете
 
 function applyPriceTab() {
-  const hasSearch = Boolean(prLast && prLast.report);
-  const hasSummary = Boolean(psLast && (psLast.has_positions || psLast.has_analysis));
-  $("pr-tabs").hidden = !hasSummary;
-  const tab = hasSummary ? prTab : "search";
-  for (const b of $("pr-tabs").querySelectorAll(".tab")) b.classList.toggle("active", b.dataset.ptab === tab);
-  $("ps-wrap").hidden = !(hasSummary && tab === "summary");
-  $("ps-status").hidden = !(hasSummary && tab === "summary") || !$("ps-status").textContent;
-  $("pr-wrap").hidden = !(hasSearch && tab === "search");
+  // 0.40.0: «Все цены» — во вкладке «Спецификация» → «Цены»; здесь — только итоги поиска в интернете.
+  $("pr-wrap").hidden = !(prLast && prLast.report);
 }
 
 async function loadPriceSummary() {
@@ -1793,6 +1789,7 @@ async function loadPriceSummary() {
   if (my !== seq.ps) return;
   psLast = { ...d, folder: t.folder };
   renderPriceSummary(d);
+  if (of.d && (of.d.suppliers || []).length) renderOffers();   // отборы «Закупки» берут интернет из «Цен» (0.41.1)
   applyPriceTab();
   // Конкурс без анализа на сайте: теперь известно, есть ли позиции в спецификации NocoDB, — обновить кнопку поиска
   // (а /prices — сколько их, для подсказки и оценки стоимости).
@@ -1868,14 +1865,14 @@ function historyList(items) {
 }
 
 function renderPriceSummary(d) {
-  const rows = d.rows || [];
+  const rows = (d.rows || []).map(psDb);
   const withPrice = rows.filter((r) => r.best).length;
   const withSup = rows.filter((r) => (r.suppliers || []).length).length;
   const showAgent = rows.some((r) => (r.agent || []).length || r.market);
   const showHist = rows.some((r) => (r.history || []).length);
   const parts = [`Позиций: ${rows.length}; с ценой — ${withPrice}; с ценами поставщиков — ${withSup}.`];
   if (d.positions_source === "nocodb") parts.push("Позиции — из спецификации NocoDB (анализа документов на сайте у этого конкурса нет).");
-  parts.push(d.has_report ? `Поиск в интернете на сайте — ${d.report_at}.` : "Поиск в интернете на сайте ещё не запускался.");
+  parts.push("Показано только записанное в NocoDB; найденное сайтом и цены поставщиков до записи — во вкладке «Закупка».");
   if (d.noco_read) parts.push("Цены из спецификации NocoDB учтены (агент, рынки РФ / зарубеж, отдел закупок, доставка).");
   if (d.noco_error) parts.push("⚠ Спецификация NocoDB не прочитана: " + d.noco_error);
   const h = d.history || {};
@@ -1883,13 +1880,47 @@ function renderPriceSummary(d) {
   else if (h.building) parts.push("Своя база цен (прошлые конкурсы) собирается — обновите страницу через минуту.");
   parts.push("Лучшая — самая низкая из проверенных (интернет, агент, поставщики; 🔴 — с пометкой; «не проверено» и прошлые конкурсы — не учитываются).");
   setStatus("ps-status", parts.join(" "), Boolean(d.noco_error));
-  const cols = ["№", "Позиция", "Кол-во", "НМЦ за ед.", "Интернет: Россия", "Интернет: зарубеж"];
-  if (showAgent) cols.push("Агент (NocoDB)");
-  cols.push("Поставщики (прайсы, КП, счета, NocoDB)");
-  if (showHist) cols.push("Прошлые конкурсы");
-  cols.push("Лучшая цена", "К НМЦ");
-  const head = el("tr", {}, ...cols.map((h, i) => el("th", { class: i === 0 ? "stick0" : (i === 1 ? "stick1" : null), text: h })));
+  renderPsTable();
+}
+
+// Таблица «Цены» (бывшие «Все цены») с фильтрами колонок и быстрыми отборами (0.40.0).
+// «Спецификация» — только данные из базы (0.42.0): найденное сайтом и цены из прайсов до записи — во вкладке «Закупка».
+function psDb(r) {
+  const rf = (r.rf || []).filter((a) => a.from_noco), abroad = (r.abroad || []).filter((a) => a.from_noco);
+  const suppliers = (r.suppliers || []).filter((x) => x.source === "NocoDB" || x.in_noco);
+  const cands = [...rf.slice(0, 1).map((a) => [a.price_rub, `РФ: ${a.domain || "NocoDB"}`, a.url]),
+    ...abroad.slice(0, 1).map((a) => [a.price_rub, `зарубеж: ${a.domain || "NocoDB"}`, a.url]),
+    ...(r.agent || []).map((a) => [a.price_rub, `агент (цена ${a.i})`, a.url]),
+    ...(r.market ? [[r.market.price_rub, "рыночная цена (NocoDB)", r.market.url]] : []),
+    ...suppliers.filter((x) => x.price_rub && !(x.problems || []).length).map((x) => [x.price_rub, `поставщик: ${x.supplier}` + (x.match && x.match !== "exact" ? " 🔴" : ""), ""])]
+    .filter((c) => c[0]);
+  const b = cands.length ? cands.reduce((m, c) => (c[0] < m[0] ? c : m)) : null;
+  return { ...r, rf, abroad, suppliers, unverified: [], best: b ? { price_rub: b[0], source: b[1], url: b[2] } : null,
+    ratio: b && r.nmc ? b[0] / r.nmc : null };
+}
+function psDbRows() { return ((psLast && psLast.rows) || []).map(psDb); }
+
+function renderPsTable() {
+  const d = psLast;
+  if (!d) return;
+  const all = psDbRows();
+  const showAgent = all.some((r) => (r.agent || []).length || r.market);
+  const showHist = all.some((r) => (r.history || []).length);
+  const defs = psDefs(showAgent, showHist);
+  const rows = all.filter((r) => cfPass("ps", defs, r));
+  cfShowInfo("ps", rows.length, all.length);
+  renderCfChips();
+  const cols = [["№"], ["Позиция"], ["Бренд", "brand"], ["Страна", "country"], ["Кол-во", "unit"], ["НМЦ за ед.", "nmc"],
+    ["Интернет: Россия", "rf"], ["Интернет: зарубеж", "abroad"]];
+  if (showAgent) cols.push(["Агент (NocoDB)", "agent"]);
+  cols.push(["Поставщики (прайсы, КП, счета, NocoDB)", "sup"]);
+  if (showHist) cols.push(["Прошлые конкурсы", "hist"]);
+  cols.push(["Лучшая цена", "best"], ["К НМЦ", "ratio"]);
+  const byKey = new Map(defs.map((x) => [x.key, x]));
+  const head = el("tr", {}, ...cols.map(([h, key], i) => cfTh("ps", byKey.get(key), all, defs, renderPsTable, h,
+    i === 0 ? "stick0" : (i === 1 ? "stick1" : null))));
   const body = el("tbody");
+  if (!rows.length) body.append(el("tr", {}, el("td", { colspan: String(cols.length), class: "muted", text: "Нет позиций с такими фильтрами." })));
   for (const r of rows) {
     const pos = el("td", { class: "stick1" }, el("div", { text: r.name }));
     if (r.brand_model) pos.append(el("div", { class: "muted", text: r.brand_model }));
@@ -1898,7 +1929,9 @@ function renderPriceSummary(d) {
       unverifiedList(r.unverified.filter((a) => a.market === "rf")));
     const abCell = el("td", {}, r.abroad.length ? offerList(r.abroad, true) : none(r.searched && d.abroad !== false ? "не найдено" : "—"),
       unverifiedList(r.unverified.filter((a) => a.market === "abroad")));
+    // «Спецификация» — только данные из базы, ничего не правится (0.41.1): окна позиции отсюда нет.
     const cells = [el("td", { class: "stick0", text: r.n }), pos,
+      el("td", { text: r.maker || "" }), el("td", { text: r.country || "" }),
       el("td", { class: "num", text: [r.qty, r.unit].filter((x) => x !== null && x !== undefined && x !== "").join(" ") }),
       el("td", { class: "num", text: r.nmc ? rub(r.nmc) : "" }), rfCell, abCell];
     if (showAgent) cells.push(el("td", {}, (r.agent || []).length || r.market ? agentList(r) : none("—")));
@@ -1919,9 +1952,6 @@ function renderPriceSummary(d) {
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
 }
 
-for (const b of document.querySelectorAll("#pr-tabs .tab")) {
-  b.addEventListener("click", () => { prTab = b.dataset.ptab; applyPriceTab(); });
-}
 
 function renderPricesTable(r, positions) {
   const byN = new Map(positions.map((p) => [String(p["№"]), p]));
@@ -2783,6 +2813,240 @@ async function askChat(question) {
   }
 }
 
+// ---------- фильтры колонок, как в Excel (0.40.0) ----------
+// Пользователь 26.11.2026: «фильтры как в Excel у столбца — небольшой выпадающий список, где можно по брендам отобрать,
+// по ценам есть или нет, и прочие фильтры». «▾» в заголовке колонки — список значений с галочками и числами (по
+// строкам, прошедшим остальные фильтры); снятая галочка прячет строки. Быстрые отборы — чипы над таблицей «Цены»;
+// всё вместе работает как «и». Фильтры — на конкурс (сбрасываются при смене конкурса и кнопкой «Сбросить фильтры»).
+
+// 0.41.0: и «Предложения поставщиков» (scope of) — свои фильтры, чипы и поиск.
+const cf = { ps: {}, spec: {}, of: {}, chips: { ps: new Set(), of: new Set() }, q: { spec: "", ps: "", of: "" } };
+let cfPop = null;
+
+function cfReset() {
+  cf.ps = {}; cf.spec = {}; cf.of = {};
+  cf.chips = { ps: new Set(), of: new Set() };
+  cf.q = { spec: "", ps: "", of: "" };
+  for (const id of ["cf-search", "of-cf-search"]) if ($(id)) $(id).value = "";
+  cfClose();
+}
+function cfChipList(scope) { return scope === "ps" ? PS_CHIPS : scope === "of" ? OF_CHIPS : []; }
+function cfHay(scope, r) {
+  if (scope === "ps") return [r.n, r.name, r.brand_model, r.maker, r.country].join(" ");
+  if (scope === "of") return [r.n, r.name, r.brand, r.maker, r.country, ...ofSupNames(r)].join(" ");
+  return Object.values(r).map(cellText).join(" ");
+}
+function cfNorm(x) { return String(x || "").toLowerCase().replace(/ё/g, "е"); }
+
+function cfPass(scope, defs, r, skip) {
+  for (const d of defs) {
+    if (d.key === skip) continue;
+    const want = cf[scope][d.key];
+    if (want && !d.values(r).some((v) => want.has(v))) return false;
+  }
+  for (const k of cf.chips[scope] || []) { const c = cfChipList(scope).find((x) => x[0] === k); if (c && !c[2](r)) return false; }
+  const q = cf.q[scope];
+  if (q) {
+    const hay = cfNorm(cfHay(scope, r));
+    if (!q.split(/\s+/).every((w) => hay.includes(w))) return false;
+  }
+  return true;
+}
+
+function cfActive(scope) { return Object.keys(cf[scope]).length + ((cf.chips[scope] || new Set()).size) + (cf.q[scope] ? 1 : 0); }
+
+function cfShowInfo(scope, shown, total) {
+  const n = cfActive(scope);
+  if (scope === "of") {
+    $("of-cf-info").textContent = n ? `показано ${shown} из ${total}` : "";
+    $("of-cf-clear").hidden = !n;
+    return;
+  }
+  if (specMode() !== scope.replace("ps", "prices").replace("spec", "pos")) return;
+  $("cf-info").textContent = n ? `показано ${shown} из ${total}` : "";
+  $("cf-clear").hidden = !n;
+}
+
+// Чипы быстрых отборов: box — куда, all — все строки, rerender — перерисовать таблицу.
+function renderChipsInto(box, scope, all, rerender) {
+  const set = cf.chips[scope];
+  box.replaceChildren(...cfChipList(scope).map(([k, label, fn]) => {
+    const n = all.filter(fn).length;
+    const b = el("button", { type: "button", class: "chip-btn" + (set.has(k) ? " on" : ""), text: `${label} · ${n}`, disabled: n || set.has(k) ? null : "" });
+    b.addEventListener("click", () => { set.has(k) ? set.delete(k) : set.add(k); rerender(); });
+    return b;
+  }));
+}
+
+// Заголовок колонки с кнопкой фильтра (def нет — просто заголовок).
+function cfTh(scope, def, allRows, defs, rerender, text, cls) {
+  const th = el("th", { class: cls || null });
+  th.append(document.createTextNode(text));
+  if (def) {
+    const on = Boolean(cf[scope][def.key]);
+    const b = el("button", { type: "button", class: "cf-btn" + (on ? " on" : ""), title: on ? "Фильтр включён — изменить" : "Фильтр колонки" }, on ? "▼" : "▾");
+    b.addEventListener("click", (e) => { e.stopPropagation(); cfOpen(scope, def, allRows, defs, rerender, b); });
+    th.append(b);
+  }
+  return th;
+}
+
+function cfClose() { if (cfPop) { cfPop.remove(); cfPop = null; } }
+document.addEventListener("click", (e) => { if (cfPop && !cfPop.contains(e.target)) cfClose(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") cfClose(); });
+
+function cfOpen(scope, def, allRows, defs, rerender, btn) {
+  cfClose();
+  const counts = new Map();
+  for (const r of allRows) {
+    if (!cfPass(scope, defs, r, def.key)) continue;
+    for (const v of new Set(def.values(r))) counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  const cur = cf[scope][def.key];
+  // выбранные значения, которых сейчас нет среди строк, тоже показать (чтобы их можно было снять)
+  if (cur) for (const v of cur) if (!counts.has(v)) counts.set(v, 0);
+  const empty = (v) => /^\(/.test(v);
+  const values = [...counts.keys()].sort((a, b) => (def.order ? def.order.indexOf(a) - def.order.indexOf(b) : 0) ||
+    (empty(a) - empty(b)) || (counts.get(b) - counts.get(a)) || a.localeCompare(b, "ru"));
+  const pop = el("div", { class: "cf-pop" });
+  const search = values.length > 8 ? el("input", { type: "search", placeholder: "Найти значение" }) : null;
+  const list = el("div", { class: "cf-list" });
+  const isOn = (v) => !cur || cur.has(v);
+  const apply = (sel) => {
+    if (sel.size === values.length) delete cf[scope][def.key]; else cf[scope][def.key] = sel;
+    rerender();
+  };
+  const selected = () => new Set([...list.querySelectorAll("input[data-v]")].filter((x) => x.checked).map((x) => x.dataset.v));
+  const allBox = el("input", { type: "checkbox" });
+  allBox.checked = !cur;
+  allBox.addEventListener("change", () => {
+    for (const x of list.querySelectorAll("input[data-v]")) if (!x.closest("label").hidden) x.checked = allBox.checked;
+    apply(selected());
+  });
+  for (const v of values) {
+    const box = el("input", { type: "checkbox", "data-v": v });
+    box.checked = isOn(v);
+    box.addEventListener("change", () => { allBox.checked = [...list.querySelectorAll("input[data-v]")].every((x) => x.checked); apply(selected()); });
+    list.append(el("label", { class: "cf-item" }, box, el("span", { text: v }), el("span", { class: "muted", text: String(counts.get(v)) })));
+  }
+  if (search) search.addEventListener("input", () => {
+    const q = cfNorm(search.value);
+    for (const lab of list.children) lab.hidden = Boolean(q) && !cfNorm(lab.textContent).includes(q);
+  });
+  const only = (v) => apply(new Set([v]));
+  list.addEventListener("dblclick", (e) => { const lab = e.target.closest(".cf-item"); if (lab) only(lab.querySelector("input").dataset.v); });
+  pop.append(...[el("div", { class: "cf-title", text: def.label }), search,
+    el("label", { class: "cf-item cf-all" }, allBox, el("span", { text: "Выделить всё" })), list,
+    el("div", { class: "muted small", text: "Двойной щелчок — только это значение" })].filter(Boolean));
+  pop.addEventListener("click", (e) => e.stopPropagation());
+  document.body.append(pop);
+  const r = btn.getBoundingClientRect();
+  pop.style.top = (r.bottom + window.scrollY + 4) + "px";
+  pop.style.left = Math.max(8, Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - pop.offsetWidth - 8)) + "px";
+  cfPop = pop;
+  if (search) search.focus();
+}
+
+// Цены: значения фильтров колонок.
+const PS_NONE = "(нет)";
+function psMarket(r, key) {
+  if ((r[key] || []).length) return "есть цена";
+  if ((r.unverified || []).some((a) => a.market === key)) return "только «не проверено»";
+  return r.searched ? "не найдено" : "не искали";
+}
+function psDefs(showAgent, showHist) {
+  const has = (x) => (x ? "есть" : PS_NONE);
+  const defs = [
+    { key: "brand", label: "Бренд", values: (r) => [r.maker || "(не указан)"] },
+    { key: "country", label: "Страна", values: (r) => [r.country || "(не указана)"] },
+    { key: "unit", label: "Ед. изм.", values: (r) => [r.unit || "(не указана)"] },
+    { key: "nmc", label: "НМЦ за ед.", values: (r) => [r.nmc ? "есть НМЦ" : "нет НМЦ"] },
+    { key: "rf", label: "Интернет: Россия", order: ["есть цена", "только «не проверено»", "не найдено", "не искали"], values: (r) => [psMarket(r, "rf")] },
+    { key: "abroad", label: "Интернет: зарубеж", order: ["есть цена", "только «не проверено»", "не найдено", "не искали"], values: (r) => [psMarket(r, "abroad")] },
+    { key: "sup", label: "Поставщики", values: (r) => [!(r.suppliers || []).length ? PS_NONE
+      : r.suppliers.some((x) => x.match !== "exact" || (x.problems || []).length) ? "есть, с замечанием" : "есть"] },
+    { key: "best", label: "Лучшая цена", values: (r) => [r.best ? "есть" : PS_NONE] },
+    { key: "ratio", label: "К НМЦ", order: ["≤ 85 % НМЦ", "85–100 % НМЦ", "выше НМЦ", "нет цены", "нет НМЦ"],
+      values: (r) => [!r.nmc ? "нет НМЦ" : !r.best ? "нет цены" : r.ratio <= 0.85 ? "≤ 85 % НМЦ" : r.ratio <= 1 ? "85–100 % НМЦ" : "выше НМЦ"] },
+  ];
+  if (showAgent) defs.push({ key: "agent", label: "Агент", values: (r) => [has((r.agent || []).length || r.market)] });
+  if (showHist) defs.push({ key: "hist", label: "Прошлые конкурсы", values: (r) => [has((r.history || []).length)] });
+  return defs;
+}
+// Быстрые отборы (чипы) — самые ходовые.
+const PS_CHIPS = [
+  ["nothing", "без цены вообще", (r) => !r.best && !(r.suppliers || []).length && !(r.rf || []).length && !(r.abroad || []).length],
+  ["nosup", "без цен поставщиков", (r) => !(r.suppliers || []).length],
+  ["nonet", "без цен в интернете", (r) => !(r.rf || []).length && !(r.abroad || []).length],
+  ["over", "выше НМЦ", (r) => r.ratio > 1],
+  ["unwritten", "есть цены — не записаны", (r) => (r.suppliers || []).some((x) => x.source === "прайс" && !x.in_noco && !x.written)],
+  ["unverified", "только «не проверено»", (r) => !(r.rf || []).length && !(r.abroad || []).length && (r.unverified || []).length > 0],
+];
+function renderCfChips() {
+  const box = $("cf-chips");
+  if (specMode() !== "prices" || !psLast) { box.replaceChildren(); return; }
+  renderChipsInto(box, "ps", psDbRows(), renderPsTable);
+}
+
+// Спецификация (Позиции): фильтр у каждой колонки — значения ячеек; длинный текст и числа — «заполнено / (пусто)».
+const SPEC_LONG = new Set(["LongText", "Attachment", "JSON"]);
+const SPEC_NO_FILTER = new Set(["№", "Наименование позиции", "Id"]);   // у каждой строки своё — для них поиск
+function specDefs(columns, brands) {
+  const defs = columns.filter((c) => !SPEC_NO_FILTER.has(c.title)).map((c) => {
+    const yesNo = NUMERIC.has(c.uidt) || SPEC_LONG.has(c.uidt) || c.uidt === "URL";
+    return { key: c.title, label: c.title, values: (r) => {
+      const t = cellText(r[c.title]).trim();
+      if (yesNo) return [t ? "заполнено" : "(пусто)"];
+      return [t ? (t.length > 80 ? t.slice(0, 78) + "…" : t) : "(пусто)"];
+    } };
+  });
+  const byRow = new Map(((brands && brands.rows) || []).map((m) => [m.i, m]));
+  if (byRow.size) defs.push({ key: "__brands", label: "Наши поставщики", values: (r) => {
+    const m = byRow.get(r._i);
+    return m && (m.brands || []).length ? m.brands.map((b) => b.brand) : ["(нет)"];
+  } });
+  return defs;
+}
+
+// Режим вкладки: «Позиции» (pos) или «Цены» (prices); выбор — в браузере.
+const SPEC_MODE_KEY = "sb.spec.mode";
+function specMode() { return $("spec").dataset.mode || "pos"; }
+function specModeInit(t) {
+  const canPos = Boolean(t && t.source === "nocodb" && !blockOff("spec"));
+  const canPrices = Boolean(t && t.folder && !blockOff("prices"));
+  $("spec-mode").querySelector('[data-mode="pos"]').hidden = !canPos;
+  $("spec-mode").querySelector('[data-mode="prices"]').hidden = !canPrices;
+  $("spec-mode").hidden = !(canPos && canPrices);
+  let m = storageGet(SPEC_MODE_KEY) || "pos";
+  if (m === "pos" && !canPos) m = "prices";
+  if (m === "prices" && !canPrices) m = "pos";
+  setSpecMode(m, false);
+}
+function setSpecMode(m, remember = true) {
+  $("spec").dataset.mode = m;
+  for (const b of $("spec-mode").querySelectorAll("button")) b.classList.toggle("on", b.dataset.mode === m);
+  for (const x of $("spec").querySelectorAll(".spec-pos-only")) x.hidden = m !== "pos";
+  for (const x of $("spec").querySelectorAll(".spec-prices-only")) x.hidden = m !== "prices";
+  $("spec-count").hidden = m !== "pos";
+  $("cf-search").placeholder = m === "pos" ? "Поиск по всем колонкам" : "Поиск: №, позиция, марка, бренд, страна";
+  if (remember) storageSet(SPEC_MODE_KEY, m);
+  cfClose();
+  if (m === "prices") renderPsTable(); else renderSpecFiltered();
+  renderCfChips();
+}
+for (const b of $("spec-mode").querySelectorAll("button")) b.addEventListener("click", () => setSpecMode(b.dataset.mode));
+$("cf-search").addEventListener("input", (e) => {
+  cf.q.spec = cf.q.ps = cfNorm(e.target.value.trim());
+  if (specMode() === "prices") renderPsTable(); else renderSpecFiltered();
+});
+$("cf-clear").addEventListener("click", () => {
+  const m = specMode();
+  if (m === "prices") { cf.ps = {}; cf.chips.ps = new Set(); } else cf.spec = {};
+  cf.q.spec = cf.q.ps = ""; $("cf-search").value = "";
+  cfClose();
+  if (m === "prices") renderPsTable(); else renderSpecFiltered();
+});
+
 // ---------- спецификация ----------
 
 // Удаление конкурса из NocoDB (0.37.0): запись реестра и спецификация вместе; только администратор сайта (кнопка —
@@ -2880,7 +3144,8 @@ async function loadSpec(suppliersFresh = false) {
   specInfo = { title: d.title, rows: d.rows.length };
   fillSelect($("spec-view"), d.views.map((v) => ({ value: v.id, label: v.title })), d.view ? d.view.id : "");
   state.specView = d.view ? d.view.id : "";
-  renderSpec(d.columns, d.rows, d.brands);
+  specData = { columns: d.columns, rows: d.rows.map((r, i) => ({ ...r, _i: i })), brands: d.brands };
+  renderSpecFiltered();
   renderBrands(d.brands);
   saveUrl();
 }
@@ -2916,21 +3181,33 @@ $("spec-table").addEventListener("click", (e) => {
 });
 applySpecRowHeight(specRowHeight());
 
-function renderSpec(columns, rows, brands) {
+let specData = null;
+function renderSpecFiltered() {
+  if (!specData) { $("spec-table").replaceChildren(); return; }
+  const defs = specDefs(specData.columns, specData.brands);
+  const rows = specData.rows.filter((r) => cfPass("spec", defs, r));
+  cfShowInfo("spec", rows.length, specData.rows.length);
+  renderSpec(specData.columns, rows, specData.brands, defs);
+}
+
+function renderSpec(columns, rows, brands, defs = []) {
   const table = $("spec-table");
+  const byKey = new Map(defs.map((x) => [x.key, x]));
+  const allRows = specData ? specData.rows : rows;
+  const th = (key, text, cls, title) => { const h = cfTh("spec", byKey.get(key), allRows, defs, renderSpecFiltered, text, cls); if (title) h.title = title; return h; };
   const sticky = (i) => (i === 0 && columns[0] && columns[0].title === "№") ? "stick0"
     : (i === 1 && columns[0] && columns[0].title === "№" && columns[1].title === "Наименование позиции") ? "stick1" : "";
   // Колонка «Наши поставщики» (0.26.0) — сразу после закреплённых «№» и «Наименования».
   const byRow = new Map(((brands && brands.rows) || []).map((m) => [m.i, m]));
   const withBrands = byRow.size > 0;
   const brandAt = !withBrands ? -1 : sticky(1) ? 2 : sticky(0) ? 1 : 0;
-  const brandTh = () => el("th", { class: "sb-col", title: "Поставщики из таблицы NocoDB «Поставщики», у которых есть бренд позиции" }, "Наши поставщики");
-  const headCells = columns.map((c, i) => el("th", { class: sticky(i) || null, text: c.title }));
+  const brandTh = () => th("__brands", "Наши поставщики", "sb-col", "Поставщики из таблицы NocoDB «Поставщики», у которых есть бренд позиции");
+  const headCells = columns.map((c, i) => th(c.title, c.title, sticky(i) || null));
   if (withBrands) headCells.splice(brandAt, 0, brandTh());
   const head = el("tr", {}, ...headCells);
   const body = el("tbody");
   rows.forEach((r, ri) => {
-    const m = byRow.get(ri);
+    const m = byRow.get(r._i !== undefined ? r._i : ri);
     const tr = el("tr", { class: m ? `sb-${m.level}${m.strong ? "" : " sb-weak"}` : null });
     columns.forEach((c, i) => {
       if (i === brandAt) tr.append(brandCell(m, brands));
@@ -2950,6 +3227,7 @@ function renderSpec(columns, rows, brands) {
   // Вторая закреплённая колонка начинается там, где кончается первая.
   const first = table.querySelector("th.stick0");
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
+  if (!rows.length && (specData && specData.rows.length)) body.append(el("tr", {}, el("td", { colspan: String(headCells.length), class: "muted", text: "Нет позиций с такими фильтрами." })));
 }
 
 // ---------- наши поставщики по брендам позиций (0.26.0) ----------
@@ -4246,6 +4524,70 @@ function ofCommentBtn(target, label) {
   return b;
 }
 
+// «Предложения поставщиков» (0.41.0): таблица как в «Спецификации» — бренд, страна, кол-во, НМЦ, фильтры колонок и
+// быстрые отборы; щелчок по цене — отметить / снять; ✏ у номера — окно позиции (все предложения, исправить цену,
+// комментарии, соседние позиции). Отмеченные в скрытых фильтром строках не теряются и тоже записываются.
+let ofShown = [];          // номера позиций в таблице сейчас (с учётом фильтров) — для «← →» в окне позиции
+
+function ofOffers(n, key) { return ((of.d.cells[n] || {})[key]) || []; }
+function ofSupNames(r) { return of.d.suppliers.filter((s) => ofOffers(r.n, s.key).length).map((s) => s.name); }
+function ofBestPrice(p) {
+  const b = of.d.best[p.n];
+  const o = b && ofOffers(p.n, b.supplier)[0];
+  return o && o.price_rub ? o.price_rub : null;
+}
+function ofRows() {
+  const psBy = new Map(((psLast && psLast.rows) || []).map((x) => [String(x.n), x]));
+  return of.d.positions.map((p) => {
+    const offers = of.d.suppliers.map((s) => ofOffers(p.n, s.key)[0]).filter(Boolean);
+    const best = of.d.best[p.n];
+    const bp = ofBestPrice(p);
+    return { ...p, cnt: offers.length, sel: offers.some((o) => o.selected && !o.written), written: offers.filter((o) => o.written).length,
+      unwritten: offers.some((o) => o.price_rub && !o.written),
+      bestPrice: bp, ratio: bp && p.nmc ? bp / p.nmc : null, warnBest: Boolean(best && best.with_warn), ps: psBy.get(String(p.n)) || null };
+  });
+}
+function ofCellState(o) {
+  if (!o) return "нет цены";
+  if (o.written) return "в NocoDB";
+  if (o.selected) return "отмечена";
+  if (!o.price_rub) return "цена не найдена";
+  if ((o.warn || []).length) return "с замечанием";
+  return "есть цена";
+}
+function ofDefs() {
+  const defs = [
+    { key: "brand", label: "Бренд", values: (r) => [r.maker || "(не указан)"] },
+    { key: "country", label: "Страна", values: (r) => [r.country || "(не указана)"] },
+    { key: "nmc", label: "НМЦ за ед.", values: (r) => [r.nmc ? "есть НМЦ" : "нет НМЦ"] },
+    { key: "cnt", label: "Предложений", order: ["нет предложений", "1 предложение", "2–3 предложения", "4 и больше"],
+      values: (r) => [r.cnt === 0 ? "нет предложений" : r.cnt === 1 ? "1 предложение" : r.cnt <= 3 ? "2–3 предложения" : "4 и больше"] },
+  ];
+  for (const s of of.d.suppliers) defs.push({ key: "s:" + s.key, label: s.name,
+    order: ["отмечена", "в NocoDB", "есть цена", "с замечанием", "цена не найдена", "нет цены"],
+    values: (r) => [ofCellState(ofOffers(r.n, s.key)[0])] });
+  defs.push({ key: "best", label: "Лучшая цена", values: (r) => [r.bestPrice ? "есть" : "(нет)"] },
+    { key: "ratio", label: "К НМЦ", order: ["≤ 85 % НМЦ", "85–100 % НМЦ", "выше НМЦ", "нет цены", "нет НМЦ"],
+      values: (r) => [!r.nmc ? "нет НМЦ" : !r.bestPrice ? "нет цены" : r.ratio <= 0.85 ? "≤ 85 % НМЦ" : r.ratio <= 1 ? "85–100 % НМЦ" : "выше НМЦ"] });
+  return defs;
+}
+// Быстрые отборы — те же, что в «Спецификация → Цены» (0.41.1, пользователь: «экспресс-фильтры такие же, как в
+// спецификации»). Цены поставщиков — из этой таблицы, интернет и «не проверено» — из «Цен» (psLast).
+const ofNet = (r) => Boolean(r.ps && ((r.ps.rf || []).length || (r.ps.abroad || []).length));
+const OF_CHIPS = [
+  ["nothing", "без цены вообще", (r) => r.cnt === 0 && !ofNet(r) && !(r.ps && r.ps.best)],
+  ["nosup", "без цен поставщиков", (r) => r.cnt === 0],
+  ["nonet", "без цен в интернете", (r) => !ofNet(r)],
+  ["over", "выше НМЦ", (r) => r.ratio > 1],
+  ["unwritten", "есть цены — не записаны", (r) => r.unwritten],
+  ["unverified", "только «не проверено»", (r) => !ofNet(r) && Boolean(r.ps && (r.ps.unverified || []).length)],
+];
+
+function ofToggle(p, o) {
+  if (!of.d.can_write || o.written) return;
+  offersAction("/offers/select", { cells: [{ file: o.file_id, pos: p.n, selected: !o.selected }] });
+}
+
 function renderOffers() {
   const d = of.d;
   const sups = d.suppliers;
@@ -4257,94 +4599,271 @@ function renderOffers() {
   if (job && job.status === "queued") notes.push("Запись в NocoDB — в очереди…");
   if (job && job.status === "running") notes.push("Записываю выбранные цены в спецификацию NocoDB…");
   setStatus("of-status", notes.join(" "));
-  $("of-tools").hidden = !sups.length || !d.can_write;
-  $("of-write").textContent = d.selected ? `Записать отмеченные в NocoDB (${d.selected})` : "Записать отмеченные в NocoDB";
-  $("of-write").disabled = !d.selected || Boolean(job && ["queued", "running"].includes(job.status));
+  $("of-tools").hidden = (!sups.length && !d.pos_pending) || !d.can_write;
+  $("of-write").disabled = !(d.selected || d.pos_pending) || Boolean(job && ["queued", "running"].includes(job.status));
+  $("of-cf-bar").hidden = !sups.length;
+  // Что есть на сайте, но ещё не в NocoDB (0.42.0)
+  const unsaved = [d.selected ? `отмечено цен: ${d.selected}` : "", d.pos_pending ? `правок бренда / страны: ${d.pos_pending}` : ""].filter(Boolean);
+  $("of-unsaved").textContent = unsaved.length ? `⏳ Не записано в NocoDB — ${unsaved.join(", ")}. «Спецификация» показывает только то, что уже в базе; записать — кнопкой «Записать в NocoDB».` : "";
+  $("of-unsaved").hidden = !unsaved.length;
   if (!sups.length) {
+    $("of-write").textContent = d.pos_pending ? `Записать в NocoDB (правок ${d.pos_pending})` : "Записать в NocoDB";
     replaceSafe($("of-wrap"), el("div", { class: "muted", text: "Предложений пока нет. Они появляются, когда поставщики отвечают на запросы по почте " +
-      "(вкладка «Запросы») или когда прайс, КП или счёт кладут в чат конкурса (📎)." }));
+      "(вкладка «Письма») или когда прайс, КП или счёт загружают в «Документы поставщиков» (📎)." }));
     $("of-legend").hidden = true;
     renderOfferComments();
-    if (rq.d) renderRqPos();      // цены поставщиков — в таблицу «Позиции и поставщики»
+    if (rq.d) renderRqPos();
     return;
   }
   $("of-legend").hidden = false;
+  const defs = ofDefs();
+  const all = ofRows();
+  const rows = all.filter((r) => cfPass("of", defs, r));
+  ofShown = rows.map((r) => r.n);
+  cfShowInfo("of", rows.length, all.length);
+  renderChipsInto($("of-cf-chips"), "of", all, renderOffers);
+  // отмеченные среди скрытых фильтром — видно на кнопке записи
+  const shownSet = new Set(ofShown);
+  const hiddenSel = all.filter((r) => !shownSet.has(r.n)).reduce((n, r) =>
+    n + sups.filter((s) => { const o = ofOffers(r.n, s.key)[0]; return o && o.selected && !o.written; }).length, 0);
+  const wr = [d.selected ? `цен ${d.selected}` + (hiddenSel ? `, из них скрыто фильтром ${hiddenSel}` : "") : "", d.pos_pending ? `правок ${d.pos_pending}` : ""].filter(Boolean);
+  $("of-write").textContent = wr.length ? `Записать в NocoDB (${wr.join("; ")})` : "Записать в NocoDB";
+  const byKey = new Map(defs.map((x) => [x.key, x]));
+  const th = (key, text, cls) => cfTh("of", byKey.get(key), all, defs, renderOffers, text, cls);
   const head = el("tr", {}, el("th", { class: "stick0", text: "№" }), el("th", { class: "stick1", text: "Позиция" }),
+    th("brand", "Бренд"), th("country", "Страна"), el("th", { text: "Кол-во" }), th("nmc", "НМЦ за ед."),
     ...sups.map((s) => {
       const mails = s.files.filter((f) => f.mail).length;
       const docs = s.files.length - mails;
       const src = [mails ? `📧 ${mails}` : "", docs ? `📎 ${docs}` : ""].filter(Boolean).join(" ");
-      const th = el("th", { class: "of-sup", title: s.files.map((f) => `${f.name} · ${fmtWhen(f.at)}` + (f.mail ? ` · письмо от ${f.mail.from}` : "")).join("\n") },
-        el("div", { text: s.name }),
-        ((m) => m && m.from && !s.name.includes(m.from) ? el("div", { class: "muted small", text: "✉ " + m.from }) : null)((s.files.find((f) => f.mail) || {}).mail),
-        el("div", { class: "muted small", text: [src, s.vat && s.vat !== "не указано" ? s.vat : "НДС не указан"].filter(Boolean).join(" · ") }),
+      const h = th("s:" + s.key, s.name, "of-sup");
+      h.title = s.files.map((f) => `${f.name} · ${fmtWhen(f.at)}` + (f.mail ? ` · письмо от ${f.mail.from}` : "")).join("\n");
+      h.append(el("div", { class: "muted small", text: [src, s.vat && s.vat !== "не указано" ? s.vat : "НДС не указан"].filter(Boolean).join(" · ") }),
         ofCommentBtn("supplier:" + s.key, "поставщик " + s.name));
-      return th;
-    }));
+      return h;
+    }),
+    th("best", "Лучшая цена"), th("ratio", "К НМЦ"));
   const body = el("tbody");
-  for (const p of d.positions) {
-    const best = d.best[p.n];
-    const tr = el("tr", { class: d.cells[p.n] ? null : "of-empty" },
-      el("td", { class: "stick0 num", text: p.n }),
-      el("td", { class: "stick1" }, el("div", { text: p.name }),
-        el("div", { class: "muted small", text: [[p.qty, p.unit].filter(Boolean).join(" "), p.nmc ? "НМЦ " + rub(p.nmc) + " за ед." : ""].filter(Boolean).join(" · ") }),
-        ofCommentBtn("pos:" + p.n, "позиция " + p.n)));
-    for (const s of sups) tr.append(offerCell(p, s, best));
-    body.append(tr);
+  if (!rows.length) body.append(el("tr", {}, el("td", { colspan: String(8 + sups.length), class: "muted", text: "Нет позиций с такими фильтрами." })));
+  for (const r of rows) {
+    const ed = el("button", { class: "op-open", type: "button", title: "Окно позиции: все предложения, исправить цену, комментарии", text: "✏" });
+    ed.addEventListener("click", () => openOpDlg(r.n));
+    const cm = ofComments("pos:" + r.n).length;
+    const pos = el("td", { class: "stick1" }, el("div", { text: r.name }));
+    if (r.brand && r.brand !== r.maker) pos.append(el("div", { class: "muted small", text: r.brand }));
+    if (cm) pos.append(el("button", { class: "of-cm has", type: "button", title: "Комментарии к позиции", text: `💬 ${cm}` }));
+    if (cm) pos.lastChild.addEventListener("click", () => openOpDlg(r.n));
+    const best = el("td", { class: "num" });
+    const b = d.best[r.n];
+    if (r.bestPrice) best.append(el("b", { text: rub(r.bestPrice) }), el("div", { class: "muted small",
+      text: ((sups.find((s) => s.key === b.supplier) || {}).name || "") + (b.with_warn ? " · ⚠" : "") }));
+    body.append(el("tr", { class: r.cnt ? null : "of-empty" },
+      el("td", { class: "stick0 num" }, el("span", { text: r.n }), ed), pos,
+      ofFieldCell(r, "maker"), ofFieldCell(r, "country"),
+      el("td", { class: "num", text: [r.qty, r.unit].filter((x) => x !== null && x !== undefined && x !== "").join(" ") }),
+      el("td", { class: "num", text: r.nmc ? rub(r.nmc) : "" }),
+      ...sups.map((s) => offerCell(r, s, b)),
+      best, el("td", { class: "num" }, ratioBadge(r.bestPrice, r.nmc))));
   }
   const foot = el("tr", { class: "of-total" }, el("td", { class: "stick0" }), el("td", { class: "stick1", text: "Итого по поставщику" }),
+    el("td"), el("td"), el("td"), el("td"),
     ...sups.map((s) => {
-      const t = d.totals[s.key];
+      const t = d.totals[s.key] || { positions: 0, sum: 0, best: 0 };
       return el("td", { class: "num" }, el("div", { text: `${t.positions} поз.` }), el("div", { text: "≈ " + rub(t.sum) }),
         el("div", { class: "muted small", text: `лучших цен: ${t.best}` }));
-    }));
+    }), el("td"), el("td"));
   const table = el("table", { class: "of-table" }, el("thead", {}, head), body, el("tfoot", {}, foot));
   replaceSafe($("of-wrap"), table);
   if (rq.d) renderRqPos();      // цены поставщиков — в таблицу «Позиции и поставщики»
   const first = table.querySelector("th.stick0");
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
   renderOfferComments();
+  if ($("op-dlg").open) renderOpDlg();
 }
 
+// Бренд / страна: правка на сайте, ещё не в NocoDB, — «⏳» и прежнее значение в подсказке (0.42.0).
+function ofFieldCell(r, f) {
+  const pend = r.pending && r.pending[f];
+  const td = el("td", { class: pend ? "of-pend" : null, text: r[f] || "" });
+  if (pend) {
+    td.append(el("span", { class: "op-unsaved", text: pend.status === "requested" ? " ⏳ записывается" : " ⏳" }));
+    td.title = `Исправлено на сайте${pend.by ? " (" + pend.by + ")" : ""}, в NocoDB ещё не записано. В NocoDB сейчас: «${r["db_" + f] || "пусто"}»`;
+  }
+  return td;
+}
+
+// Ячейка поставщика: только цена и пометки; щелчок по цене — отметить / снять.
 function offerCell(p, s, best) {
-  const offers = ((of.d.cells[p.n] || {})[s.key]) || [];
+  const offers = ofOffers(p.n, s.key);
   if (!offers.length) return el("td", { class: "of-cell none", text: "—" });
   const o = offers[0];
   const isBest = best && best.supplier === s.key;
   const over = p.nmc && o.price_rub && o.price_rub > p.nmc;
-  const cls = ["of-cell", isBest ? "best" : "", over ? "over" : "", o.warn.length ? "warn" : "", o.written ? "written" : ""].filter(Boolean).join(" ");
-  const td = el("td", { class: cls });
+  const can = of.d.can_write && !o.written && o.price_rub;
+  const cls = ["of-cell", isBest ? "best" : "", over ? "over" : "", o.warn.length ? "warn" : "", o.written ? "written" : "",
+    o.selected && !o.written ? "sel" : "", can ? "pick" : ""].filter(Boolean).join(" ");
+  const td = el("td", { class: cls, title: can ? (o.selected ? "Щелчок — снять отметку" : "Щелчок — отметить для записи в NocoDB") : null });
   const line = el("div", { class: "of-price" });
-  if (of.d.can_write && !o.written) {
-    const cb = el("input", { type: "checkbox", title: "Записать эту цену в NocoDB" });
-    cb.checked = o.selected;
-    cb.addEventListener("change", () => offersAction("/offers/select", { cells: [{ file: o.file_id, pos: p.n, selected: cb.checked }] }));
-    line.append(cb);
-  }
+  if (can || o.selected) line.append(el("span", { class: "of-mark", text: o.selected && !o.written ? "☑" : "☐" }));
   line.append(el("b", { text: o.price_rub ? rub(o.price_rub) : "цена не найдена" }));
   if (isBest) line.append(el("span", { class: "badge ok", text: best.with_warn ? "лучшая ⚠" : "лучшая" }));
   td.append(line);
   const facts = [];
-  if (o.currency && o.currency !== "RUB" && o.price) facts.push(`${o.price} ${o.currency}`);
-  if (o.edited) facts.push(`исправлено (было ${o.orig_price_rub ? rub(o.orig_price_rub) : "—"}${o.edited_by ? ", " + o.edited_by : ""})`);
-  if (over) facts.push("выше НМЦ");
   if (o.written) facts.push("✅ в NocoDB");
   else if (o.write_status === "requested" || o.write_status === "running") facts.push("записывается…");
+  if (o.edited) facts.push("✏ исправлено");
+  if (o.manual) facts.push("✍ вручную");
+  if (!o.written && o.selected) facts.push("⏳ не в NocoDB");
+  if (o.currency && o.currency !== "RUB" && o.price) facts.push(`${o.price} ${o.currency}`);
+  if (offers.length > 1) facts.push(`ещё ${offers.length - 1}`);
+  const cm = ofComments(`cell:${o.file_id}|${p.n}`).length;
+  if (cm) facts.push(`💬 ${cm}`);
   if (facts.length) td.append(el("div", { class: "muted small", text: facts.join(" · ") }));
   if (o.warn.length) td.append(el("div", { class: "small warn-text", title: o.warn.join("\n"), text: "⚠ " + o.warn[0] + (o.warn.length > 1 ? ` (+${o.warn.length - 1})` : "") }));
-  if (o.note) td.append(el("div", { class: "muted small", text: o.note }));
-  const tools = el("div", { class: "of-tools" });
-  tools.append(el("span", { class: "muted small of-src", title: `«${o.text || ""}»${o.line_no ? " (строка " + o.line_no + ")" : ""}`, text: "📄 " + o.file }));
-  if (offers.length > 1) tools.append(el("span", { class: "muted small", title: offers.slice(1).map((x) => `${x.file}: ${x.price_rub ? rub(x.price_rub) : "—"}`).join("\n"), text: ` · ещё ${offers.length - 1}` }));
-  if (of.d.can_write && !o.written) {
-    const ed = el("button", { class: "of-cm", type: "button", title: "Исправить цену", text: "✏" });
-    ed.addEventListener("click", () => openOfferDialog({ target: `cell:${o.file_id}|${p.n}`, label: `${s.name}, позиция ${p.n}`, edit: { o, p } }));
-    tools.append(ed);
-  }
-  tools.append(ofCommentBtn(`cell:${o.file_id}|${p.n}`, `${s.name}, позиция ${p.n}`));
-  td.append(tools);
+  if (can) td.addEventListener("click", () => ofToggle(p, o));
   return td;
 }
+
+// ---------- окно позиции (0.41.0) ----------
+let opN = null;
+
+function openOpDlg(n) {
+  if (!of.d) return toast("Предложения поставщиков ещё загружаются", true);
+  opN = String(n);
+  renderOpDlg();
+  if (!$("op-dlg").open) $("op-dlg").showModal();
+}
+
+function renderOpDlg() {
+  const d = of.d;
+  const p = d.positions.find((x) => String(x.n) === opN);
+  if (!p) { $("op-dlg").close(); return; }
+  $("op-title").textContent = `№ ${p.n} · ${p.name}`;
+  const order = ofShown.includes(opN) ? ofShown : d.positions.map((x) => String(x.n));
+  const at = order.indexOf(opN);
+  $("op-pos").textContent = at >= 0 ? `${at + 1} из ${order.length}` : "";
+  $("op-prev").disabled = at <= 0;
+  $("op-next").disabled = at < 0 || at >= order.length - 1;
+  $("op-prev").onclick = () => { opN = order[at - 1]; renderOpDlg(); };
+  $("op-next").onclick = () => { opN = order[at + 1]; renderOpDlg(); };
+  const fact = (k, v) => (v ? el("span", { class: "chip" }, el("b", { text: k + ": " }), String(v)) : null);
+  replaceSafe($("op-facts"), ...[fact("Марка/модель", p.brand),
+    fact("Кол-во", [p.qty, p.unit].filter(Boolean).join(" ")), fact("НМЦ за ед.", p.nmc ? rub(p.nmc) : "")].filter(Boolean));
+  // бренд и страна — поля (правка на сайте, в NocoDB — кнопкой записи)
+  const pend = p.pending || {};
+  if (document.activeElement !== $("op-maker")) $("op-maker").value = p.maker || "";
+  if (document.activeElement !== $("op-country")) $("op-country").value = p.country || "";
+  const uniq = (f) => [...new Set(d.positions.map((x) => x[f]).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ru"));
+  replaceSafe($("op-maker-list"), ...uniq("maker").map((v) => el("option", { value: v })));
+  replaceSafe($("op-country-list"), ...uniq("country").map((v) => el("option", { value: v })));
+  const pendKeys = Object.keys(pend);
+  $("op-reset-fields").hidden = !pendKeys.length;
+  $("op-fields-note").hidden = !pendKeys.length;
+  $("op-fields-note").textContent = pendKeys.length ? `⏳ не записано в NocoDB (в базе: ${pendKeys.map((f) => `${f === "maker" ? "бренд" : "страна"} «${p["db_" + f] || "пусто"}»`).join(", ")})` +
+    (Object.values(pend).some((x) => x.status === "requested") ? " — записывается…" : "") : "";
+  $("op-fields").hidden = !d.can_write;
+  $("op-manual").hidden = !d.can_write;
+  replaceSafe($("opm-sup-list"), ...(d.suppliers || []).map((s) => el("option", { value: s.name })));
+  // предложения
+  const best = d.best[p.n];
+  const list = [];
+  for (const s of d.suppliers) ofOffers(p.n, s.key).forEach((o, i) => list.push({ s, o, main: i === 0 }));
+  list.sort((a, b) => (a.o.price_rub || 1e15) - (b.o.price_rub || 1e15));
+  if (!list.length) {
+    replaceSafe($("op-offers"), el("div", { class: "muted", text: "По этой позиции предложений нет." }));
+  } else {
+    const head = el("tr", {}, ...["Поставщик", "Цена за ед.", "К НМЦ", "Документ и цитата", "Замечания", "Статус", ""].map((x) => el("th", { text: x })));
+    const body = list.map(({ s, o, main }) => {
+      const tdAct = el("td", { class: "op-act" });
+      if (d.can_write && !o.written && main && o.price_rub) {
+        tdAct.append(smallBtn(o.selected ? "Снять отметку" : "Отметить для записи", () => ofToggle(p, o), o.selected ? "btn ghost small" : "btn small"));
+      }
+      if (d.can_write && !o.written) tdAct.append(smallBtn("✏ цена", () => opEditPrice(tr, p, o)));
+      if (d.can_write && !o.written && o.manual) tdAct.append(smallBtn("Убрать", () => offersAction("/offers/manual/remove", { file: o.file_id, pos: p.n }, "Цена убрана")));
+      const cmN = ofComments(`cell:${o.file_id}|${p.n}`).length;
+      tdAct.append(ofCommentBtn(`cell:${o.file_id}|${p.n}`, `${s.name}, позиция ${p.n}`));
+      if (cmN) tdAct.lastChild.textContent = `💬 ${cmN}`;
+      const status = o.written ? "✅ в NocoDB" : (o.write_status === "requested" || o.write_status === "running") ? "записывается…"
+        : o.selected ? "☑ отмечена · ⏳ не в NocoDB" : main ? "не отмечена · не в NocoDB" : "другой документ этого поставщика";
+      const price = el("td", { class: "num" }, el("b", { text: o.price_rub ? rub(o.price_rub) : "не найдена" }));
+      if (o.currency && o.currency !== "RUB" && o.price) price.append(el("div", { class: "muted small", text: `${o.price} ${o.currency}` }));
+      if (o.edited) price.append(el("div", { class: "muted small", text: `исправлено (в документе ${o.orig_price_rub ? rub(o.orig_price_rub) : "—"}${o.edited_by ? ", " + o.edited_by : ""})` }));
+      const tr = el("tr", { class: [best && best.supplier === s.key && main ? "op-best" : "", o.selected && !o.written ? "op-sel" : ""].filter(Boolean).join(" ") || null },
+        el("td", {}, el("b", { text: s.name }), el("div", { class: "muted small", text: s.vat && s.vat !== "не указано" ? s.vat : "НДС не указан" })),
+        price, el("td", { class: "num" }, ratioBadge(o.price_rub, p.nmc)),
+        el("td", { class: "small" }, el("div", { text: (o.manual ? "✍ " : "📄 ") + o.file }), o.text ? el("div", { class: "muted", text: `«${o.text}»` + (o.line_no ? ` (строка ${o.line_no})` : "") }) : null),
+        el("td", { class: "small" + (o.warn.length ? " warn-text" : "") }, ...(o.warn.length ? o.warn.map((w) => el("div", { text: "⚠ " + w })) : [el("span", { class: "muted", text: "—" })]),
+          o.note ? el("div", { class: "muted", text: o.note }) : null),
+        el("td", { class: "small", text: status }), tdAct);
+      return tr;
+    });
+    replaceSafe($("op-offers"), el("table", { class: "op-table" }, el("thead", {}, head), el("tbody", {}, ...body)));
+  }
+  // интернет и все источники — из «Спецификации → Цены», если загружены
+  const ps = psLast && (psLast.rows || []).find((r) => String(r.n) === opN);
+  const net = [];
+  if (ps) {
+    if ((ps.rf || [])[0]) net.push(`интернет РФ: от ${rub(ps.rf[0].price_rub)} (${ps.rf[0].domain || "NocoDB"})`);
+    if ((ps.abroad || [])[0]) net.push(`зарубеж: от ${rub(ps.abroad[0].price_rub)} (${ps.abroad[0].domain || "NocoDB"})`);
+    if (ps.best) net.push(`лучшая из всех источников: ${rub(ps.best.price_rub)} — ${ps.best.source}`);
+  }
+  replaceSafe($("op-net"), ...(net.length ? [el("div", { class: "muted small", text: "Для сравнения: " + net.join(" · ") })] : []));
+  // комментарии к позиции
+  const cms = ofComments("pos:" + p.n);
+  replaceSafe($("op-comments"), ...(cms.length ? cms.map((c) => {
+    const row = el("div", { class: "of-comment" }, el("div", { class: "muted small", text: `${c.by || "—"} · ${fmtWhen(c.at)}` }), el("div", { text: c.text }));
+    if (c.by === d.me) row.append(smallBtn("Удалить", () => offersAction("/offers/comment/delete", { id: c.id })));
+    return row;
+  }) : [el("div", { class: "muted small", text: "Комментариев пока нет." })]));
+  $("op-add").hidden = !d.can_comment;
+}
+
+// Исправить цену прямо в строке окна: поле, «Сохранить», «Вернуть из документа».
+function opEditPrice(tr, p, o) {
+  const cell = tr.children[1];
+  const input = el("input", { type: "text", value: o.price_rub || "", class: "op-price-in" });
+  const save = smallBtn("Сохранить", () => offersAction("/offers/price", { file: o.file_id, pos: p.n, price_rub: input.value.trim() }, "Цена исправлена"), "btn small");
+  const parts = [input, save];
+  if (o.edited) parts.push(smallBtn("Как в документе", () => offersAction("/offers/price", { file: o.file_id, pos: p.n, price_rub: null }, "Цена — как в документе")));
+  replaceSafe(cell, ...parts, el("div", { class: "muted small", text: "руб. за единицу, с учётом НДС, как в предложении" }));
+  input.focus();
+}
+
+$("op-close").addEventListener("click", () => $("op-dlg").close());
+$("op-save-fields").addEventListener("click", () => {
+  const p = of.d.positions.find((x) => String(x.n) === opN);
+  if (!p) return;
+  const body = { pos: opN };
+  const m = $("op-maker").value.trim(), c = $("op-country").value.trim();
+  if (m !== (p.maker || "")) body.maker = m;
+  if (c !== (p.country || "")) body.country = c;
+  if (Object.keys(body).length === 1) return toast("Бренд и страна не изменились");
+  offersAction("/offers/position", body, "Сохранено на сайте — в NocoDB запишется кнопкой «Записать в NocoDB»");
+});
+$("op-reset-fields").addEventListener("click", () => offersAction("/offers/position", { pos: opN, maker: null, country: null }, "Как в NocoDB"));
+$("opm-add").addEventListener("click", async () => {
+  const supplier = $("opm-supplier").value.trim(), price = $("opm-price").value.trim();
+  if (!supplier || !price) return toast("Укажите поставщика и цену", true);
+  await offersAction("/offers/manual", { pos: opN, supplier, price_rub: price, vat: $("opm-vat").value, note: $("opm-note").value.trim() },
+    "Цена добавлена и отмечена к записи — в NocoDB кнопкой «Записать в NocoDB»");
+  $("opm-price").value = ""; $("opm-note").value = "";
+});
+$("op-save-comment").addEventListener("click", async () => {
+  const text = $("op-text").value.trim();
+  if (!text || !opN) return;
+  await offersAction("/offers/comment", { target: "pos:" + opN, text });
+  $("op-text").value = "";
+});
+$("op-dlg").addEventListener("keydown", (e) => {
+  if (e.target.matches("input, textarea")) return;
+  if (e.key === "ArrowLeft" && !$("op-prev").disabled) $("op-prev").click();
+  if (e.key === "ArrowRight" && !$("op-next").disabled) $("op-next").click();
+});
+$("of-cf-search").addEventListener("input", (e) => { cf.q.of = cfNorm(e.target.value.trim()); renderOffers(); });
+$("of-cf-clear").addEventListener("click", () => {
+  cf.of = {}; cf.chips.of = new Set(); cf.q.of = ""; $("of-cf-search").value = "";
+  cfClose(); renderOffers();
+});
 
 function ofTargetLabel(target) {
   const d = of.d;
@@ -4432,9 +4951,15 @@ $("ofd-reset").addEventListener("click", async () => {
 $("of-best").addEventListener("click", () => offersAction("/offers/best", {}, (r) => r.changed ? "Отмечены лучшие цены по каждой позиции" : "Лучшие уже отмечены"));
 $("of-write").addEventListener("click", async () => {
   const n = of.d.selected;
-  if (!confirm(`Записать ${n} отмеченных цен в спецификацию NocoDB («Отдел закупок», до ${of.d.max_slots} поставщиков на позицию)?`)) return;
-  await offersAction("/offers/write", {}, (r) => `В очередь на запись: ${r.positions} цен` +
-    (r.over_limit.length ? `; по позициям ${r.over_limit.join(", ")} мест больше нет — записаны самые низкие` : ""));
+  const shown = new Set(ofShown);
+  const hidden = ofRows().filter((r) => !shown.has(r.n)).reduce((k, r) =>
+    k + of.d.suppliers.filter((s) => { const o = ofOffers(r.n, s.key)[0]; return o && o.selected && !o.written; }).length, 0);
+  const pp = of.d.pos_pending || 0;
+  if (!confirm(`Записать в спецификацию NocoDB:` + (n ? `\n• ${n} отмеченных цен («Отдел закупок», до ${of.d.max_slots} поставщиков на позицию)` : "") +
+    (pp ? `\n• правки бренда / страны: ${pp} поз. (колонки «Производитель», «Страна происхождения»)` : "") +
+    (hidden ? `\n\nИз цен ${hidden} — в строках, скрытых фильтром: они тоже будут записаны.` : "") + "\n\nПродолжить?")) return;
+  await offersAction("/offers/write", {}, (r) => `В очередь на запись: ${r.positions} цен` + (r.edits ? `, правок позиций ${r.edits}` : "") +
+    ((r.over_limit || []).length ? `; по позициям ${r.over_limit.join(", ")} мест больше нет — записаны самые низкие` : ""));
 });
 
 // «Запросить цены по выбранным»: в письмах поставщикам оставить только эти позиции и перейти к письмам.

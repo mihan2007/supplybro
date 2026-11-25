@@ -45,7 +45,7 @@ CHAT_TTL = 1800          # с: чату годится прочитанное с
 MARKETS = (("rf", "Стоимость товара в РФ"), ("abroad", "Стоимость товара зарубежом"))
 MARKET_PRICE, MARKET_SOURCE, MARKET_TEXT = "Рыночная цена, руб.", "Источник (ссылка)", "Рыночная цена (найдено в интернете)"
 DELIVERY = "Стоимость доставки, руб. (СДЭК)"
-SPEC_FIELDS = (["№", "Наименование позиции", "Марка/модель", "Кол-во", "Ед. изм.", nc.NMC_COST_COLUMN, "НМЦК за позицию"]
+SPEC_FIELDS = (["№", "Наименование позиции", "Марка/модель", "Производитель", "Страна происхождения", "Кол-во", "Ед. изм.", nc.NMC_COST_COLUMN, "НМЦК за позицию"]
                + [c for pair in nc.AGENT_PRICE_PAIRS for c in pair] + list(nc.MARKET_OFFER_FIELDS)
                + [MARKET_PRICE, MARKET_SOURCE, MARKET_TEXT] + [c for pair in nc.PROCUREMENT_PAIRS for c in pair]
                + [nc.PROCUREMENT_COMMENT_COLUMN, DELIVERY])
@@ -94,6 +94,8 @@ _SPEC_CACHE: dict[tuple[str, str, str], tuple[float, dict]] = {}
 def _spec_row(r: dict) -> dict:
     out = {"n": _n(r.get("№")), "name": " ".join(str(r.get("Наименование позиции") or "").split()),
            "brand_model": " ".join(str(r.get("Марка/модель") or "").split()),
+           "maker": " ".join(str(r.get("Производитель") or "").split()),
+           "country": " ".join(str(r.get("Страна происхождения") or "").split()),
            "qty": r.get("Кол-во"), "unit": r.get("Ед. изм."), "nmc": _num(r.get(nc.NMC_COST_COLUMN)),
            "agent": [], "rf": [], "abroad": [], "market": None, "purch": [], "delivery": _num(r.get(DELIVERY)),
            "purch_comment": str(r.get(nc.PROCUREMENT_COMMENT_COLUMN) or "").strip()}
@@ -273,11 +275,14 @@ def build(folder: Path, spec: dict | None = None, hist_index: dict | None = None
         source = "analysis"
         positions = [{"n": _n(p.get("№")), "name": " ".join(str(p.get("Наименование позиции") or "").split()),
                       "brand_model": " ".join(str(p.get("Марка/модель") or "").split()), "qty": p.get("Кол-во"),
+                      "maker": " ".join(str(p.get("Производитель") or "").split()),
+                      "country": " ".join(str(p.get("Страна происхождения") or "").split()),
                       "unit": p.get("Ед. изм."), "nmc": parse_price(p.get("Стоимость НМЦ"))}
                      for p in result["positions"]]
     else:
         source = "nocodb" if spec_rows else ""
-        positions = [{k: s[k] for k in ("n", "name", "brand_model", "qty", "unit", "nmc")} for s in spec_rows.values()]
+        positions = [{k: s.get(k) for k in ("n", "name", "brand_model", "maker", "country", "qty", "unit", "nmc")}
+                     for s in spec_rows.values()]
     rows = []
     for p in positions:
         n = p["n"]
@@ -288,8 +293,14 @@ def build(folder: Path, spec: dict | None = None, hist_index: dict | None = None
         chosen = g.get("chosen") or {}
         rf = list(chosen.get("rf") or [])
         ab = list(chosen.get("abroad") or [])
-        rf += [o for o in s.get("rf") or [] if not _dup(o, rf)]
-        ab += [o for o in s.get("abroad") or [] if not _dup(o, ab)]
+        # то же предложение уже нашёл сайт — оно и в NocoDB (0.42.0: «Спецификация → Цены» — только данные из базы)
+        for src, dst in ((s.get("rf") or [], rf), (s.get("abroad") or [], ab)):
+            for o in src:
+                same = next((a for a in dst if _dup(o, [a])), None)
+                if same is not None:
+                    same["from_noco"] = True
+                else:
+                    dst.append(o)
         rf.sort(key=lambda a: a.get("price_rub") or 0)
         ab.sort(key=lambda a: a.get("price_rub") or 0)
         suppliers = [dict(x, source="прайс") for x in sup.get(n, [])]
@@ -318,6 +329,7 @@ def build(folder: Path, spec: dict | None = None, hist_index: dict | None = None
         best = min(cands, key=lambda x: x[0]) if cands else None
         rows.append({
             "n": n, "name": p["name"] or s.get("name", ""), "brand_model": p["brand_model"] or s.get("brand_model", ""),
+            "maker": p.get("maker") or s.get("maker", ""), "country": p.get("country") or s.get("country", ""),
             "qty": p["qty"] if p["qty"] not in (None, "") else s.get("qty"), "unit": p["unit"] or s.get("unit"),
             "nmc": nmc, "rf": rf, "abroad": ab, "unverified": g.get("unverified") or [], "searched": bool(g),
             "suppliers": suppliers, "agent": agent, "market": market, "delivery": s.get("delivery"),

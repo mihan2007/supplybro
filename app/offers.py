@@ -67,10 +67,11 @@ def load(folder: Path) -> dict:
             data.setdefault("cells", {})
             data.setdefault("comments", [])
             data.setdefault("log", [])
+            data.setdefault("positions", {})
             return data
     except (OSError, ValueError):
         pass
-    return {"cells": {}, "comments": [], "log": []}
+    return {"cells": {}, "comments": [], "log": [], "positions": {}}
 
 
 def _save(folder: Path, data: dict) -> None:
@@ -129,6 +130,8 @@ def build(folder: Path, positions: list[dict]) -> dict:
         if n:
             rows[n] = {"n": n, "name": " ".join(str(p.get("Наименование позиции") or "").split())[:300],
                        "brand": str(p.get("Марка/модель") or "").strip()[:200], "qty": p.get("Кол-во"),
+                       "maker": " ".join(str(p.get("Производитель") or "").split())[:120],
+                       "country": " ".join(str(p.get("Страна происхождения") or "").split())[:60],
                        "unit": p.get("Ед. изм."), "nmc": pricelists.parse_price(p.get("Стоимость НМЦ"))}
     suppliers: dict[str, dict] = {}
     cells: dict[str, dict[str, list[dict]]] = {}
@@ -170,7 +173,21 @@ def build(folder: Path, positions: list[dict]) -> dict:
                 "line_no": m.get("line_no"), "warn": warn,
                 "selected": o["selected"] if "selected" in o else bool(m.get("selected")),
                 "written": n in written, "write_status": w.get("status") if n in (w.get("positions") or []) else "",
+                "manual": e.get("kind") == "manual",
             })
+    # Правки позиции на сайте (0.42.0): бренд и страна, пока не записаны в NocoDB, — поверх данных позиции, с пометкой.
+    for n, ed in (state.get("positions") or {}).items():
+        r = rows.get(n)
+        if not r:
+            continue
+        r["pending"] = {}
+        for f in POS_FIELDS:
+            if f in ed and ed.get("status") != "saved":
+                r.setdefault("db_" + f, r.get(f) or "")
+                r[f] = ed[f]
+                r["pending"][f] = {"by": ed.get("by"), "at": ed.get("at"), "status": ed.get("status") or "pending"}
+        if not r["pending"]:
+            r.pop("pending")
     best: dict[str, dict] = {}
     totals = {k: {"positions": 0, "sum": 0.0, "best": 0} for k in suppliers}
     for n, by_sup in cells.items():
@@ -195,11 +212,12 @@ def build(folder: Path, positions: list[dict]) -> dict:
         t["sum"] = round(t["sum"], 2)
     selected = sum(1 for by_sup in cells.values() for offers in by_sup.values() for o in offers if o["selected"]
                    and not o["written"])
+    pos_pending = sum(1 for r in rows.values() if r.get("pending"))
     return {
         "positions": sorted(rows.values(), key=lambda r: _pos_sort(r["n"])),
         "suppliers": sorted(suppliers.values(), key=lambda s: (-totals[s["key"]]["positions"], s["name"].lower())),
         "cells": cells, "best": best, "totals": totals, "comments": state["comments"], "pending": pending,
-        "selected": selected, "log": state["log"][-30:], "max_slots": MAX_SLOTS,
+        "selected": selected, "pos_pending": pos_pending, "log": state["log"][-30:], "max_slots": MAX_SLOTS,
     }
 
 
@@ -300,10 +318,135 @@ def write(folder: Path, positions: list[dict], by: str) -> dict:
             chosen = chosen[:max(0, MAX_SLOTS - already)]
         for o in chosen:
             per_file.setdefault(o["file_id"], {})[n] = o["price_rub"] if o["edited"] else None
-    if not per_file:
-        raise OfferError("не отмечено ни одной цены, которой ещё нет в NocoDB")
+    edits = [n for n, ed in (load(folder).get("positions") or {}).items() if ed.get("status") != "saved"
+             and any(f in ed for f in POS_FIELDS)]
+    if not per_file and not edits:
+        raise OfferError("не отмечено ни одной цены и нет правок бренда / страны, которых ещё нет в NocoDB")
     for file_id, pos in per_file.items():
         overrides = {n: p for n, p in pos.items() if p is not None}
         pricelists.request_write(folder, file_id, list(pos), by, overrides=overrides)
-    update(folder, lambda d: None, by, f"запись в NocoDB: цен {sum(len(p) for p in per_file.values())}")
-    return {"files": len(per_file), "positions": sum(len(p) for p in per_file.values()), "over_limit": over_limit}
+
+    def mark(d):
+        for n in edits:
+            d["positions"][n]["status"] = "requested"
+    update(folder, mark, by, f"запись в NocoDB: цен {sum(len(p) for p in per_file.values())}, правок позиций {len(edits)}")
+    return {"files": len(per_file), "positions": sum(len(p) for p in per_file.values()), "over_limit": over_limit,
+            "edits": len(edits)}
+
+
+# ---------- ввод вручную и правки позиции (0.42.0) ----------
+# Пользователь 26.11.2026: «при нажатии на карандаш в «Закупках» — возможность вносить цену вручную, указать
+# поставщика, бренд и страну, чтобы потом можно было недостающие данные вносить; пометить, что данные не записаны в
+# базу». Ручная цена — запись «Ввод вручную — <поставщик>» в pricelists.json (kind manual, без файла): та же колонка
+# поставщика, тот же выбор и та же запись в «Отдел закупок». Бренд / страна позиции — в offers.json «positions», в
+# NocoDB — той же кнопкой «Записать отмеченные» (колонки «Производитель», «Страна происхождения» спецификации).
+
+POS_FIELDS = ("maker", "country")
+POS_COLUMNS = {"maker": "Производитель", "country": "Страна происхождения"}
+
+
+def add_manual(folder: Path, positions: list[dict], pos: str, supplier: str, price_rub, vat: str, note: str, by: str) -> str:
+    supplier = " ".join(str(supplier or "").split())[:150]
+    if not supplier:
+        raise OfferError("укажите поставщика")
+    price = pricelists.parse_price(price_rub)
+    if not price or price <= 0:
+        raise OfferError("цена — положительное число, руб. за единицу")
+    p = next((x for x in positions if str(x.get("№") or "").strip().rstrip(".") == pos), None)
+    if not p:
+        raise OfferError(f"позиции № {pos} нет в конкурсе")
+    vat = vat if vat in ("с НДС", "без НДС") else "не указано"
+    note = " ".join(str(note or "").split())[:300]
+    key = pricelists._supplier_key(supplier) or uuid.uuid4().hex[:8]
+    fid = "manual-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
+    now = time.time()
+
+    def fn(data):
+        e = next((f for f in data["files"] if f.get("id") == fid), None)
+        if e is None:
+            e = {"id": fid, "kind": "manual", "name": f"Ввод вручную — {supplier}", "file": "", "status": "done",
+                 "supplier": supplier, "vat": vat, "uploaded_at": now, "by": by, "matches": []}
+            data["files"].append(e)
+        if (e.get("write") or {}).get("status") in ("requested", "running"):
+            raise OfferError("цены этого поставщика сейчас записываются в NocoDB — подождите минуту")
+        e["vat"] = vat if vat != "не указано" else e.get("vat") or vat
+        e["uploaded_at"] = now
+        e["matches"] = [m for m in e.get("matches") or [] if m["pos"] != pos]
+        e["matches"].append({"pos": pos, "name": " ".join(str(p.get("Наименование позиции") or "").split())[:300],
+                             "qty": p.get("Кол-во"), "unit": p.get("Ед. изм."),
+                             "nmc": pricelists.parse_price(p.get("Стоимость НМЦ")), "price_rub": round(float(price), 2),
+                             "price": round(float(price), 2), "currency": "RUB", "match": "exact", "quote": "exact",
+                             "price_in_line": True, "ok": True, "problems": [],
+                             "text": "введено вручную" + (f": {note}" if note else ""), "note": note,
+                             "selected": True, "manual_by": by, "manual_at": now})
+        return fid
+    out = pricelists.update(folder, fn)
+    select(folder, [{"file": out, "pos": pos, "selected": True}], by)     # ручная цена — сразу к записи
+    return out
+
+
+def remove_manual(folder: Path, file_id: str, pos: str, by: str) -> None:
+    if not str(file_id).startswith("manual-"):
+        raise OfferError("убрать можно только цену, введённую вручную")
+
+    def fn(data):
+        e = next((f for f in data["files"] if f.get("id") == file_id), None)
+        if not e:
+            raise OfferError("цена не найдена")
+        w = e.get("write") or {}
+        if w.get("status") == "saved" and pos in {x["pos"] for x in w.get("written") or []}:
+            raise OfferError("эта цена уже в NocoDB — убрать её можно только в самой спецификации")
+        e["matches"] = [m for m in e.get("matches") or [] if m["pos"] != pos]
+        if not e["matches"]:
+            data["files"].remove(e)
+    pricelists.update(folder, fn)
+    update(folder, lambda d: d["cells"].pop(cell_key(file_id, pos), None), by, f"ручная цена № {pos} убрана")
+
+
+def edit_position(folder: Path, pos: str, fields: dict, by: str) -> None:
+    """Бренд / страна позиции на сайте (до записи в NocoDB). Значение None — убрать правку (как в NocoDB)."""
+    vals = {f: (None if fields[f] is None else " ".join(str(fields[f]).split())[:120]) for f in POS_FIELDS if f in fields}
+    if not vals:
+        raise OfferError("нечего сохранять")
+
+    def fn(data):
+        ed = data["positions"].get(pos) or {}
+        if ed.get("status") in ("requested", "running"):
+            raise OfferError("правки этой позиции сейчас записываются в NocoDB — подождите минуту")
+        if ed.get("status") == "saved":
+            ed = {}
+        for f, v in vals.items():
+            if v is None:
+                ed.pop(f, None)
+            else:
+                ed[f] = v
+        if any(f in ed for f in POS_FIELDS):
+            ed.update(by=by, at=time.time(), status="pending")
+            data["positions"][pos] = ed
+        else:
+            data["positions"].pop(pos, None)
+    update(folder, fn, by, f"позиция № {pos}: " + ", ".join(f"{POS_COLUMNS[f]} → {v or 'как в NocoDB'}" for f, v in vals.items()))
+
+
+def pending_position_edits(folder: Path) -> dict[str, dict]:
+    """Для задачи записи: {№: {колонка NocoDB: значение}} — правки, ждущие записи (status requested)."""
+    out = {}
+    for n, ed in (load(folder).get("positions") or {}).items():
+        if ed.get("status") == "requested":
+            vals = {POS_COLUMNS[f]: ed[f] for f in POS_FIELDS if f in ed}
+            if vals:
+                out[n] = vals
+    return out
+
+
+def mark_positions(folder: Path, saved: list[str], failed: dict[str, str]) -> None:
+    def fn(d):
+        for n in saved:
+            if n in d["positions"]:
+                d["positions"][n]["status"] = "saved"
+                d["positions"][n]["saved_at"] = time.time()
+        for n, why in failed.items():
+            if n in d["positions"]:
+                d["positions"][n]["status"] = "pending"
+                d["positions"][n]["error"] = why
+    update(folder, fn, "", f"правки позиций в NocoDB: записано {len(saved)}, не записано {len(failed)}")

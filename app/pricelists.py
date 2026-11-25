@@ -501,6 +501,19 @@ def _spec_table(client, internal: str) -> tuple[str | None, str]:
 
 
 def write_noco(client, folder_name: str, folder: Path, progress) -> str:
+    """Задача «noco_purch»: цены поставщиков и (0.42.0) правки бренда / страны позиций. Сбой — правки позиций снова
+    «ждут записи» (с текстом ошибки), а не висят «записывается…»."""
+    try:
+        return _write_noco(client, folder_name, folder, progress)
+    except Exception as exc:
+        from . import offers as _offers
+        left = _offers.pending_position_edits(folder)
+        if left:
+            _offers.mark_positions(folder, [], {n: str(exc)[:200] for n in left})
+        raise
+
+
+def _write_noco(client, folder_name: str, folder: Path, progress) -> str:
     """Задача «noco_purch»: записать отмеченные цены всех прайсов, ждущих записи."""
     from tools import nocodb_client as nc
     result = load_result(folder) or {}
@@ -508,7 +521,9 @@ def write_noco(client, folder_name: str, folder: Path, progress) -> str:
     from .tenders import norm_number
     internal = result.get("internal_number") or norm_number(folder_name) or ""
     todo = [f for f in load(folder)["files"] if (f.get("write") or {}).get("status") == "requested"]
-    if not todo:
+    from . import offers as _offers                  # правки бренда / страны позиций (0.42.0)
+    pos_edits = _offers.pending_position_edits(folder)
+    if not todo and not pos_edits:
         return "записывать нечего"
 
     def set_write(file_id, **fields):
@@ -537,7 +552,7 @@ def write_noco(client, folder_name: str, folder: Path, progress) -> str:
     cols = nc.get_table_columns(token, table_id)
     slots = [(i, s, p) for i, (s, p) in enumerate(nc.PROCUREMENT_PAIRS, 1) if s in cols and p in cols]
     comment_col = nc.PROCUREMENT_COMMENT_COLUMN if nc.PROCUREMENT_COMMENT_COLUMN in cols else ""
-    if not slots:
+    if not slots and todo:
         text = ("в спецификации нет колонок «Отдел закупок: поставщик N / цена N, руб.» — их добавляет программа "
                 "агента; без вашего согласия сайт структуру таблицы не меняет")
         for e in todo:
@@ -596,6 +611,29 @@ def write_noco(client, folder_name: str, folder: Path, progress) -> str:
                   written=written, skipped=skipped,
                   text=f"записано строк: {len(updates)}" + (f"; не записано: {len(skipped)}" if skipped else ""))
         summary.append(f"«{e['name']}»: {len(updates)} строк" + (f", пропущено {len(skipped)}" if skipped else ""))
+    # Бренд / страна позиций, исправленные на сайте (0.42.0): только существующие колонки, структура не меняется.
+    if pos_edits:
+        progress("NocoDB: бренд и страна позиций", 0.92)
+        saved, failed, updates = [], {}, []
+        for n, vals in pos_edits.items():
+            targets = by_n.get(n) or []
+            fields = {c: v for c, v in vals.items() if c in cols}
+            if not targets:
+                failed[n] = "нет строки в спецификации"
+                continue
+            if not fields:
+                failed[n] = "в спецификации нет колонок " + ", ".join(f"«{c}»" for c in vals)
+                continue
+            for r in targets:
+                updates.append({"Id": r["Id"], **fields})
+            saved.append(n)
+        for i in range(0, len(updates), 100):
+            status, body = nc._request("PATCH", f"{nc.BASE_URL}/{table_id}/records", token, updates[i:i + 100])
+            if status != 200:
+                _offers.mark_positions(folder, [], {n: f"NocoDB: HTTP {status}" for n in saved})
+                raise RuntimeError(f"NocoDB не принял бренд / страну: HTTP {status}")
+        _offers.mark_positions(folder, saved, failed)
+        summary.append(f"бренд / страна: {len(saved)} поз." + (f", не записано {len(failed)}" if failed else ""))
     return "NocoDB, цены поставщиков: " + "; ".join(summary)
 
 

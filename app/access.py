@@ -97,6 +97,8 @@ RULES = [
     (re.compile(r"^/pricelists/write$"), "offers", "записал цены поставщика в NocoDB"),
     (re.compile(r"^/offers/write$"), "offers", "записал выбранные цены поставщиков в NocoDB"),
     (re.compile(r"^/offers/(select|best|price)$"), "offers", "выбрал / исправил цены поставщиков"),
+    (re.compile(r"^/offers/manual(/remove)?$"), "offers", "внёс / убрал цену поставщика вручную"),
+    (re.compile(r"^/offers/position$"), "offers", "исправил бренд / страну позиции"),
     (re.compile(r"^/offers/comment(/delete)?$"), "purchase", "комментарий к предложениям поставщиков"),
     (re.compile(r"^/pricelists/remove$"), "purchase", "убрал прайс из списка"),
     # Запросы цен поставщикам по почте (0.27.0) — то же право, что прайсы.

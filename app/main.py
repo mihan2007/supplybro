@@ -522,6 +522,7 @@ async def api_spec(client_id: str, record_id: int, view: str | None = None, fres
         columns = [{"title": c["title"], "uidt": c["uidt"]} for c in meta["columns"]]
     rows = await noco.records(table_id, view_id=chosen["id"] if chosen else None)
     brands = await _spec_brands(client, noco, table_id, meta, columns, rows, fresh or suppliers_fresh)
+    columns, rows = await _spec_extra(noco, table_id, meta, columns, rows)
     return {
         "brands": brands,
         "found": True,
@@ -544,6 +545,51 @@ async def _spec_table(client: Client, noco: NocoClient, record: dict, fresh: boo
             if title and (table_id := await noco.find_table_by_title(title, fresh)):
                 break
     return table_id if table_id and not str(table_id).startswith("pending:") else None
+
+
+# Колонки, которые спецификация на сайте показывает всегда, в любом представлении (спрятанные в нём — дочитываются):
+# (колонка таблицы, название на сайте, после каких колонок поставить — первая найденная).
+# 0.39.1 — «НМЦ за ед.» (пользователь 26.11.2026: «чтобы было наглядно… сразу после «Ед. изм.», перед лучшими ценами»);
+# 0.40.0 — «в спецификацию нужно добавить бренд и страну производителя».
+SPEC_ALWAYS = [
+    ("Производитель", "Производитель", ("Марка/модель", "Наименование позиции")),
+    ("Страна происхождения", "Страна происхождения", ("Производитель", "Марка/модель", "Наименование позиции")),
+    ("Стоимость НМЦ", "НМЦ за ед.", ("Ед. изм.", "Кол-во", "Марка/модель", "Наименование позиции")),
+]
+
+
+async def _spec_extra(noco: NocoClient, table_id: str, meta: dict, columns: list[dict],
+                      rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Колонки SPEC_ALWAYS — в ответе спецификации всегда (NocoDB не меняется). Нет колонки в таблице — пропуск."""
+    have = {c["title"]: c for c in meta["columns"]}
+    want = [(src, show, after) for src, show, after in SPEC_ALWAYS if src in have]
+    if not want:
+        return columns, rows
+    shown = {c["title"] for c in columns}
+    missing = [src for src, _, _ in want if src not in shown]
+    extra: dict = {}
+    if missing:
+        if not rows or "Id" not in rows[0]:
+            want = [w for w in want if w[0] in shown]
+        else:
+            try:
+                full = await noco.records(table_id, fields=["Id", *missing])
+                extra = {r.get("Id"): r for r in full}
+            except (NocoError, RuntimeError):
+                want = [w for w in want if w[0] in shown]
+    cols = [c for c in columns if c["title"] not in {src for src, _, _ in want}]
+    for src, show, after in want:
+        titles = [c["title"] for c in cols]
+        at = next((titles.index(t) + 1 for t in after if t in titles), len(cols))
+        cols.insert(at, {"title": show, "uidt": have[src].get("uidt") or "SingleLineText"})
+    out = []
+    for r in rows:
+        add = extra.get(r.get("Id")) or {}
+        nr = {k: v for k, v in r.items() if k not in {src for src, _, _ in want}}
+        for src, show, _ in want:
+            nr[show] = r[src] if src in r else add.get(src)
+        out.append(nr)
+    return cols, out
 
 
 async def _spec_brands(client: Client, noco: NocoClient, table_id: str, meta: dict, columns: list[dict],
@@ -1425,6 +1471,32 @@ def api_offers_comment(client_id: str, folder: str, data: dict = Body(...)):
 def api_offers_comment_delete(client_id: str, folder: str, data: dict = Body(...)):
     client, base, by = _offers_ctx(client_id, folder)
     _offers_call(offers.delete_comment, base, str(data.get("id") or ""), by, admin=access.is_admin())
+    return {"ok": True}
+
+
+@app.post("/api/clients/{client_id}/offers/manual")
+async def api_offers_manual(client_id: str, folder: str, data: dict = Body(...)):
+    """Цена вручную (0.42.0): {pos, supplier, price_rub, vat, note} — «Ввод вручную — <поставщик>», сразу к записи."""
+    client, base, by = _offers_ctx(client_id, folder)
+    positions, _ = await asyncio.to_thread(pricelists.tender_positions, client.id, folder, base)
+    fid = _offers_call(offers.add_manual, base, positions, str(data.get("pos") or ""), str(data.get("supplier") or ""),
+                       data.get("price_rub"), str(data.get("vat") or ""), str(data.get("note") or ""), by)
+    return {"file": fid}
+
+
+@app.post("/api/clients/{client_id}/offers/manual/remove")
+def api_offers_manual_remove(client_id: str, folder: str, data: dict = Body(...)):
+    client, base, by = _offers_ctx(client_id, folder)
+    _offers_call(offers.remove_manual, base, str(data.get("file") or ""), str(data.get("pos") or ""), by)
+    return {"ok": True}
+
+
+@app.post("/api/clients/{client_id}/offers/position")
+def api_offers_position(client_id: str, folder: str, data: dict = Body(...)):
+    """Бренд / страна позиции на сайте (0.42.0): {pos, maker?, country?}; null — убрать правку. В NocoDB — кнопкой записи."""
+    client, base, by = _offers_ctx(client_id, folder)
+    fields = {k: data[k] for k in ("maker", "country") if k in data}
+    _offers_call(offers.edit_position, base, str(data.get("pos") or ""), fields, by)
     return {"ok": True}
 
 
