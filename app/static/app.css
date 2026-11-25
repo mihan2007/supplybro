@@ -630,16 +630,13 @@ main[data-tab="tender"] > section[data-group]:not([data-group~="tender"]),
 main[data-tab="purchase"] > section[data-group]:not([data-group~="purchase"]),
 main[data-tab="bid"] > section[data-group]:not([data-group~="bid"]),
 main[data-tab="chat"] > section[data-group]:not([data-group~="chat"]),
-main[data-tab="pos"] > section[data-group]:not([data-group~="pos"]),
-main[data-tab="mail"] > section[data-group]:not([data-group~="mail"]) { display: none !important; }
-main[data-tab="pos"] > #workbench { order: 1; }
-main[data-tab="pos"] > #requests { order: 2; }
+main[data-tab="mail"] > section[data-group]:not([data-group~="mail"]),
+main[data-tab="spec"] > section[data-group]:not([data-group~="spec"]) { display: none !important; }
+/* «Конкурс» (0.39.0): документы — внизу, когда они загружены; пока их нет — наверху (загрузка на виду) */
+main[data-tab="tender"] > #docs.has-docs { order: 10; }
 /* «Закупка»: предложения → запросы → спецификация → цены из интернета (0.30.1) */
 main[data-tab="purchase"] > #offers { order: 1; }
-main[data-tab="purchase"] > #spec { order: 3; }
 main[data-tab="purchase"] > #prices { order: 4; }
-.jump-gap { flex: 1; }
-.jump.jump-all { font-size: 12px; color: var(--muted); }
 /* Строка этапов (0.30.0) */
 .stages { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .stages[hidden] { display: none; }
@@ -662,33 +659,9 @@ main[data-tab="purchase"] > #prices { order: 4; }
 .help > summary::-webkit-details-marker { display: none; }
 .help[open] > summary { margin-bottom: 6px; }
 
-/* Вид «по позициям» (0.31.0) */
-.view-switch { font-size: 12px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; margin-right: 8px; white-space: nowrap; }
-.view-switch a { padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); text-decoration: none; }
-.view-switch a.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.wb-search { width: 240px !important; padding: 5px 8px !important; }
-.wb-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+/* Кнопки-отборы (0.31.0; с 0.38.0 — таблица «Позиции и поставщики» во вкладке «Письма») */
 .chip-btn { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
 .chip-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.wb-table { width: 100%; }
-.wb-table th, .wb-table td { vertical-align: top; }
-.wb-row { cursor: pointer; }
-.wb-row:hover td { background: color-mix(in srgb, var(--accent) 5%, var(--panel)) !important; }
-.wb-row.open td { background: color-mix(in srgb, var(--accent) 8%, var(--panel)) !important; border-bottom-color: transparent; }
-.wb-row.empty .wb-name { color: var(--muted); }
-.wb-name { min-width: 260px; max-width: 420px; }
-.wb-best .badge { margin-left: 6px; font-size: 11px; }
-.wb-best.warn b { color: var(--warn-text); }
-.wb-tog { color: var(--muted); white-space: nowrap; text-align: right; }
-.wb-detail > td { background: var(--panel) !important; padding: 0 10px 14px 44px; }
-.wb-detail-box { display: grid; grid-template-columns: minmax(420px, 2fr) minmax(260px, 1fr); gap: 12px 24px; padding-top: 6px; }
-.wb-part h4 { margin: 4px 0 6px; font-size: 13px; }
-.wb-part:first-child { grid-row: span 3; }
-.wb-sub { width: 100%; font-size: 13px; }
-.wb-sub tr.best td { background: color-mix(in srgb, var(--ok) 12%, var(--panel)) !important; }
-.wb-list { display: grid; gap: 4px; }
-.wb-tools { white-space: nowrap; }
-@media (max-width: 900px) { .wb-detail-box { grid-template-columns: 1fr; } .wb-detail > td { padding-left: 10px; } }
 
 
 /* Переписка с поставщиками (0.32.0) */
@@ -789,3 +762,11 @@ details.rq-more[hidden] { display: none; }
 .btn.primary.danger { background: #b42318; border-color: #b42318; color: #fff; }
 .btn.primary.danger:disabled { opacity: .55; }
 .btn.primary.danger:hover:not(:disabled) { background: #912018; border-color: #912018; color: #fff; }
+
+/* Поля анализа (вкладка «Конкурс») во всю высоту страницы (0.38.1, пользователь 26.11.2026: «в разделе «Конкурс»
+   стоит убрать прокрутку»): без прокрутки внутри рамки, заголовок прилипает под вкладками. Таблица узкая (4 колонки),
+   прокрутка вбок не нужна; на телефоне — как было. */
+@media (min-width: 761px) {
+  #an-fields { max-height: none; overflow: visible; }
+  #an-fields-table th { top: var(--sticky-h, 120px); }
+}

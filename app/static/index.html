@@ -127,21 +127,16 @@
     </section>
 
     <!-- Вкладки (0.30.0, пользователь 18.11.2026: «интерфейс перегружен — давай новый интерфейс по рекомендациям»):
-         четыре рабочие вкладки вместо перехода по 11 разделам одной страницы; видна одна вкладка; «☰ одной страницей» —
-         как было (все разделы подряд). Вкладка по умолчанию — по роли, выбор запоминается. -->
+         рабочие вкладки вместо перехода по 11 разделам одной страницы; видна одна вкладка (с 0.38.0 — без вида «по
+         позициям» и «☰ одной страницей»). Вкладка по умолчанию — по роли, выбор запоминается. -->
     <div class="jump-wrap" id="jump-wrap" hidden>
       <nav class="panel jump-nav" id="jump-nav" aria-label="Вкладки конкурса">
-        <a class="jump" href="#" data-tab="pos">Позиции</a>
         <a class="jump" href="#" data-tab="tender">Конкурс</a>
+        <a class="jump" href="#" data-tab="spec" title="Спецификация конкурса из NocoDB и наши поставщики по брендам">Спецификация</a>
         <a class="jump" href="#" data-tab="purchase">Закупка</a>
         <a class="jump" href="#" data-tab="mail" title="Письма поставщикам: позиции и наши поставщики, переписка, новые запросы">Письма <span class="jump-badge" id="mail-badge" hidden></span></a>
         <a class="jump" href="#" data-tab="bid">Заявка</a>
         <a class="jump" href="#" data-tab="chat">Чат</a>
-        <span class="jump-gap"></span>
-        <!-- Вид (0.31.0): «разделы» — вкладки 0.30; «по позициям» — одна таблица позиций (вариант 1) -->
-        <span class="view-switch" id="view-switch" title="Два варианта страницы конкурса — попробуйте оба">Вид:
-          <a href="#" data-view="sections">разделы</a> <a href="#" data-view="pos">по позициям</a></span>
-        <a class="jump jump-all" href="#" data-tab="all" title="Все разделы подряд на одной странице, как раньше">☰ одной страницей</a>
       </nav>
     </div>
 
@@ -177,6 +172,21 @@
       </div>
     </section>
 
+    <!-- Паспорт конкурса (0.38.2; было «Данные из NocoDB», после анализа): поля записи «Реестра конкурсов» -->
+    <section class="panel" id="card" data-group="tender" hidden>
+      <div class="section-head">
+        <h2>Паспорт конкурса <span class="muted small">· реестр NocoDB</span></h2>
+        <div class="section-tools">
+          <label class="inline">Представление
+            <select id="reg-view"></select>
+          </label>
+          <label class="inline check"><input type="checkbox" id="hide-empty" checked> скрыть пустые</label>
+        </div>
+      </div>
+      <div class="status" id="card-status"></div>
+      <dl class="fields" id="fields"></dl>
+    </section>
+
     <!-- Анализ документов (ИИ): поля блоков 1–7, позиции, проверки, запись в NocoDB -->
     <section class="panel" id="analysis" data-group="tender" hidden>
       <div class="section-head">
@@ -201,7 +211,7 @@
       <div id="an-body" hidden>
         <div class="tabs" role="tablist">
           <button class="tab active" type="button" data-tab="fields">Поля конкурса</button>
-          <button class="tab" type="button" data-tab="positions">Позиции <span class="muted" id="an-pos-count"></span></button>
+          <button class="tab" type="button" data-tab="positions">Позиции из документов <span class="muted" id="an-pos-count"></span></button>
         </div>
         <div class="table-wrap an-wrap" id="an-fields"><table id="an-fields-table"></table></div>
         <div class="table-wrap an-wrap" id="an-positions" hidden><table id="an-pos-table"></table></div>
@@ -209,23 +219,9 @@
       </div>
     </section>
 
-    <!-- Данные из «Реестра конкурсов» -->
-    <section class="panel" id="card" data-group="tender" hidden>
-      <div class="section-head">
-        <h2>Данные из NocoDB</h2>
-        <div class="section-tools">
-          <label class="inline">Представление
-            <select id="reg-view"></select>
-          </label>
-          <label class="inline check"><input type="checkbox" id="hide-empty" checked> скрыть пустые</label>
-        </div>
-      </div>
-      <div class="status" id="card-status"></div>
-      <dl class="fields" id="fields"></dl>
-    </section>
 
     <!-- Спецификация -->
-    <section class="panel" id="spec" data-group="tender purchase" hidden>
+    <section class="panel" id="spec" data-group="spec" hidden>
       <div class="section-head">
         <h2>Спецификация <span class="muted" id="spec-count"></span></h2>
         <div class="section-tools">
@@ -251,23 +247,6 @@
       <div class="table-wrap" id="spec-wrap"><table id="spec-table"></table></div>
     </section>
 
-    <!-- По позициям (0.31.0, вариант 1): одна таблица позиций — лучшая цена, предложения, интернет, запросы, статус;
-         щелчок по строке — подробности. Видна в виде «по позициям» (вкладка «Позиции»). -->
-    <section class="panel" id="workbench" data-group="pos" hidden>
-      <div class="section-head">
-        <h2>Позиции <span class="muted" id="wb-info"></span></h2>
-        <div class="section-tools">
-          <input id="wb-search" type="text" placeholder="поиск: №, название, марка" class="wb-search">
-          <button class="btn small need-purchase" id="wb-ask" type="button" hidden>✉ Запросить цены по выбранным</button>
-          <button class="btn ghost small" id="wb-best" type="button" hidden title="По каждой позиции отметить самую низкую цену без замечаний">Отметить лучшие</button>
-          <button class="btn primary small" id="wb-write" type="button" hidden>Записать отмеченные в NocoDB</button>
-        </div>
-      </div>
-      <div class="wb-filters" id="wb-filters"></div>
-      <div class="table-wrap wb-wrap" id="wb-wrap"></div>
-      <div id="wb-docs-slot"></div>
-    </section>
-
     <!-- Предложения поставщиков: сравнение цен перед записью в NocoDB (0.29.0) -->
     <section class="panel" id="offers" data-group="purchase" hidden>
       <div class="section-head">
@@ -284,8 +263,7 @@
         на позицию) только кнопкой «Записать отмеченные»; 💬 — комментарии, ✏ — исправить цену (исходная сохраняется).
       </div></details>
       <div class="table-wrap of-wrap" id="of-wrap"></div>
-      <!-- Документы поставщиков (0.30.0): карточки прайсов, КП, счетов и писем — здесь, а не в чате;
-           в виде «по позициям» блок переносится под таблицу позиций (#wb-docs-slot) -->
+      <!-- Документы поставщиков (0.30.0): карточки прайсов, КП, счетов и писем — здесь, а не в чате -->
       <div id="of-docs-slot"><details class="of-docs" id="of-docs">
         <summary><span id="of-docs-title">Документы поставщиков</span></summary>
         <div class="of-docs-tools need-purchase">
@@ -298,7 +276,7 @@
     </section>
 
     <!-- Письма поставщикам (0.27.0; с 0.35.0 — своя вкладка «Письма», загружается при её открытии) -->
-    <section class="panel" id="requests" data-group="mail pos" hidden>
+    <section class="panel" id="requests" data-group="mail" hidden>
       <div class="section-head">
         <h2>Письма поставщикам <span class="muted" id="rq-count"></span></h2>
         <div class="section-tools">
