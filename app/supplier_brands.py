@@ -44,6 +44,11 @@ EMAIL_COL_RE = re.compile(r"e-?mail|почт", re.I)
 EMAIL_SKIP_RE = re.compile(r"наша", re.I)
 EMAIL_FIND_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 SUMMARY_LIMIT = 30          # поставщиков в блоке «Кому писать» (остальные — числом)
+# База поставщиков на сайте (0.34.0, app/supplier_base.py) показывает и правит ещё эти колонки — читаются вместе с
+# остальными одним запросом. FIELDS_VERSION — в ключе кэша: копия на диске с прежним набором колонок не берётся.
+BASE_EXTRA = ("Телефон", "Контактное лицо", "ИНН", "Город", "Страна", "Категория товаров", "Комментарий закупщика",
+              "Надёжность: комментарий")
+FIELDS_VERSION = 2
 
 # Написание → общий ключ. Ключи и значения — в нормализованном виде (norm).
 ALIASES = {
@@ -198,7 +203,7 @@ async def _wanted_fields(noco: NocoClient, table_id: str) -> list[str] | None:
     except (NocoError, RuntimeError):
         return None
     cols = [c.get("title") or "" for c in meta.get("columns", [])]
-    want = {"Id", F_NAME, F_BRANDS, F_MAKERS, F_STATUS, F_METHOD, F_SITE, F_INFO}
+    want = {"Id", F_NAME, F_BRANDS, F_MAKERS, F_STATUS, F_METHOD, F_SITE, F_INFO, *BASE_EXTRA}
     out = [c for c in cols if c in want or (EMAIL_COL_RE.search(c) and not EMAIL_SKIP_RE.search(c))]
     if any("," in c for c in out) or F_NAME not in out:
         return None                                  # NocoDB делит fields по запятым — тогда читаем всё
@@ -209,7 +214,33 @@ def _index(rows: list[dict], table_id: str, at: float) -> dict:
     index = build_index(rows)
     index["loaded_at"] = at
     index["table_id"] = table_id
+    index["rows"] = rows                     # все записи, и без брендов — для базы поставщиков (0.34.0)
     return index
+
+
+def cache_key(client: Client) -> str:
+    s = client.nocodb
+    own_table = (getattr(s, "suppliers_table_id", "") or "").strip()
+    return f"{client.id}:{s.base_id}:{own_table}:v{FIELDS_VERSION}"
+
+
+def patch_cache(client: Client, record_id: str, row: dict | None) -> None:
+    """После правки на сайте (0.34.0): заменить / добавить (row) или убрать (None) запись в кэше — в памяти и на
+    диске, без перечитывания всей таблицы из NocoDB."""
+    ck = cache_key(client)
+    with _LOCK:
+        hit = _CACHE.get(ck)
+    if not hit:
+        return
+    old = hit[1]
+    rows = [r for r in old.get("rows") or [] if str(r.get("Id")) != str(record_id)]
+    if row is not None:
+        rows.append(row)
+        rows.sort(key=lambda r: int(r.get("Id") or 0))
+    index = _index(rows, old.get("table_id") or "", hit[0])
+    _disk_write(ck, index["table_id"], rows)
+    with _LOCK:
+        _CACHE[ck] = (hit[0], index)
 
 
 async def load(client: Client, fresh: bool = False) -> tuple[dict | None, str]:
@@ -221,7 +252,7 @@ async def load(client: Client, fresh: bool = False) -> tuple[dict | None, str]:
     перезапуска сайта читается она, пока ей меньше CACHE_HOURS; NocoDB не ответил — последняя копия любого возраста."""
     s = client.nocodb
     own_table = (getattr(s, "suppliers_table_id", "") or "").strip()
-    ck = f"{client.id}:{s.base_id}:{own_table}"
+    ck = cache_key(client)
     started = time.time()
 
     def memory():

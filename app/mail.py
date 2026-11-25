@@ -463,7 +463,47 @@ def send_many(owner: str, box_id: int, messages: list[EmailMessage], pause: floa
 
 
 def owner_key() -> str:
-    """Хозяин ящиков — вошедший сотрудник ('' — вход на сайт выключен)."""
+    """Хозяин ящиков — вошедший сотрудник ('' — вход на сайт выключен). С 0.36.0 — или сотрудник, чьи ящики у него
+    общие («Почтовые ящики как у …» в админ-панели): тогда те же ящики, ответы поставщиков и неразобранная почта."""
     from . import access
     u = access.current_user()
-    return u["login"] if u else ""
+    if not u:
+        return ""
+    return (u.get("mail_owner") or "").strip() or u["login"]
+
+
+def merge_owner(src: str, dst: str) -> str:
+    """Ящики, письма и ответы сотрудника src — к общим ящикам dst (0.36.0). Ящик с тем же адресом у dst уже есть —
+    остаётся ящик dst, двойник src убирается (иначе сайт читал бы одну почту дважды). Возвращает, что сделано."""
+    if not src or not dst or src == dst:
+        return ""
+    init()
+    moved = same = 0
+    with db.connect() as con:
+        have = {r["address"].lower() for r in con.execute("SELECT address FROM mailboxes WHERE owner=?", (dst,))}
+        has_default = bool(con.execute("SELECT 1 FROM mailboxes WHERE owner=? AND is_default=1", (dst,)).fetchone())
+        for r in con.execute("SELECT id, address FROM mailboxes WHERE owner=?", (src,)).fetchall():
+            if r["address"].lower() in have:
+                # тот же адрес уже есть в общих — второй ящик убрать, иначе почта читалась бы дважды
+                con.execute("DELETE FROM mailboxes WHERE id=?", (r["id"],))
+                try:
+                    con.execute("DELETE FROM mail_inbox_state WHERE mailbox_id=?", (r["id"],))
+                except sqlite3.OperationalError:
+                    pass
+                same += 1
+                continue
+            con.execute("UPDATE mailboxes SET owner=?, is_default=CASE WHEN ? THEN 0 ELSE is_default END WHERE id=?",
+                        (dst, has_default, r["id"]))
+            have.add(r["address"].lower())
+            moved += 1
+        for table in ("mail_inbox", "mail_requests"):
+            try:
+                con.execute(f"UPDATE {table} SET owner=? WHERE owner=?", (dst, src))
+            except sqlite3.OperationalError:
+                pass                                 # таблицы ещё нет (почтой не пользовались)
+    parts = []
+    if moved:
+        parts.append(f"ящиков перенесено в общие: {moved}")
+    if same:
+        parts.append(f"двойников с тем же адресом убрано: {same}")
+    return ", ".join(parts)

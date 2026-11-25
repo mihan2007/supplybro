@@ -24,9 +24,9 @@ import time
 import httpx
 
 from .config import NocoSettings
-from .nocodb import NocoError
+from .nocodb import NocoError, busy_error, get_sync
 
-TTL = 120
+TTL = 600          # 0.33.3: было 120; новую таблицу own_table всё равно находит сразу (перечитывает при промахе)
 # id таблицы в ссылке вида https://app.nocodb.com/<ws>/<база>/<таблица>[/<вид>] — любой базы (у tools/nocodb_client
 # _table_id_from_link — только текущей, ссылка из копии базы там не находится вовсе).
 TABLE_ID_RE = re.compile(r"/(m[a-z0-9]{8,})(?:[/?#]|$)")
@@ -36,12 +36,15 @@ _TITLES: dict[str, str] = {}                             # id таблицы ч�
 
 
 def _get(s: NocoSettings, path: str) -> httpx.Response:
+    """0.33.3: общая очередь и повторы при 429, как у app/nocodb.py (раньше 429 сразу был ошибкой)."""
     try:
         # trust_env=True — прокси из HTTPS_PROXY, как у app/nocodb.py.
-        return httpx.get(s.url.rstrip("/") + "/api/v2" + path, headers={"xc-token": s.token()}, timeout=30,
-                         trust_env=True)
+        r = get_sync(s.url.rstrip("/") + "/api/v2" + path, path, {"xc-token": s.token()})
     except httpx.HTTPError as exc:
         raise NocoError(f"нет связи с NocoDB ({type(exc).__name__}: {exc})") from exc
+    if r.status_code == 429:
+        raise busy_error()
+    return r
 
 
 def base_tables(s: NocoSettings, fresh: bool = False) -> dict[str, str]:

@@ -126,6 +126,11 @@ select:disabled { opacity: .6; }
 /* Шапка конкурса */
 .head-top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .tender-no { color: var(--muted); font-size: 13px; }
+.tender-no-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tender-no-row .btn.small { padding: 1px 8px; font-size: 12px; }
+.rn-dlg { max-width: 520px; }
+.rn-note ul { margin: 4px 0 8px 18px; padding: 0; }
+.rn-note p { margin: 4px 0; }
 .links { display: flex; gap: 8px; flex-wrap: wrap; }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .chip { background: var(--chip); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
@@ -625,12 +630,12 @@ main[data-tab="tender"] > section[data-group]:not([data-group~="tender"]),
 main[data-tab="purchase"] > section[data-group]:not([data-group~="purchase"]),
 main[data-tab="bid"] > section[data-group]:not([data-group~="bid"]),
 main[data-tab="chat"] > section[data-group]:not([data-group~="chat"]),
-main[data-tab="pos"] > section[data-group]:not([data-group~="pos"]) { display: none !important; }
+main[data-tab="pos"] > section[data-group]:not([data-group~="pos"]),
+main[data-tab="mail"] > section[data-group]:not([data-group~="mail"]) { display: none !important; }
 main[data-tab="pos"] > #workbench { order: 1; }
 main[data-tab="pos"] > #requests { order: 2; }
 /* «Закупка»: предложения → запросы → спецификация → цены из интернета (0.30.1) */
 main[data-tab="purchase"] > #offers { order: 1; }
-main[data-tab="purchase"] > #requests { order: 2; }
 main[data-tab="purchase"] > #spec { order: 3; }
 main[data-tab="purchase"] > #prices { order: 4; }
 .jump-gap { flex: 1; }
@@ -718,3 +723,63 @@ main[data-tab="purchase"] > #prices { order: 4; }
 .rq-brand:hover { border-color: var(--line-strong); }
 .rq-brand.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .rq-brand .muted { margin-left: 4px; }
+
+/* База поставщиков (0.34.0) */
+.sup-dlg { width: min(1100px, 96vw); max-width: 96vw; }
+.sup-head-tools { display: flex; gap: 8px; align-items: center; }
+.sup-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0 10px; }
+.sup-tools input[type=search] { flex: 1 1 260px; min-width: 200px; padding: 6px 10px; }
+.sup-form { border: 1px solid var(--line, #ddd); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; background: var(--panel, #fafafa); }
+.sup-form h3 { margin: 0 0 8px; }
+.sup-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 12px; }
+.sup-grid .field.long { grid-column: 1 / -1; }
+.sup-grid textarea { min-height: 54px; }
+.sup-dups { margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: #fff4d6; font-size: 13px; }
+.sup-list-wrap { max-height: 58vh; overflow: auto; border: 1px solid var(--line, #ddd); border-radius: 8px; }
+.sup-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sup-table th { position: sticky; top: 0; background: var(--bg, #fff); text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line, #ddd); z-index: 1; }
+.sup-table td { padding: 6px 8px; border-bottom: 1px solid var(--line, #eee); vertical-align: top; }
+.sup-table tr.off td { color: var(--muted); }
+.sup-table .sup-name { font-weight: 600; }
+.sup-table .sup-sub { color: var(--muted); font-size: 12px; }
+.sup-table .sup-act { white-space: nowrap; text-align: right; }
+.sup-table .sup-act .btn { margin-left: 4px; }
+.sup-st { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 12px; }
+.sup-st.green { background: #dff3e3; }
+.sup-st.yellow { background: #fff1c2; }
+.sup-st.grey { background: #eceff2; }
+@media (max-width: 760px) {
+  .sup-table thead { display: none; }
+  .sup-table tr { display: block; border-bottom: 1px solid var(--line, #ddd); padding: 6px 0; }
+  .sup-table td { display: block; border: 0; padding: 2px 8px; }
+  .sup-table .sup-act { text-align: left; }
+}
+
+/* Вкладка «Письма» (0.35.0) */
+.jump-badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 999px; font-size: 11px;
+  line-height: 18px; text-align: center; background: var(--warn, #d97706); color: #fff; vertical-align: 1px; }
+.jump-badge[hidden] { display: none; }
+.rq-pos-box { margin: 12px 0; }
+.rq-pos-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rq-pos-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rq-pos-tools input[type=search] { min-width: 240px; padding: 5px 10px; }
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 8px; }
+.rq-pos-wrap { max-height: 62vh; overflow: auto; }
+#rq-pos { font-size: 13px; }
+#rq-pos th { position: sticky; top: 0; z-index: 1; background: var(--panel, #fff); }
+#rq-pos td { vertical-align: top; }
+#rq-pos .rq-pos-name { max-width: 360px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.rq-st { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; background: var(--line); }
+.rq-st.ok { background: color-mix(in srgb, var(--ok) 15%, var(--panel)); }
+.rq-st.busy { background: #fff1c2; }
+.rq-st.warn { background: #fde4d4; }
+.rq-st.muted { background: transparent; color: var(--muted); }
+details.rq-new, details.rq-more { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
+details.rq-new > summary, details.rq-more > summary { cursor: pointer; font-weight: 600; }
+details.rq-new[open] > summary, details.rq-more[open] > summary { margin-bottom: 8px; }
+details.rq-more[hidden] { display: none; }
+@media (max-width: 760px) {
+  #rq-pos thead { display: none; }
+  #rq-pos tr { display: block; border-bottom: 1px solid var(--line); padding: 6px 0; }
+  #rq-pos td { display: block; border: 0; padding: 2px 6px; }
+}

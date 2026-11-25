@@ -228,8 +228,25 @@ def users(request: Request):
 def create(request: Request, data: dict = Body(...)):
     me = _admin(request, change=True)
     data = _scoped_data(me, dict(data))
+    owner = str(data.pop("mail_owner", "") or "").strip()
+    if owner:
+        _mail_owner_scope(me, {"mail_owner": owner})
     user, pw = _wrap(lambda: auth.create_user(data, me, _known(), _ip(request)))
+    if owner:
+        user = _wrap(lambda: auth.update_user(user["id"], {"mail_owner": owner}, me, _known(), _ip(request)))
     return {"user": auth.public(user), "temp_password": pw}
+
+
+def _mail_owner_scope(me: dict, data: dict) -> None:
+    """«Почтовые ящики как у …» (0.36.0): администратор клиента — только свои сотрудники или он сам."""
+    owner = str(data.get("mail_owner") or "").strip().lower()
+    if not owner:
+        return
+    other = auth.find_user(owner)
+    if not other:
+        raise HTTPException(400, f"сотрудника «{owner}» нет")
+    if _scope(me) is not None and not (_in_scope(me, other) or other["id"] == me["id"]):
+        raise HTTPException(400, "общие ящики — только с сотрудниками своего клиента")
 
 
 @router.patch("/api/admin/users/{user_id}")
@@ -237,8 +254,9 @@ def update(request: Request, user_id: int, data: dict = Body(...)):
     me = _admin(request, change=True)
     target = _target(me, user_id)
     data = {k: v for k, v in data.items()
-            if k in ("login", "name", "email", "phone", "role", "clients", "active", "note", "blocks_off")}
+            if k in ("login", "name", "email", "phone", "role", "clients", "active", "note", "blocks_off", "mail_owner")}
     data = _scoped_data(me, data, target)
+    _mail_owner_scope(me, data)
     return {"user": auth.public(_wrap(lambda: auth.update_user(user_id, data, me, _known(), _ip(request))))}
 
 

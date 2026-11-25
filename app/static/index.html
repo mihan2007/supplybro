@@ -19,6 +19,7 @@
       <div class="me-box" id="me-box" hidden>
         <span class="me-name" id="me-name"></span>
         <button class="btn ghost" id="me-mail" type="button" hidden title="Ящики, с которых отправляются запросы поставщикам">✉ Почтовые ящики</button>
+        <button class="btn ghost" id="me-suppliers" type="button" hidden title="База поставщиков клиента: просмотр, добавление, «Не работаем», удаление">🏢 Поставщики</button>
         <a class="btn ghost" id="me-admin" href="/admin" hidden>Админ-панель</a>
         <button class="btn ghost" id="me-logout" type="button">Выйти</button>
       </div>
@@ -110,7 +111,10 @@
     <section class="panel" id="head" hidden>
       <div class="head-top">
         <div>
-          <div class="tender-no" id="head-no"></div>
+          <div class="tender-no-row">
+            <div class="tender-no" id="head-no"></div>
+            <button class="btn ghost small need-upload" id="head-rename" type="button" title="Сменить внутренний номер конкурса: папка, реестр NocoDB, таблица спецификации">✎ номер</button>
+          </div>
           <h1 id="head-title"></h1>
         </div>
         <div class="links" id="head-links"></div>
@@ -129,6 +133,7 @@
         <a class="jump" href="#" data-tab="pos">Позиции</a>
         <a class="jump" href="#" data-tab="tender">Конкурс</a>
         <a class="jump" href="#" data-tab="purchase">Закупка</a>
+        <a class="jump" href="#" data-tab="mail" title="Письма поставщикам: позиции и наши поставщики, переписка, новые запросы">Письма <span class="jump-badge" id="mail-badge" hidden></span></a>
         <a class="jump" href="#" data-tab="bid">Заявка</a>
         <a class="jump" href="#" data-tab="chat">Чат</a>
         <span class="jump-gap"></span>
@@ -291,39 +296,61 @@
       <div class="of-comments" id="of-comments"></div>
     </section>
 
-    <!-- Запросы цен поставщикам по почте (0.27.0) -->
-    <section class="panel" id="requests" data-group="purchase pos" hidden>
+    <!-- Письма поставщикам (0.27.0; с 0.35.0 — своя вкладка «Письма», загружается при её открытии) -->
+    <section class="panel" id="requests" data-group="mail pos" hidden>
       <div class="section-head">
-        <h2>Запросы поставщикам <span class="muted" id="rq-count"></span></h2>
+        <h2>Письма поставщикам <span class="muted" id="rq-count"></span></h2>
         <div class="section-tools">
           <label class="inline">Отправлять с
             <select id="rq-box"></select>
           </label>
           <button class="btn ghost small need-purchase" id="rq-boxes" type="button">✉ Мои ящики</button>
+          <button class="btn ghost small need-purchase" id="rq-suppliers" type="button" title="База поставщиков: добавить, изменить, «Не работаем», удалить">🏢 База поставщиков</button>
         </div>
       </div>
       <div class="status" id="rq-status"></div>
       <div class="rq-hint muted small" id="rq-hint" hidden></div>
+      <div class="notice rq-unmatched" id="rq-unmatched" hidden></div>
       <!-- Переписка с поставщиками (0.32.0): строка на ответившего поставщика, щелчок — окно переписки -->
       <div class="th-box" id="rq-threads-box" hidden>
         <h3 class="rq-jh">Переписка с поставщиками <span class="muted" id="rq-th-count"></span></h3>
         <div class="th-list" id="rq-threads"></div>
       </div>
-      <!-- Фильтр по брендам (0.33.0): только поставщики выбранных брендов и только позиции этих брендов -->
-      <div class="rq-brands small" id="rq-brands" hidden></div>
-      <div class="rq-tools need-purchase" id="rq-tools" hidden>
-        <a href="#" id="rq-all">выбрать всех с адресом</a> · <a href="#" id="rq-none">снять все</a>
+      <!-- Позиции и поставщики (0.35.0): по каждой позиции — наши поставщики по брендам, кому писали, кто ответил -->
+      <div class="rq-pos-box" id="rq-pos-box" hidden>
+        <div class="rq-pos-head">
+          <h3 class="rq-jh">Позиции и поставщики <span class="muted" id="rq-pos-info"></span></h3>
+          <div class="rq-pos-tools">
+            <input type="search" id="rq-pos-search" placeholder="Поиск: №, позиция, бренд, поставщик">
+            <button class="btn small need-purchase" id="rq-pos-ask" type="button" disabled>✉ Запросить по выбранным</button>
+          </div>
+        </div>
+        <div class="chip-row small" id="rq-pos-filters"></div>
+        <div class="table-wrap rq-pos-wrap"><table id="rq-pos"></table></div>
+        <div class="muted small" id="rq-pos-more"></div>
       </div>
-      <div class="rq-letters" id="rq-letters"></div>
-      <div class="rq-actions need-purchase" id="rq-actions" hidden>
-        <label class="inline"><input type="checkbox" id="rq-xlsx" checked> приложить перечень позиций (Excel)</label>
-        <button class="btn primary" id="rq-send" type="button">Отправить выбранные</button>
-      </div>
-      <div class="notice rq-unmatched" id="rq-unmatched" hidden></div>
-      <h3 class="rq-jh" id="rq-ih" hidden>Ответы поставщиков</h3>
-      <div class="table-wrap" id="rq-inbox-wrap" hidden><table id="rq-inbox"></table></div>
-      <h3 class="rq-jh" id="rq-jh" hidden>Отправленные запросы</h3>
-      <div class="table-wrap" id="rq-journal-wrap" hidden><table id="rq-journal"></table></div>
+      <!-- Новый запрос цен: черновики писем строятся, только когда блок раскрыт -->
+      <details class="rq-new" id="rq-new">
+        <summary><b>✉ Новый запрос цен</b> <span class="muted" id="rq-new-info"></span></summary>
+        <!-- Фильтр по брендам (0.33.0): только поставщики выбранных брендов и только позиции этих брендов -->
+        <div class="rq-brands small" id="rq-brands" hidden></div>
+        <div class="rq-tools need-purchase" id="rq-tools" hidden>
+          <a href="#" id="rq-all">выбрать всех с адресом</a> · <a href="#" id="rq-none">снять все</a>
+        </div>
+        <div class="rq-letters" id="rq-letters"></div>
+        <div class="rq-actions need-purchase" id="rq-actions" hidden>
+          <label class="inline"><input type="checkbox" id="rq-xlsx" checked> приложить перечень позиций (Excel)</label>
+          <button class="btn primary" id="rq-send" type="button">Отправить выбранные</button>
+        </div>
+      </details>
+      <details class="rq-more" id="rq-inbox-box" hidden>
+        <summary id="rq-ih">Ответы поставщиков</summary>
+        <div class="table-wrap" id="rq-inbox-wrap"><table id="rq-inbox"></table></div>
+      </details>
+      <details class="rq-more" id="rq-journal-box" hidden>
+        <summary id="rq-jh">Отправленные запросы</summary>
+        <div class="table-wrap" id="rq-journal-wrap"><table id="rq-journal"></table></div>
+      </details>
     </section>
 
     <!-- Поиск цен: Россия (Яндекс) и зарубеж (Claude), по 3 лучшие цены со ссылками, своя база цен -->
@@ -476,6 +503,66 @@
     </div>
   </dialog>
 
+  <!-- База поставщиков (0.34.0) -->
+  <dialog class="dlg sup-dlg" id="sup-dlg">
+    <div class="section-head">
+      <h2>Поставщики <span class="muted" id="sup-client"></span></h2>
+      <div class="sup-head-tools">
+        <a class="btn ghost small" id="sup-noco" target="_blank" rel="noopener" hidden>Таблица в NocoDB ↗</a>
+        <button class="btn ghost small" id="sup-close" type="button">Закрыть</button>
+      </div>
+    </div>
+    <div class="sup-tools">
+      <input id="sup-search" type="search" placeholder="Поиск: название, бренд, почта, ИНН, город…">
+      <label class="small"><input type="checkbox" id="sup-show-off"> показывать «Не работаем»</label>
+      <button class="btn primary small need-purchase" id="sup-add" type="button">+ Добавить поставщика</button>
+      <button class="btn ghost small" id="sup-reload" type="button" title="Прочитать таблицу из NocoDB заново (если правили прямо в NocoDB)">↻ из NocoDB</button>
+    </div>
+    <div class="status" id="sup-status"></div>
+    <form class="sup-form" id="sup-form" hidden autocomplete="off">
+      <h3 id="sup-form-title">Новый поставщик</h3>
+      <div class="sup-grid" id="sup-fields"></div>
+      <div class="sup-dups" id="sup-dups" hidden></div>
+      <div class="mf-actions">
+        <button class="btn primary" id="sup-save" type="submit">Сохранить в NocoDB</button>
+        <button class="btn ghost" id="sup-cancel" type="button">Отмена</button>
+      </div>
+    </form>
+    <div class="sup-list-wrap">
+      <table class="sup-table">
+        <thead><tr><th>Поставщик</th><th>Бренды</th><th>Почта и контакты</th><th>Статус</th><th></th></tr></thead>
+        <tbody id="sup-list"></tbody>
+      </table>
+    </div>
+    <div class="muted small" id="sup-more"></div>
+  </dialog>
+
+  <!-- Смена внутреннего номера конкурса (0.34.0) -->
+  <dialog class="dlg rn-dlg" id="rn-dlg">
+    <div class="section-head">
+      <h2>Сменить номер конкурса</h2>
+      <button class="btn ghost small" id="rn-close" type="button">Закрыть</button>
+    </div>
+    <form id="rn-form" autocomplete="off">
+      <p>Сейчас: <b id="rn-old"></b></p>
+      <label class="field"><span class="label">Новый номер</span><input id="rn-new" type="text" placeholder="К950" required></label>
+      <div class="muted small rn-note">
+        <p>Изменится везде одной кнопкой:</p>
+        <ul>
+          <li>имя папки конкурса: <span id="rn-folder"></span>;</li>
+          <li>«Внутренний номер» в «Реестре конкурсов» NocoDB и название таблицы спецификации;</li>
+          <li>связи на сайте: документы, анализ, чат, запросы поставщикам, переписка.</li>
+        </ul>
+        <p>Метки в уже отправленных письмах ([SB-…]) останутся прежними — ответы поставщиков сайт всё равно найдёт.
+          Готовые файлы (xlsx, XML, письма) не переписываются. Перед сменой закройте файлы конкурса в Excel и Word.</p>
+      </div>
+      <div class="status" id="rn-status"></div>
+      <div class="mf-actions">
+        <button class="btn primary" id="rn-go" type="submit">Сменить номер</button>
+      </div>
+    </form>
+  </dialog>
+
   <!-- Мои почтовые ящики (0.27.0) -->
   <dialog class="dlg" id="mail-dlg">
     <div class="section-head">
@@ -484,6 +571,7 @@
     </div>
     <p class="muted small">С этих ящиков сайт отправляет запросы цен поставщикам и читает ответы (раз в несколько минут, письма остаются непрочитанными). Ящики и пароли
       видны только вам; пароль хранится на сервере зашифрованным и обратно на страницу не отдаётся.</p>
+    <div class="notice small" id="mail-shared" hidden></div>
     <div class="status" id="mail-status"></div>
     <div class="mb-list" id="mail-list"></div>
     <!-- Ответы поставщиков (0.28.0): проверка почты и письма, которые сайт не смог отнести к конкурсу -->

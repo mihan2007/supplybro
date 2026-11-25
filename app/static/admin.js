@@ -251,7 +251,8 @@ function userRow(u, legacy) {
     el("td", {}, el("div", { class: "u-name", text: u.name }), el("div", { class: "u-login", text: u.login + (st.me && u.id === st.me.id ? " · это вы" : "") })),
     el("td", {}, el("span", { class: "pill" + (u.role === "admin" || u.role === "client_admin" ? " role-admin" : ""), text: u.role_title }),
       ...(legacy ? [el("div", { class: "u-login", text: "клиенты: " + clientsText(u.clients) })] : []),
-      ...(blocksText(u.blocks_off) ? [el("div", { class: "u-login", text: blocksText(u.blocks_off) })] : [])),
+      ...(blocksText(u.blocks_off) ? [el("div", { class: "u-login", text: blocksText(u.blocks_off) })] : []),
+      ...(u.mail_owner ? [el("div", { class: "u-login", text: "почта как у: " + u.mail_owner })] : [])),
     el("td", {}, ...statePills(u)),
     el("td", { text: when(u.last_login_at) }),
     el("td", { text: [u.email, u.phone].filter(Boolean).join("\n") || "—" }));
@@ -370,6 +371,19 @@ function fillBlocks(off) {
     el("input", { type: "checkbox", value: key, checked: set.has(key) ? null : "" }), title)));
 }
 
+// Почтовые ящики (0.36.0): свои или общие с другим сотрудником (те же ящики, ответы, неразобранная почта).
+function fillMailOwner(u) {
+  const others = [...users, ...(st.me && !users.some((x) => x.id === st.me.id) ? [st.me] : [])]
+    .filter((x) => (!u || x.id !== u.id) && !x.mail_owner && x.active !== 0)
+    .sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  const cur = (u && u.mail_owner) || "";
+  const opts = [el("option", { value: "", text: "свои ящики" }),
+    ...others.map((x) => el("option", { value: x.login, text: `как у: ${x.name} (${x.login})` }))];
+  if (cur && !others.some((x) => x.login === cur)) opts.push(el("option", { value: cur, text: `как у: ${cur}` }));
+  $("ed-mail-owner").replaceChildren(...opts);
+  $("ed-mail-owner").value = cur;
+}
+
 function blocksText(off) {
   const names = (off || []).map((k) => ((st.blocks || {})[k] || k).split(" (")[0]);
   return names.length ? "выключено: " + names.join(", ") : "";
@@ -389,6 +403,7 @@ function openEditor(u, preset) {
   fillClient(u ? clientOf(u) : (preset.client || ""), u && !clientOf(u) && u.role !== "admin" ? u.clients : null);
   fillRoles(u ? u.role : (preset.role || "tender"), self);
   fillBlocks(u ? u.blocks_off : []);
+  fillMailOwner(u);
   $("ed-pass-box").hidden = Boolean(u);
   document.querySelector("input[name=pw][value=temp]").checked = true;
   $("ed-pass").hidden = true;
@@ -409,7 +424,7 @@ function formData() {
   const clients = role === "admin" ? ["*"] : client ? [client] : [];
   const blocks_off = [...$("ed-blocks").querySelectorAll("input")].filter((cb) => !cb.checked).map((cb) => cb.value);
   return { name: $("ed-name").value, login: $("ed-login").value, email: $("ed-email").value, phone: $("ed-phone").value,
-    role, clients, note: $("ed-note").value, blocks_off };
+    role, clients, note: $("ed-note").value, blocks_off, mail_owner: $("ed-mail-owner").value };
 }
 
 $("ed-form").addEventListener("submit", async (e) => {

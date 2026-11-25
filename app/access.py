@@ -76,6 +76,7 @@ RULES = [
     (re.compile(r"^/docs/upload$"), "upload", "загрузил документы"),
     (re.compile(r"^/docs/process$"), "upload", "запустил обработку документов"),
     (re.compile(r"^/folders$"), "upload", "создал конкурс"),
+    (re.compile(r"^/rename$"), "upload", "сменил внутренний номер конкурса"),
     (re.compile(r"^/analysis/run$"), "analyze", "запустил анализ"),
     (re.compile(r"^/analysis/save$"), "analyze", "запустил запись в NocoDB"),
     (re.compile(r"^/analysis/changes/run$"), "analyze", "запустил разбор изменений документации"),
@@ -100,6 +101,11 @@ RULES = [
     (re.compile(r"^/tenders/\d+/requests/email$"), "purchase", "указал адрес почты поставщика"),
     (re.compile(r"^/tenders/\d+/requests/reply$"), "purchase", "ответил поставщику"),
     (re.compile(r"^/tenders/\d+/requests/done$"), "purchase", "отметил: ответ поставщику не нужен"),
+    # База поставщиков (0.34.0): добавить / изменить / «Не работаем» — purchase, удалить насовсем — offers.
+    (re.compile(r"^/suppliers$"), "purchase", "добавил поставщика в базу"),
+    (re.compile(r"^/suppliers/\d+$"), "purchase", "изменил поставщика в базе"),
+    (re.compile(r"^/suppliers/\d+/status$"), "purchase", "сменил статус поставщика («Не работаем»)"),
+    (re.compile(r"^/suppliers/\d+/delete$"), "offers", "удалил поставщика из базы"),
     (re.compile(r"^/chat$"), "chat", "задал вопрос в чате"),
     (re.compile(r"^/chat/clear$"), "chat", "очистил историю чата"),
 ]
@@ -113,6 +119,7 @@ BLOCK_PATHS = [
     (re.compile(r"^/(prices|pricelists|offers)(/|$)"), "prices"),
     (re.compile(r"^/tenders/[^/]+/spec$"), "spec"),
     (re.compile(r"^/tenders/[^/]+/requests(/|$)"), "prices"),
+    (re.compile(r"^/requests(/|$)"), "prices"),
     (re.compile(r"^/chat(/|$)"), "chat"),
 ]
 

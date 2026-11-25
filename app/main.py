@@ -21,7 +21,7 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, supplier_threads, tender_list
+from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, supplier_threads, tender_list, tender_rename, supplier_base
 from .noco_tables import own_table_async
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
@@ -523,7 +523,9 @@ def api_mailboxes():
         s = st.get(b["id"]) or {}
         b["inbox"] = {"checked_at": s.get("checked_at"), "ok": s.get("ok"), "error": s.get("error", ""),
                       "new_count": s.get("new_count", 0), "poll_now": bool(s.get("poll_now"))}
-    return {"boxes": boxes, "poll_minutes": mail_inbox.POLL_MINUTES}
+    me = access.current_user() or {}
+    shared = owner if owner and owner != me.get("login") else ""
+    return {"boxes": boxes, "poll_minutes": mail_inbox.POLL_MINUTES, "shared_with": shared}
 
 
 # ---------- ответы поставщиков: почта (0.28.0) ----------
@@ -630,6 +632,23 @@ async def api_requests(client_id: str, record_id: int, folder: str = ""):
         "me": mail.owner_key(),
         "can_send": access.can(access.current_user(), "purchase") if access.LOGIN_REQUIRED else True,
     }
+
+
+@app.get("/api/clients/{client_id}/requests/summary")
+def api_requests_summary(client_id: str, internal: str = ""):
+    """Коротко о письмах конкурса (0.35.0) — только из базы сайта, без NocoDB: для строки этапов и значка вкладки
+    «Письма», пока сама вкладка не открыта (черновики писем строятся только при её открытии)."""
+    client = get_client(client_id)
+    internal = clean(internal)
+    if not internal:
+        return {"sent": 0, "answered": 0, "waiting": 0, "letters": 0, "threads": []}
+    journal = [j for j in supplier_requests.journal(client.id, internal) if j["status"] == "sent" and j.get("kind") != "reply"]
+    inbox = mail_inbox.for_tender(client.id, internal)
+    threads = supplier_threads.threads(client.id, internal)
+    answered = {x["request_id"] for x in inbox if x.get("request_id")}
+    return {"sent": len({j["supplier_id"] or j["to_addr"] for j in journal}),
+            "answered": len(threads) or len({j["id"] for j in journal if j["id"] in answered}),
+            "waiting": sum(1 for t in threads if t.get("waiting")), "letters": len(inbox), "threads": threads}
 
 
 @app.post("/api/clients/{client_id}/tenders/{record_id}/requests/send")
@@ -891,6 +910,93 @@ def api_create_folder(client_id: str, data: dict = Body(...)):
     skipped: list[str] = []
     name = create_folder(client, str(data.get("number", "")), str(data.get("title", "")), skipped)
     return {"folder": name, "template_skipped": skipped}
+
+
+# ---------- база поставщиков (0.34.0, app/supplier_base.py) ----------
+
+def _base_call_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, supplier_base.BaseError):
+        return HTTPException(exc.status, str(exc))
+    return HTTPException(502, f"NocoDB: {exc}")
+
+
+@app.get("/api/clients/{client_id}/suppliers")
+async def api_suppliers(client_id: str, fresh: bool = False):
+    return await supplier_base.listing(get_client(client_id), fresh)
+
+
+@app.post("/api/clients/{client_id}/suppliers")
+async def api_supplier_add(client_id: str, data: dict = Body(...)):
+    try:
+        return await supplier_base.add(get_client(client_id), data.get("values") or {}, bool(data.get("confirm")))
+    except (supplier_base.BaseError, NocoError, RuntimeError) as exc:
+        raise _base_call_error(exc) from exc
+
+
+@app.get("/api/clients/{client_id}/suppliers/{rid}")
+async def api_supplier_one(client_id: str, rid: int):
+    try:
+        return await supplier_base.one(get_client(client_id), str(rid))
+    except (supplier_base.BaseError, NocoError, RuntimeError) as exc:
+        raise _base_call_error(exc) from exc
+
+
+@app.post("/api/clients/{client_id}/suppliers/{rid}")
+async def api_supplier_edit(client_id: str, rid: int, data: dict = Body(...)):
+    try:
+        return await supplier_base.edit(get_client(client_id), str(rid), data.get("values") or {})
+    except (supplier_base.BaseError, NocoError, RuntimeError) as exc:
+        raise _base_call_error(exc) from exc
+
+
+@app.post("/api/clients/{client_id}/suppliers/{rid}/status")
+async def api_supplier_status(client_id: str, rid: int, data: dict = Body(...)):
+    try:
+        return await supplier_base.set_off(get_client(client_id), str(rid), bool(data.get("off")))
+    except (supplier_base.BaseError, NocoError, RuntimeError) as exc:
+        raise _base_call_error(exc) from exc
+
+
+@app.post("/api/clients/{client_id}/suppliers/{rid}/delete")
+async def api_supplier_delete(client_id: str, rid: int):
+    try:
+        return await supplier_base.delete(get_client(client_id), str(rid))
+    except (supplier_base.BaseError, NocoError, RuntimeError) as exc:
+        raise _base_call_error(exc) from exc
+
+
+@app.post("/api/clients/{client_id}/rename")
+async def api_rename_tender(client_id: str, data: dict = Body(...)):
+    """Сменить внутренний номер конкурса (0.34.0): папка, «Внутренний номер» реестра NocoDB, таблица спецификации,
+    база сайта. data: {tender: Id записи реестра или «f:<папка>», number: «К950»}."""
+    client = get_client(client_id)
+    tid = str(data.get("tender") or "")
+    folders = list_folders(client)
+    folder, internal = None, None
+    if tid.startswith("f:"):
+        folder = tid[2:]
+        if not any(f["name"] == folder for f in folders):
+            raise HTTPException(404, "папка конкурса не найдена")
+    elif tid.isdigit():
+        try:
+            record = await NocoClient(client.nocodb).record(client.nocodb.registry_table_id, int(tid), fresh=True)
+        except NocoError as exc:
+            raise HTTPException(502, str(exc))
+        internal = norm_number(clean(record.get(F_INTERNAL)))
+        if not internal:
+            raise HTTPException(400, "у записи реестра нет внутреннего номера — его можно вписать в NocoDB")
+        folder = _folders_by_number(folders).get(internal)
+    else:
+        raise HTTPException(400, "не выбран конкурс")
+    try:
+        res = await asyncio.to_thread(tender_rename.rename, client, folder=folder, internal=internal,
+                                      new_number=str(data.get("number") or ""))
+    except tender_rename.RenameError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    except (NocoError, RuntimeError) as exc:
+        raise HTTPException(502, f"номер не изменён: {exc}") from exc
+    res["tender"] = tid if tid.isdigit() else "f:" + (res["folder"] or "")
+    return res
 
 
 # ---------- анализ документов (ИИ) ----------

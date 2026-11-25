@@ -236,7 +236,10 @@ def match(m: dict, box: dict) -> dict:
     # 2. Метка [SB-K934-12] в теме или тексте.
     for t in TAG_RE.finditer(m["subject"] + "\n" + m["text"][:20000]):
         rows = _requests("id=?", (int(t.group(2)),))
-        if rows and supplier_requests.latin_tag(rows[0]["internal"]).lower() == t.group(1).lower():
+        # Метка, запомненная у запроса, или по нынешнему номеру (0.34.0: номер конкурса можно сменить, а в уже
+        # отправленных письмах осталась прежняя метка).
+        if rows and (str(rows[0]["tag"] or "").lower() == t.group(0).lower()
+                     or supplier_requests.latin_tag(rows[0]["internal"]).lower() == t.group(1).lower()):
             return {"how": "tag", "request": rows[0]}
     since = time.time() - MATCH_DAYS * 86400
     recent = _requests("mailbox_id=? AND sent_at>=?", (box["id"], since))

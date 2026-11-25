@@ -517,6 +517,7 @@ function showTender(t) {
     .filter(Boolean).join(" · ").slice(0, 80)} — SupplyBro` : "Конкурсы — SupplyBro";
   if (!t) renderTenderList();
   $("head").hidden = !t;
+  $("head-rename").hidden = !(t && t.internal);
   $("docs").hidden = !t || blockOff("docs");
   $("analysis").hidden = !(t && t.folder) || blockOff("analysis");
   $("prices").hidden = !(t && t.folder) || blockOff("prices");
@@ -543,12 +544,17 @@ async function loadTender() {
   if (!t) return;
   anLastJob = null;
   prLastJob = null;
+  rq.d = null;                            // письма другого конкурса — не показывать, загрузить заново при открытии
+  rq.for = "";
+  rqPos.sel.clear();
+  setMailBadge(0);
   bidLastJob = null;
   bidShowAll = false;
   delete $("bid-price").dataset.touched;
   delete $("bid-entity").dataset.touched;
   if (t.source === "nocodb") {
-    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat(), loadRequests(), loadOffers()]);
+    await Promise.all([loadCard(), loadSpec(), loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat(), loadMailSummary(), loadOffers()]);
+    ensureRequests();                     // вкладка «Письма» (или «одной страницей» / «по позициям») уже открыта
   } else {
     renderFolderHead(t);
     await Promise.all([loadDocs(), loadAnalysis(), loadPrices(), loadBid(), loadChat(), loadOffers()]);
@@ -2954,6 +2960,9 @@ async function loadMailboxes() {
     const d = await api("/api/me/mailboxes");
     mailState.boxes = d.boxes || [];
     mailState.pollMinutes = d.poll_minutes || 5;
+    $("mail-shared").textContent = d.shared_with ? `Ящики общие с учётной записью «${d.shared_with}» (админ-панель): ` +
+      "те же ящики, ответы поставщиков и неразобранная почта; изменения видны обоим." : "";
+    $("mail-shared").hidden = !d.shared_with;
     setStatus("mail-status", "");
   } catch (err) {
     setStatus("mail-status", "Не удалось загрузить ящики: " + err.message, true);
@@ -3174,6 +3183,280 @@ async function saveMailbox(e) {
 $("me-mail").addEventListener("click", openMailboxes);
 $("rq-boxes").addEventListener("click", openMailboxes);
 $("mail-close").addEventListener("click", () => $("mail-dlg").close());
+
+// ---------- база поставщиков (0.34.0) ----------
+// Таблица «Поставщики» клиента из NocoDB: поиск, добавление, правка, «Не работаем» / вернуть, удаление насовсем.
+
+const sup = { d: null, edit: null, confirm: false, limit: 200 };
+
+function supStatusClass(s) { return s.off ? "grey" : (s.level || "yellow"); }
+
+function supText(s) {
+  return [s["Название"], s["Бренды"], s["E-mail"], s["ИНН"], s["Город"], s["Телефон"], s["Контактное лицо"],
+          s["Категория товаров"], s["Сайт"], (s.makers || []).join(" ")].join(" ").toLowerCase().replace(/ё/g, "е");
+}
+
+async function openSuppliers() {
+  if (!state.client) { toast("Сначала выберите клиента", true); return; }
+  const c = state.clients.find((x) => x.id === state.client);
+  $("sup-client").textContent = c ? "· " + c.name : "";
+  $("sup-form").hidden = true;
+  if (!$("sup-dlg").open) $("sup-dlg").showModal();
+  // Список (у «Нашей» ≈ 1000 поставщиков) грузится раз на клиента; «↻ из NocoDB» — заново.
+  if (!sup.d || sup.client !== state.client) await loadSuppliers(false);
+  else renderSuppliers();
+  $("sup-search").focus();
+}
+
+async function loadSuppliers(fresh) {
+  setStatus("sup-status", fresh ? "Читаю таблицу из NocoDB…" : "Загрузка…");
+  try {
+    sup.d = await api(clientPath("/suppliers"), fresh ? { fresh: "1" } : {});
+    sup.client = state.client;
+  } catch (err) {
+    setStatus("sup-status", "Не удалось загрузить: " + err.message, true);
+    return;
+  }
+  setStatus("sup-status", sup.d.error || "", Boolean(sup.d.error));
+  $("sup-noco").hidden = !sup.d.link;
+  if (sup.d.link) $("sup-noco").href = sup.d.link;
+  renderSuppliers();
+}
+
+function renderSuppliers() {
+  const d = sup.d;
+  if (!d) return;
+  const q = $("sup-search").value.trim().toLowerCase().replace(/ё/g, "е");
+  const showOff = $("sup-show-off").checked;
+  const all = d.suppliers || [];
+  const words = q.split(/\s+/).filter(Boolean);
+  const list = all.filter((s) => (showOff || !s.off) && words.every((w) => supText(s).includes(w)));
+  const offCount = all.filter((s) => s.off).length;
+  const shown = list.slice(0, sup.limit);
+  $("sup-list").replaceChildren(...shown.map(supRow));
+  if (!list.length) $("sup-list").append(el("tr", {}, el("td", { colspan: "5", class: "muted", text: all.length ? "Ничего не найдено." : "Поставщиков пока нет." })));
+  $("sup-more").textContent = `Всего ${all.length}` + (offCount ? `, из них «Не работаем» — ${offCount}` + (showOff ? "" : " (скрыты)") : "") +
+    (list.length > shown.length ? `. Показаны первые ${shown.length} из ${list.length} — уточните поиск.` : "");
+}
+
+function supRow(s) {
+  const name = el("td");
+  name.append(el("div", { class: "sup-name", text: s["Название"] || "—" }));
+  const sub = [s["Город"], s["Страна"], s["ИНН"] ? "ИНН " + s["ИНН"] : ""].filter(Boolean).join(" · ");
+  if (sub) name.append(el("div", { class: "sup-sub", text: sub }));
+  if (s["Сайт"]) name.append(el("a", { class: "sup-sub", href: s["Сайт"], target: "_blank", rel: "noopener", text: s["Сайт"].replace(/^https?:\/\//, "").slice(0, 50) }));
+  const brands = [s["Бренды"], ...(s.makers || [])].filter(Boolean).join(", ");
+  const contacts = el("td");
+  for (const line of [s["E-mail"], s["Телефон"], s["Контактное лицо"]].filter(Boolean)) contacts.append(el("div", { text: line }));
+  const st = el("td");
+  st.append(el("span", { class: "sup-st " + supStatusClass(s), text: s["Надёжность: статус"] || "статус не указан" }));
+  if (s["Способ расчёта"]) st.append(el("div", { class: "sup-sub", text: s["Способ расчёта"] }));
+  const act = el("td", { class: "sup-act" });
+  act.append(el("button", { class: "btn ghost small need-purchase", type: "button", "data-act": "edit", title: "Изменить", text: "✎" }));
+  act.append(el("button", { class: "btn ghost small need-purchase", type: "button", "data-act": s.off ? "on" : "off",
+    title: s.off ? "Снять «Не работаем»: статус «Требуется проверка»" : "Пометить «Не работаем»: запись остаётся, в письма не попадает",
+    text: s.off ? "Вернуть" : "Не работаем" }));
+  act.append(el("button", { class: "btn ghost small need-offers", type: "button", "data-act": "del", title: "Удалить из NocoDB насовсем", text: "🗑" }));
+  const tr = el("tr", { class: s.off ? "off" : "", "data-id": s.id }, name, el("td", { text: brands.length > 160 ? brands.slice(0, 158) + "…" : brands }), contacts, st, act);
+  return tr;
+}
+
+function supForm(s) {
+  sup.edit = s ? s.id : null;
+  sup.confirm = false;
+  $("sup-dups").hidden = true;
+  $("sup-form-title").textContent = s ? "Изменить: " + (s["Название"] || "") : "Новый поставщик";
+  const box = $("sup-fields");
+  box.replaceChildren();
+  for (const f of sup.d.fields || []) {
+    const v = s ? s[f.name] || "" : "";
+    let input;
+    if (f.type === "SingleSelect") {
+      input = el("select", { "data-f": f.name });
+      input.append(el("option", { value: "", text: "—" }));
+      for (const o of f.options) input.append(el("option", { value: o, text: o }));
+      if (v && !f.options.includes(v)) input.append(el("option", { value: v, text: v }));
+      input.value = v;
+    } else if (f.long) {
+      input = el("textarea", { "data-f": f.name, rows: "2" });
+      input.value = v;
+    } else {
+      input = el("input", { "data-f": f.name, type: "text", required: f.required ? "required" : null,
+        placeholder: f.name === "E-mail" ? "sales@firma.ru, можно несколько через запятую" : f.name === "Бренды" ? "через запятую: Siemens, ABB" : "" });
+      input.value = v;
+    }
+    const lab = el("label", { class: "field" + (f.long ? " long" : "") }, el("span", { class: "label", text: f.name + (f.required ? " *" : "") }), input);
+    box.append(lab);
+  }
+  $("sup-form").hidden = false;
+  $("sup-save").disabled = false;
+  $("sup-save").textContent = "Сохранить в NocoDB";
+  const first = box.querySelector("[data-f]");
+  if (first) first.focus();
+  $("sup-form").scrollIntoView({ block: "nearest" });
+}
+
+function supValues() {
+  const out = {};
+  for (const x of $("sup-fields").querySelectorAll("[data-f]")) out[x.dataset.f] = x.value;
+  if (sup.edit) {
+    const s = sup.d.suppliers.find((x) => x.id === sup.edit) || {};
+    for (const k of Object.keys(out)) if ((s[k] || "") === out[k]) delete out[k];   // только изменённое
+  }
+  return out;
+}
+
+function supReplace(s) {
+  const list = sup.d.suppliers;
+  const i = list.findIndex((x) => x.id === s.id);
+  if (i >= 0) list[i] = s; else list.unshift(s);
+}
+
+$("me-suppliers").addEventListener("click", openSuppliers);
+$("rq-suppliers").addEventListener("click", openSuppliers);
+$("sup-close").addEventListener("click", () => $("sup-dlg").close());
+$("sup-reload").addEventListener("click", () => loadSuppliers(true));
+$("sup-search").addEventListener("input", renderSuppliers);
+$("sup-show-off").addEventListener("change", renderSuppliers);
+$("sup-add").addEventListener("click", () => { if (sup.d && (sup.d.fields || []).length) supForm(null); });
+$("sup-cancel").addEventListener("click", () => { $("sup-form").hidden = true; });
+
+$("sup-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const values = supValues();
+  if (sup.edit && !Object.keys(values).length) { $("sup-form").hidden = true; return; }
+  $("sup-save").disabled = true;
+  setStatus("sup-status", "Сохраняю в NocoDB…");
+  let r;
+  try {
+    r = await api(clientPath(sup.edit ? `/suppliers/${sup.edit}` : "/suppliers"), {}, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values, confirm: sup.confirm }),
+    });
+  } catch (err) {
+    setStatus("sup-status", "Не сохранено: " + err.message, true);
+    $("sup-save").disabled = false;
+    return;
+  }
+  $("sup-save").disabled = false;
+  if (r.need_confirm) {
+    sup.confirm = true;
+    const box = $("sup-dups");
+    box.replaceChildren(el("b", { text: "Похоже, такой поставщик уже есть: " }),
+      ...r.duplicates.map((x, i) => el("span", { text: (i ? "; " : "") + `${x.name} (совпадает: ${x.why})` })),
+      el("div", { text: "Если это другой поставщик — нажмите «Всё равно добавить»." }));
+    box.hidden = false;
+    $("sup-save").textContent = "Всё равно добавить";
+    setStatus("sup-status", "");
+    return;
+  }
+  supReplace(r.supplier);
+  $("sup-form").hidden = true;
+  setStatus("sup-status", (sup.edit ? "Изменения сохранены: " : "Добавлен: ") + (r.supplier["Название"] || ""));
+  if (!sup.edit) $("sup-search").value = r.supplier["Название"] || "";
+  renderSuppliers();
+});
+
+$("sup-list").addEventListener("click", async (ev) => {
+  const b = ev.target.closest("button[data-act]");
+  if (!b) return;
+  const id = b.closest("tr").dataset.id;
+  const s = sup.d.suppliers.find((x) => x.id === id);
+  if (!s) return;
+  const act = b.dataset.act;
+  if (act === "edit") {
+    if (s.cut && s.cut.length) {          // длинные поля в списке обрезаны — для правки взять запись целиком
+      try { supReplace((await api(clientPath(`/suppliers/${id}`))).supplier); } catch (err) {
+        setStatus("sup-status", "Не удалось открыть запись: " + err.message, true);
+        return;
+      }
+    }
+    supForm(sup.d.suppliers.find((x) => x.id === id));
+    return;
+  }
+  if (act === "del" && !confirm(`Удалить «${s["Название"]}» из таблицы «Поставщики» NocoDB насовсем?\n\nВернуть запись будет нельзя. ` +
+      "Если поставщик просто не нужен в письмах — лучше «Не работаем».")) return;
+  b.disabled = true;
+  setStatus("sup-status", "Сохраняю в NocoDB…");
+  try {
+    if (act === "del") {
+      await api(clientPath(`/suppliers/${id}/delete`), {}, { method: "POST" });
+      sup.d.suppliers = sup.d.suppliers.filter((x) => x.id !== id);
+      setStatus("sup-status", `Удалён: ${s["Название"]}`);
+    } else {
+      const r = await api(clientPath(`/suppliers/${id}/status`), {}, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ off: act === "off" }),
+      });
+      supReplace(r.supplier);
+      setStatus("sup-status", (act === "off" ? "«Не работаем»: " : "Возвращён: ") + s["Название"]);
+    }
+  } catch (err) {
+    setStatus("sup-status", "Не получилось: " + err.message, true);
+    b.disabled = false;
+    return;
+  }
+  renderSuppliers();
+});
+
+// ---------- смена внутреннего номера конкурса (0.34.0) ----------
+
+function renameFolderPreview(folder, number) {
+  if (!folder) return "папки нет";
+  const m = folder.match(/^\s*(?:[КK]\s*-?\s*\d{1,5}|\d{3,4})(?=\D|$)/i);
+  const rest = m ? folder.slice(m[0].length) : " " + folder;
+  return `«${folder}» → «${(number || "К…") + rest}»`;
+}
+
+function normNumber(text) {
+  const m = String(text || "").match(/^\s*(?:[КKкk]\s*-?\s*(\d{1,5})|(\d{3,4}))\s*$/);
+  return m ? "К" + Number(m[1] || m[2]) : "";
+}
+
+function openRename() {
+  const t = currentTender();
+  if (!t) return;
+  $("rn-old").textContent = t.internal || "без номера";
+  $("rn-new").value = "";
+  $("rn-folder").textContent = renameFolderPreview(t.folder, "");
+  setStatus("rn-status", "");
+  $("rn-go").disabled = false;
+  $("rn-dlg").showModal();
+  $("rn-new").focus();
+}
+
+$("head-rename").addEventListener("click", openRename);
+$("rn-close").addEventListener("click", () => $("rn-dlg").close());
+$("rn-new").addEventListener("input", () => {
+  const t = currentTender();
+  $("rn-folder").textContent = renameFolderPreview(t && t.folder, normNumber($("rn-new").value));
+});
+$("rn-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const t = currentTender();
+  const number = normNumber($("rn-new").value);
+  if (!t) return;
+  if (!number) { setStatus("rn-status", "Номер — буква К и цифры, например К950.", true); return; }
+  $("rn-go").disabled = true;
+  setStatus("rn-status", "Меняю номер: папка, NocoDB, база сайта…");
+  let r;
+  try {
+    r = await api(clientPath("/rename"), {}, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tender: state.tender, number }),
+    });
+  } catch (err) {
+    setStatus("rn-status", "Не получилось: " + err.message, true);
+    $("rn-go").disabled = false;
+    return;
+  }
+  $("rn-dlg").close();
+  toast(`Номер изменён: ${r.old} → ${r.new}` + (r.warnings && r.warnings.length ? ". " + r.warnings.join("; ") : ""));
+  state.tender = r.tender || state.tender;
+  state.opened = "";
+  state.fresh = true;
+  saveUrl();
+  await loadTenders();
+});
 $("mail-dlg").addEventListener("close", () => { $("mf-password").value = ""; });
 $("mf-cancel").addEventListener("click", resetMailForm);
 $("mf-address").addEventListener("change", presetForAddress);
@@ -3182,26 +3465,64 @@ $("mail-form").addEventListener("submit", saveMailbox);
 
 // ---------- запросы цен поставщикам (0.27.0) ----------
 
-const rq = { d: null, sending: false, showAll: false, brands: new Set(), brandsAll: false };
+const rq = { d: null, for: "", threads: [], sending: false, showAll: false, brands: new Set(), brandsAll: false };
 const RQ_SHOW = 12;
 const RQ_LEVEL = { green: "✅", yellow: "🟡", grey: "⛔" };
 const isEmail = (v) => /^[^@\s<>,;"']+@[^@\s<>,;"']+\.[^@\s<>,;"']+$/.test(v);
 const addrList = (v) => String(v || "").split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
+
+// Вкладка «Письма» (0.35.0): черновики писем и таблица позиций грузятся, только когда вкладка открыта (или «одной
+// страницей» / вид «по позициям»); до этого — короткая сводка loadMailSummary (база сайта, без NocoDB).
+function requestsWanted() {
+  const tab = currentTab();
+  return tab === "mail" || tab === "all" || tab === "pos";
+}
+function ensureRequests() {
+  const t = currentTender();
+  if (!t || t.source !== "nocodb" || blockOff("prices") || !requestsWanted()) return;
+  if (rq.for === state.tender) return;
+  loadRequests();
+}
+
+function setMailBadge(n) {
+  const b = $("mail-badge");
+  if (!b) return;
+  b.textContent = n ? String(n) : "";
+  b.title = n ? `Ждут ответа: ${n}` : "";
+  b.hidden = !n;
+}
+
+async function loadMailSummary() {
+  const t = currentTender();
+  if (!t || t.source !== "nocodb" || blockOff("prices") || !t.internal) return;
+  const id = state.tender;
+  let d;
+  try { d = await api(clientPath("/requests/summary"), { internal: t.internal }); } catch (_) { return; }
+  if (state.tender !== id || rq.for === id) return;       // вкладку уже открыли — там данные полнее
+  rq.threads = d.threads || [];
+  stg.req = { sent: d.sent, answered: d.answered, letters: d.letters, waiting: d.waiting };
+  setMailBadge(d.waiting);
+  renderStages();
+}
 
 async function loadRequests() {
   const my = ++seq.rq;
   if (blockOff("prices")) return;
   const t = currentTender();
   if (!t || t.source !== "nocodb") return;
+  rq.for = state.tender;
   setStatus("rq-status", "Готовлю письма по позициям спецификации…");
-  for (const id of ["rq-tools", "rq-actions", "rq-jh", "rq-journal-wrap", "rq-hint", "rq-threads-box"]) $(id).hidden = true;
+  for (const id of ["rq-tools", "rq-actions", "rq-journal-box", "rq-inbox-box", "rq-hint", "rq-threads-box", "rq-pos-box"]) $(id).hidden = true;
   $("rq-letters").replaceChildren();
   $("rq-count").textContent = "";
   let d;
   try {
     d = await api(clientPath(`/tenders/${state.tender}/requests`), { folder: t.folder || "" });
   } catch (err) {
-    if (my === seq.rq) setStatus("rq-status", "Не удалось подготовить письма: " + err.message, true);
+    if (my === seq.rq) {
+      setStatus("rq-status", "Не удалось подготовить письма: " + err.message, true);
+      rq.for = "";                        // при следующем открытии вкладки — ещё раз
+    }
     return;
   }
   if (my !== seq.rq) return;
@@ -3216,6 +3537,8 @@ async function loadRequests() {
   const threads = d.threads || [];
   stg.req = { sent: sentTo.size, answered: threads.length || d.journal.filter((j) => answered.has(j.id)).length,
     letters: d.inbox.length, waiting: threads.filter((x) => x.waiting).length };
+  rq.threads = threads;
+  setMailBadge(stg.req.waiting);
   renderStages();
   renderRequests();
   if (plData) renderSupplierDocs();      // «Письма без цен» — ссылки на переписку нужны нити из запросов
@@ -3269,12 +3592,23 @@ function renderRequests() {
   const can = d.can_send && !document.body.classList.contains("no-purchase");
   $("rq-tools").hidden = !can || !sup.length;
   $("rq-actions").hidden = !can;
+  const checked = d.letters.filter((L) => L.checked && rqVisible(L)).length;
+  $("rq-new-info").textContent = (allSup ? `· наших поставщиков по брендам: ${allSup}` : "· письмо любому адресату") +
+    (checked ? ` · отмечено писем: ${checked}` : "");
+  renderRqPos();
+  if (!$("rq-new").open) {                // черновики не рисуем, пока блок свёрнут (их бывает больше сотни)
+    replaceSafe($("rq-letters"));
+    updateSendButton();
+    renderJournal();
+    renderWorkbench();
+    return;
+  }
   const shown = rq.showAll ? [...sup, ...d.letters.filter((L) => !L.supplier_id)] : [...sup.slice(0, RQ_SHOW), ...d.letters.filter((L) => !L.supplier_id)];
   const nodes = shown.map((L) => letterCard(L, can));
   if (sup.length > RQ_SHOW) {
     // «Показать всех поставщиков» / «Скрыть» (0.29.2); отмеченные письма при скрытии не теряются — отправятся.
     const more = rq.showAll
-      ? smallBtn(`Скрыть (оставить первых ${RQ_SHOW})`, () => { rq.showAll = false; renderRequests(); $("requests").scrollIntoView({ block: "start" }); })
+      ? smallBtn(`Скрыть (оставить первых ${RQ_SHOW})`, () => { rq.showAll = false; renderRequests(); $("rq-new").scrollIntoView({ block: "start" }); })
       : smallBtn(`Показать всех поставщиков (${sup.length})` + ((n) => n ? ` · отмечено среди скрытых: ${n}` : "")(
           sup.slice(RQ_SHOW).filter((L) => L.checked).length), () => { rq.showAll = true; renderRequests(); });
     nodes.splice(rq.showAll ? sup.length : RQ_SHOW, 0, more);
@@ -3418,7 +3752,8 @@ async function sendRequests() {
 
 function renderInboxTable() {
   const rows = (rq.d && rq.d.inbox) || [];
-  $("rq-ih").hidden = $("rq-inbox-wrap").hidden = !rows.length;
+  $("rq-inbox-box").hidden = !rows.length;
+  $("rq-ih").textContent = `Ответы поставщиков (${rows.length})`;
   if (!rows.length) return;
   const head = el("tr", {}, ...["Получено", "От кого", "Тема", "Как отнесено", "Файлы — в разбор цен", "Итог"].map((x) => el("th", { text: x })));
   const body = rows.map((r) => el("tr", {},
@@ -3436,7 +3771,8 @@ function renderJournal() {
   renderThreads();
   renderInboxTable();
   const j = (rq.d && rq.d.journal) || [];
-  $("rq-jh").hidden = $("rq-journal-wrap").hidden = !j.length;
+  $("rq-journal-box").hidden = !j.length;
+  $("rq-jh").textContent = `Отправленные запросы (${j.length})`;
   if (!j.length) return;
   const answers = new Map();
   for (const a of (rq.d && rq.d.inbox) || []) if (a.request_id && !answers.has(a.request_id)) answers.set(a.request_id, a);
@@ -3454,6 +3790,137 @@ function renderJournal() {
     el("td", { class: "muted", text: r.tag })));
   $("rq-journal").replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
 }
+
+// ---------- письма: таблица «Позиции и поставщики» (0.35.0) ----------
+// Пользователь 25.11.2026: «во вкладке «Письма» — таблица, где видно, по каким позициям у нас есть поставщики, были
+// ли отправлены письма и прочая информация». Строка — позиция спецификации: наши поставщики по брендам (из черновиков
+// писем), кому и когда писали (журнал), кто ответил (ответы / переписка), цены поставщиков (вкладка «Закупка», если
+// загружены), статус. Галочки → «Запросить по выбранным» (те же письма, только эти позиции).
+
+const rqPos = { filter: "all", q: "", sel: new Set(), showAll: false };
+const RQ_POS_SHOW = 150;
+const RQ_POS_FILTERS = [["all", "все"], ["ours", "есть наши поставщики"], ["notreq", "не запрашивали"], ["wait", "ждём ответа"],
+  ["answered", "ответили"], ["price", "есть цена"], ["none", "нет поставщиков"]];
+const shortDate = (ts) => new Date(ts * 1000).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+
+function rqPosRows() {
+  const d = rq.d;
+  if (!d) return [];
+  const sent = (d.journal || []).filter((j) => j.status === "sent" && j.kind !== "reply");
+  const answeredReq = new Set((d.inbox || []).filter((x) => x.request_id).map((x) => x.request_id));
+  const thKeys = new Set(((d.threads || rq.threads) || []).map((t) => t.key));
+  return (d.positions || []).map((p) => {
+    const n = String(p.n);
+    const ours = d.letters.filter((L) => L.supplier_id && (L._all || L.positions).map(String).includes(n));
+    const reqs = sent.filter((j) => (j.positions || []).map(String).includes(n));
+    const answered = reqs.filter((j) => answeredReq.has(j.id) || thKeys.has(thKeyOfRequest(j)));
+    const cells = (of.d && of.d.cells && of.d.cells[p.n]) || {};
+    const prices = Object.values(cells).map((list) => list[0] && list[0].price_rub).filter(Boolean);
+    const status = prices.length ? "price" : answered.length ? "answered" : reqs.length ? "wait" : ours.length ? "notreq" : "none";
+    return { ...p, n, ours, reqs, answered, offers: prices.length, min: prices.length ? Math.min(...prices) : null, status };
+  });
+}
+
+function rqPosPass(r, f = rqPos.filter) {
+  if (f === "ours" && !r.ours.length) return false;
+  if (f === "notreq" && !(r.ours.length && !r.reqs.length)) return false;
+  if (f === "wait" && r.status !== "wait") return false;
+  if (f === "answered" && !r.answered.length) return false;
+  if (f === "price" && !r.offers) return false;
+  if (f === "none" && r.ours.length) return false;
+  if (rqPos.q) {
+    const hay = `${r.n} ${r.name} ${r.brand} ${r.maker} ${r.ours.map((L) => L.supplier_name).join(" ")} ${r.reqs.map((j) => j.supplier_name || j.to_addr).join(" ")}`;
+    if (!rqPos.q.split(/\s+/).every((w) => hay.toLowerCase().replace(/ё/g, "е").includes(w))) return false;
+  }
+  return true;
+}
+
+const RQ_POS_STATUS = { price: ["💰 есть цена", "ok"], answered: ["📩 ответили", "ok"], wait: ["⏳ ждём ответа", "busy"],
+  notreq: ["не запрашивали", "warn"], none: ["нет наших поставщиков", "muted"] };
+
+function rqNames(list, nameOf, max = 3) {
+  const names = [...new Map(list.map((x) => [nameOf(x), x])).keys()].filter(Boolean);
+  const shown = names.slice(0, max).join(", ");
+  return names.length > max ? `${shown} +${names.length - max}` : shown;
+}
+
+function renderRqPos() {
+  const box = $("rq-pos-box");
+  const rows = rqPosRows();
+  box.hidden = !rows.length;
+  if (!rows.length) return;
+  const count = (f) => rows.filter((r) => rqPosPass(r, f)).length;
+  $("rq-pos-info").textContent = `· позиций ${rows.length} · с нашими поставщиками ${count("ours")} · запрошено ${rows.filter((r) => r.reqs.length).length}` +
+    ` · ответили ${count("answered")}`;
+  replaceSafe($("rq-pos-filters"), ...RQ_POS_FILTERS.map(([k, label]) => {
+    const b = el("button", { type: "button", class: "chip-btn" + (rqPos.filter === k ? " on" : ""), text: `${label} · ${k === "all" ? rows.length : count(k)}` });
+    b.addEventListener("click", () => { rqPos.filter = k; rqPos.showAll = false; renderRqPos(); });
+    return b;
+  }));
+  const can = rq.d.can_send && !document.body.classList.contains("no-purchase");
+  const shown = rows.filter((r) => rqPosPass(r));
+  const page = rqPos.showAll ? shown : shown.slice(0, RQ_POS_SHOW);
+  const all = el("input", { type: "checkbox", title: "Выбрать все показанные" });
+  all.checked = page.length > 0 && page.every((r) => rqPos.sel.has(r.n));
+  all.addEventListener("change", () => { for (const r of page) all.checked ? rqPos.sel.add(r.n) : rqPos.sel.delete(r.n); renderRqPos(); });
+  const head = el("tr", {}, can ? el("th", {}, all) : null,
+    ...["№", "Позиция", "Наши поставщики", "Запрошено", "Ответили", "Цена поставщика", "Статус"].map((x) => el("th", { text: x })));
+  const body = page.map((r) => {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = rqPos.sel.has(r.n);
+    cb.addEventListener("change", () => { cb.checked ? rqPos.sel.add(r.n) : rqPos.sel.delete(r.n); updateRqPosAsk(); });
+    const pos = el("td");
+    pos.append(el("div", { class: "rq-pos-name", text: r.name, title: r.name }));
+    const sub = [r.brand, r.maker && !r.brand.toLowerCase().includes(r.maker.toLowerCase()) ? r.maker : "", r.qty ? `${r.qty} ${r.unit || ""}`.trim() : ""].filter(Boolean).join(" · ");
+    if (sub) pos.append(el("div", { class: "muted small", text: sub }));
+    const ours = el("td");
+    if (r.ours.length) {
+      const best = r.ours.some((L) => L.level === "green") ? "green" : r.ours.every((L) => L.level === "grey") ? "grey" : "yellow";
+      ours.append(el("span", { class: "sup-st " + best, text: String(r.ours.length) }), " ",
+        el("span", { class: "small", text: rqNames(r.ours, (L) => L.supplier_name), title: r.ours.map((L) => `${L.supplier_name} — ${L.status || "статус не указан"}`).join("\n") }));
+    } else ours.append(el("span", { class: "muted small", text: "—" }));
+    const reqs = el("td", { class: "small" });
+    if (r.reqs.length) {
+      const last = Math.max(...r.reqs.map((j) => j.sent_at || j.created_at));
+      reqs.append(el("div", { text: rqNames(r.reqs, (j) => j.supplier_name || j.to_addr), title: r.reqs.map((j) => `${j.supplier_name || "—"} <${j.to_addr}> · ${shortDate(j.sent_at || j.created_at)}`).join("\n") }),
+        el("div", { class: "muted", text: `${r.reqs.length} пис. · последнее ${shortDate(last)}` }));
+    } else reqs.append(el("span", { class: "muted", text: "—" }));
+    const ans = el("td", { class: "small" });
+    if (r.answered.length) {
+      const seen = new Set();
+      for (const j of r.answered) {
+        const key = thKeyOfRequest(j);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (ans.childNodes.length) ans.append(", ");
+        ans.append(thOpenBtn(key, j.supplier_name || addrList(j.to_addr)[0] || "переписка"));
+      }
+    } else ans.append(el("span", { class: "muted", text: "—" }));
+    const price = el("td", { class: "small", text: r.min ? rub(r.min) + (r.offers > 1 ? ` · предл. ${r.offers}` : "") : "—" });
+    const [stText, stCls] = RQ_POS_STATUS[r.status];
+    return el("tr", { "data-n": r.n }, can ? el("td", {}, cb) : null, el("td", { text: r.n }), pos, ours, reqs, ans, price,
+      el("td", {}, el("span", { class: "rq-st " + stCls, text: stText })));
+  });
+  if (!body.length) body.push(el("tr", {}, el("td", { colspan: can ? "8" : "7", class: "muted", text: "Нет позиций с таким отбором." })));
+  $("rq-pos").replaceChildren(el("thead", {}, head), el("tbody", {}, ...body));
+  const more = $("rq-pos-more");
+  more.replaceChildren();
+  if (shown.length > page.length) {
+    more.append(`Показаны ${page.length} из ${shown.length}. `, smallBtn("Показать все", () => { rqPos.showAll = true; renderRqPos(); }));
+  }
+  $("rq-pos-ask").hidden = !can;
+  updateRqPosAsk();
+}
+
+function updateRqPosAsk() {
+  const n = rqPos.sel.size;
+  $("rq-pos-ask").textContent = n ? `✉ Запросить по выбранным (${n})` : "✉ Запросить по выбранным";
+  $("rq-pos-ask").disabled = !n;
+}
+
+$("rq-pos-search").addEventListener("input", (e) => { rqPos.q = e.target.value.trim().toLowerCase().replace(/ё/g, "е"); rqPos.showAll = false; renderRqPos(); });
+$("rq-pos-ask").addEventListener("click", () => wbAsk([...rqPos.sel]));
+$("rq-new").addEventListener("toggle", () => { if (rq.d) renderRequests(); });
 
 // ---------- запросы: фильтр по брендам (0.33.0) ----------
 // Пользователь 24.11.2026: «нужно, чтобы можно было отправлять запросы по брендам — какая-то возможность
@@ -3536,7 +4003,7 @@ function thKeyOfInbox(m) {
   return byAddr ? thKeyOfRequest(byAddr) : "a" + m.from_addr;
 }
 
-function thFind(key) { return ((rq.d && rq.d.threads) || []).find((t) => t.key === key) || null; }
+function thFind(key) { return ((rq.d && rq.d.threads) || rq.threads || []).find((t) => t.key === key) || null; }
 
 function thOpenBtn(key, text) {
   const b = el("button", { type: "button", class: "th-open", title: "Открыть переписку", text });
@@ -3551,6 +4018,7 @@ function renderThreads() {
   const wait = list.filter((t) => t.waiting).length;
   $("rq-th-count").textContent = `· ответили: ${list.length}` + (wait ? ` · ждут ответа: ${wait}` : "");
   if (stg.req && stg.req.waiting !== wait) { stg.req.waiting = wait; renderStages(); }
+  setMailBadge(wait);
   const shown = th.showAll ? list : list.slice(0, TH_SHOW);
   const nodes = shown.map((t) => {
     const b = el("button", { type: "button", class: "th-item" + (t.waiting ? " wait" : "") },
@@ -3732,6 +4200,7 @@ function renderOffers() {
     $("of-legend").hidden = true;
     renderOfferComments();
     renderWorkbench();
+    if (rq.d) renderRqPos();      // цены поставщиков — в таблицу «Позиции и поставщики»
     return;
   }
   $("of-legend").hidden = false;
@@ -3767,6 +4236,7 @@ function renderOffers() {
   const table = el("table", { class: "of-table" }, el("thead", {}, head), body, el("tfoot", {}, foot));
   replaceSafe($("of-wrap"), table);
   renderWorkbench();
+  if (rq.d) renderRqPos();      // цены поставщиков — в таблицу «Позиции и поставщики»
   const first = table.querySelector("th.stick0");
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");
   renderOfferComments();
@@ -4116,8 +4586,11 @@ function wbDetail(r) {
 }
 
 // «Запросить цены по выбранным»: в письмах поставщикам оставить только эти позиции и перейти к письмам.
-function wbAsk(ns) {
-  if (!rq.d) return toast("Запросы ещё загружаются — попробуйте через секунду", true);
+async function wbAsk(ns) {
+  if (!rq.d) {
+    if (rq.for !== state.tender) await loadRequests();
+    if (!rq.d) return toast("Письма ещё загружаются — попробуйте через секунду", true);
+  }
   const want = new Set(ns.map(String));
   rq.brands = new Set();                  // выбор позиций в таблице главнее фильтра по брендам
   for (const L of rq.d.letters) {
@@ -4129,8 +4602,10 @@ function wbAsk(ns) {
     L.dirty = false;
   }
   rq.showAll = true;
+  $("rq-new").open = true;
   renderRequests();
-  goTo("requests");
+  if (currentTab() !== "pos") setTab("mail");
+  requestAnimationFrame(() => $("rq-new").scrollIntoView({ behavior: "smooth", block: "start" }));
   const n = rq.d.letters.filter((L) => L.supplier_id && L.positions.length).length;
   toast(`Письма — только по выбранным позициям (${want.size}); поставщиков с этими брендами: ${n}. Проверьте адреса и нажмите «Отправить».`);
 }
@@ -4472,7 +4947,7 @@ function renderStages() {
   const add = (id, label, text, cls) => { if (!$(id) || $(id).hidden) return; items.push({ id, label, text, cls }); };
   if (stg.docs) add("docs", "Документы", stg.docs.n ? `${stg.docs.n} файл.` + (stg.docs.pending ? ` · ждут ${stg.docs.pending}` : "") : "нет", stg.docs.n ? (stg.docs.pending ? "busy" : "ok") : "none");
   if (stg.analysis) add("analysis", "Анализ", { done: "готов", busy: "идёт…", none: "не делали" }[stg.analysis], { done: "ok", busy: "busy", none: "none" }[stg.analysis]);
-  if (stg.req) add("requests", "Запросы", stg.req.sent ? `ответили ${stg.req.answered} из ${stg.req.sent}` + (stg.req.waiting ? ` · ждут ответа ${stg.req.waiting}` : "") : "не отправляли",
+  if (stg.req) add("requests", "Письма", stg.req.sent ? `ответили ${stg.req.answered} из ${stg.req.sent}` + (stg.req.waiting ? ` · ждут ответа ${stg.req.waiting}` : "") : "не отправляли",
     stg.req.sent ? (stg.req.answered && !stg.req.waiting ? "ok" : "busy") : "none");
   if (stg.offers) add("offers", "Цены поставщиков", stg.offers.withPrices ? `${stg.offers.withPrices} из ${stg.offers.total} поз.` + (stg.offers.written ? ` · в NocoDB ${stg.offers.written}` : "") : "нет", stg.offers.withPrices ? "ok" : "none");
   if (stg.bid) add("bid", "Заявка", { done: "собрана", draft: "черновик", busy: "готовится…", none: "не готовили" }[stg.bid], { done: "ok", draft: "busy", busy: "busy", none: "none" }[stg.bid]);
@@ -4491,7 +4966,7 @@ function renderStages() {
 // все разделы подряд, как до 0.30.0. Выбор запоминается в браузере (sb.tab); без выбора — по роли: кто не загружает
 // документы, но вносит цены (закупщик), — «Закупка», остальные — «Конкурс». Вкладка без видимых разделов скрыта.
 const TAB_KEY = "sb.tab";
-const TABS = ["pos", "tender", "purchase", "bid", "chat", "all"];
+const TABS = ["pos", "tender", "purchase", "mail", "bid", "chat", "all"];
 // Раздел может быть в нескольких вкладках (data-group="tender purchase": спецификация — и в «Конкурсе», и в «Закупке»,
 // 0.30.1 — закупщику позиции нужны под рукой).
 function tabSections(tab) { return [...document.querySelectorAll(`main > section[data-group~="${tab}"]`)]; }
@@ -4518,6 +4993,7 @@ function setTab(tab, remember = true) {
     if (on) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
   }
   if (remember) storageSet(TAB_KEY, tab);
+  ensureRequests();
 }
 // Перейти к разделу: сначала его вкладка (если не «одной страницей»), потом прокрутка к нему.
 function goTo(id) {
@@ -4614,6 +5090,7 @@ async function loadMe() {
   $("me-name").title = `Логин: ${d.me.login}`;
   $("me-admin").hidden = !d.access.admin_panel;
   $("me-mail").hidden = !allowed.has("purchase");
+  $("me-suppliers").hidden = !allowed.has("purchase");
   $("me-box").hidden = false;
 }
 $("me-logout").addEventListener("click", async () => {

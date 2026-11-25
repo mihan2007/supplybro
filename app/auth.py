@@ -180,6 +180,11 @@ def init() -> None:
                 con.execute("ALTER TABLE users ADD COLUMN blocks_off TEXT NOT NULL DEFAULT '[]'")
             except Exception:                        # сайт и админ-панель добавили одновременно
                 pass
+        if "mail_owner" not in cols:                 # 0.36.0: почтовые ящики как у другого сотрудника
+            try:
+                con.execute("ALTER TABLE users ADD COLUMN mail_owner TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass
         if "remember" not in {r[1] for r in con.execute("PRAGMA table_info(sessions)")}:   # 0.17.0
             try:
                 con.execute("ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 1")
@@ -329,7 +334,26 @@ def _clean(data: dict, known_clients: set[str], creating: bool) -> dict:
         if not isinstance(bo, list):
             raise AuthError("разделы указаны неверно")
         out["blocks_off"] = [b for b in BLOCKS if b in {str(x) for x in bo}]
+    if "mail_owner" in data:                         # 0.36.0: логин, чьи почтовые ящики общие; '' — свои
+        out["mail_owner"] = str(data.get("mail_owner") or "").strip().lower()[:60]
     return out
+
+
+def _check_mail_owner(user: dict, owner: str) -> None:
+    """Общие ящики (0.36.0): только у существующего сотрудника, без цепочек «как у того, у кого как у третьего»."""
+    if not owner:
+        return
+    if owner == user["login"]:
+        raise AuthError("«почтовые ящики как у» — выберите другого сотрудника или «свои»")
+    other = find_user(owner)
+    if not other:
+        raise AuthError(f"сотрудника «{owner}» нет")
+    if other.get("mail_owner"):
+        raise AuthError(f"у «{other['name']}» самого ящики как у «{other['mail_owner']}» — выберите «{other['mail_owner']}»")
+    with db.connect() as con:
+        users_of_me = [r[0] for r in con.execute("SELECT name FROM users WHERE mail_owner=? AND id!=?", (user["login"], user["id"]))]
+    if users_of_me:
+        raise AuthError("ящики этого сотрудника уже общие с: " + ", ".join(users_of_me) + " — сначала поменяйте у них")
 
 
 def _one_client(role: str, clients: list[str]) -> list[str]:
@@ -393,6 +417,8 @@ def update_user(user_id: int, data: dict, actor: dict | None, known_clients: set
         raise AuthError("это единственный администратор — сначала назначьте другого")
     if actor and actor["id"] == user_id and fields.get("active", 1) == 0:
         raise AuthError("себя заблокировать нельзя")
+    if "mail_owner" in fields:
+        _check_mail_owner(user, fields["mail_owner"])
     js = ("clients", "blocks_off")                   # хранятся списком в JSON
     changes = {k: v for k, v in fields.items() if (json.dumps(v) if k in js else v) !=
                (json.dumps(user.get(k)) if k in js else user[k])}
@@ -404,8 +430,15 @@ def update_user(user_id: int, data: dict, actor: dict | None, known_clients: set
         con.execute(f"UPDATE users SET {sets} WHERE id=?", (*vals, time.time(), user_id))
         if changes.get("active") == 0:
             con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))   # заблокирован — сразу выход
+    if "login" in changes:                           # чьи ящики общие — по логину
+        with db.connect() as con:
+            con.execute("UPDATE users SET mail_owner=? WHERE mail_owner=?", (changes["login"], user["login"]))
+    merged = ""
+    if changes.get("mail_owner"):                    # свои ящики, письма и ответы — в общие
+        from . import mail
+        merged = mail.merge_owner(changes.get("login", user["login"]), changes["mail_owner"])
     new = get_user(user_id)
-    diff = _diff_text(user, changes)
+    diff = _diff_text(user, changes) + (f" ({merged})" if merged else "")
     if diff:
         event(actor, new, "изменена", diff, ip)
     if changes.get("active") == 0:
@@ -654,6 +687,9 @@ def _diff_text(before: dict, changes: dict) -> str:
         elif k == "blocks_off":
             names = lambda keys: ", ".join(BLOCKS[b].split(" (")[0] for b in keys) or "нет"
             parts.append(f"выключенные разделы: {names(before.get('blocks_off') or [])} → {names(v)}")
+        elif k == "mail_owner":
+            parts.append(f"почтовые ящики: {('как у «' + before['mail_owner'] + '»') if before.get('mail_owner') else 'свои'} → "
+                         f"{('как у «' + v + '»') if v else 'свои'}")
         elif k == "active":
             continue
         elif k == "note":
