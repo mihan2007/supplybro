@@ -630,13 +630,13 @@ main[data-tab="tender"] > section[data-group]:not([data-group~="tender"]),
 main[data-tab="purchase"] > section[data-group]:not([data-group~="purchase"]),
 main[data-tab="bid"] > section[data-group]:not([data-group~="bid"]),
 main[data-tab="chat"] > section[data-group]:not([data-group~="chat"]),
-main[data-tab="mail"] > section[data-group]:not([data-group~="mail"]),
+main[data-tab="web"] > section[data-group]:not([data-group~="web"]),
 main[data-tab="spec"] > section[data-group]:not([data-group~="spec"]) { display: none !important; }
 /* «Конкурс» (0.39.0): документы — внизу, когда они загружены; пока их нет — наверху (загрузка на виду) */
 main[data-tab="tender"] > #docs.has-docs { order: 10; }
 /* «Закупка»: предложения → запросы → спецификация → цены из интернета (0.30.1) */
 main[data-tab="purchase"] > #offers { order: 1; }
-main[data-tab="purchase"] > #prices { order: 4; }
+main[data-tab="purchase"] > #requests { order: 2; }
 /* Строка этапов (0.30.0) */
 .stages { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .stages[hidden] { display: none; }
@@ -827,3 +827,25 @@ td.of-pend { background: #fff8e1; }
 #op-manual summary { cursor: pointer; font-weight: 600; }
 #op-manual .op-manual-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 6px; }
 #op-manual input#opm-price { width: 120px; }
+
+/* 0.43.0: письма поставщикам — в «Закупке» под таблицей, своими вкладками */
+.rq-subtabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); margin: 4px 0 10px; }
+.rq-sub { border: 1px solid transparent; border-bottom: none; background: none; padding: 7px 14px; border-radius: 8px 8px 0 0;
+  font: inherit; color: var(--muted, #667); cursor: pointer; margin-bottom: -1px; }
+.rq-sub:hover { color: var(--text); }
+.rq-sub.active { color: var(--text); font-weight: 600; background: var(--panel); border-color: var(--line); }
+.rq-sub .wait { color: #b54708; }
+#requests:not([data-sub="threads"]) :is(#rq-threads-box, #rq-inbox-box, #rq-unmatched),
+#requests:not([data-sub="pos"]) #rq-pos-box,
+#requests:not([data-sub="new"]) #rq-new,
+#requests:not([data-sub="sent"]) #rq-journal-box { display: none !important; }
+#requests[data-sub="new"] #rq-new > summary, #requests[data-sub="sent"] #rq-journal-box > summary { display: none; }
+.rq-empty { padding: 8px 0; }
+/* Поле загрузки КП / скриншотов (0.43.0) */
+.of-drop { display: flex; gap: 10px; align-items: center; margin: 12px 0 6px; padding: 14px 16px; border: 2px dashed var(--line, #ccd);
+  border-radius: 10px; color: var(--muted, #556); cursor: pointer; font-size: 14px; background: var(--panel); }
+.of-drop:hover, .of-drop:focus { border-color: var(--accent, #2a5bd7); color: var(--text); outline: none; }
+.of-drop.over { border-color: var(--accent, #2a5bd7); background: #eef3ff; color: var(--text); }
+.of-drop-icon { font-size: 22px; }
+.of-drop kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line, #ccd); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; }
+body.no-purchase .of-drop { display: none; }

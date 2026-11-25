@@ -133,8 +133,8 @@
       <nav class="panel jump-nav" id="jump-nav" aria-label="Вкладки конкурса">
         <a class="jump" href="#" data-tab="tender">Конкурс</a>
         <a class="jump" href="#" data-tab="spec" title="Спецификация конкурса из NocoDB и наши поставщики по брендам">Спецификация</a>
-        <a class="jump" href="#" data-tab="purchase">Закупка</a>
-        <a class="jump" href="#" data-tab="mail" title="Письма поставщикам: позиции и наши поставщики, переписка, новые запросы">Письма <span class="jump-badge" id="mail-badge" hidden></span></a>
+        <a class="jump" href="#" data-tab="purchase" title="Предложения поставщиков, загрузка КП и скриншотов, письма поставщикам">Закупка <span class="jump-badge" id="mail-badge" hidden></span></a>
+        <a class="jump" href="#" data-tab="web" title="Поиск цен в интернете: Россия и зарубеж, со ссылками">Интернет</a>
         <a class="jump" href="#" data-tab="bid">Заявка</a>
         <a class="jump" href="#" data-tab="chat">Чат</a>
       </nav>
@@ -292,20 +292,26 @@
         <button class="btn ghost small" id="of-cf-clear" type="button" hidden>Сбросить фильтры</button>
       </div>
       <div class="table-wrap of-wrap" id="of-wrap"></div>
+      <!-- Загрузка КП, прайсов, счетов и скриншотов (0.43.0): перетащить, Ctrl+V или выбрать файлы — то же, что 📎 в чате -->
+      <div class="of-drop need-purchase" id="of-drop" tabindex="0" role="button"
+           title="КП, прайс, счёт (Excel, Word, PDF), фото или скриншот: сайт найдёт позиции конкурса и цены">
+        <span class="of-drop-icon">📎</span>
+        <span><b>КП, прайс, счёт или скриншот</b> — перетащите сюда, вставьте <kbd>Ctrl</kbd>+<kbd>V</kbd> (картинку или текст
+          письма поставщика) или нажмите, чтобы выбрать файлы</span>
+        <input type="file" id="of-files" multiple hidden>
+      </div>
       <!-- Документы поставщиков (0.30.0): карточки прайсов, КП, счетов и писем — здесь, а не в чате -->
       <div id="of-docs-slot"><details class="of-docs" id="of-docs">
         <summary><span id="of-docs-title">Документы поставщиков</span></summary>
-        <div class="of-docs-tools need-purchase">
-          <label class="btn small" title="Прайс, КП или счёт поставщика (Excel, Word, PDF, фото): сайт найдёт позиции конкурса и цены">📎 Загрузить прайс / КП<input type="file" id="of-files" multiple hidden></label>
-        </div>
         <div class="of-docs-list" id="of-docs-list"></div>
       </details></div>
       <h3 class="rq-jh" id="of-comments-h" hidden>Комментарии</h3>
       <div class="of-comments" id="of-comments"></div>
     </section>
 
-    <!-- Письма поставщикам (0.27.0; с 0.35.0 — своя вкладка «Письма», загружается при её открытии) -->
-    <section class="panel" id="requests" data-group="mail" hidden>
+    <!-- Письма поставщикам (0.27.0; 0.35.0–0.42.0 — вкладка «Письма»; с 0.43.0 — в «Закупке» под таблицей, своими
+         вкладками; черновики и таблица позиций грузятся, когда блок показался на экране) -->
+    <section class="panel" id="requests" data-group="purchase" data-sub="threads" hidden>
       <div class="section-head">
         <h2>Письма поставщикам <span class="muted" id="rq-count"></span></h2>
         <div class="section-tools">
@@ -316,8 +322,15 @@
           <button class="btn ghost small need-purchase" id="rq-suppliers" type="button" title="База поставщиков: добавить, изменить, «Не работаем», удалить">🏢 База поставщиков</button>
         </div>
       </div>
+      <div class="rq-subtabs" id="rq-subtabs" role="tablist">
+        <button class="rq-sub" type="button" data-sub="threads">Переписка <span class="muted" id="rq-sub-threads"></span></button>
+        <button class="rq-sub" type="button" data-sub="pos">Позиции и поставщики</button>
+        <button class="rq-sub" type="button" data-sub="new">Новый запрос цен</button>
+        <button class="rq-sub" type="button" data-sub="sent">Отправленные <span class="muted" id="rq-sub-sent"></span></button>
+      </div>
       <div class="status" id="rq-status"></div>
       <div class="rq-hint muted small" id="rq-hint" hidden></div>
+      <div class="muted small rq-empty" id="rq-sub-empty" hidden></div>
       <div class="notice rq-unmatched" id="rq-unmatched" hidden></div>
       <!-- Переписка с поставщиками (0.32.0): строка на ответившего поставщика, щелчок — окно переписки -->
       <div class="th-box" id="rq-threads-box" hidden>
@@ -362,7 +375,7 @@
     </section>
 
     <!-- Поиск цен: Россия (Яндекс) и зарубеж (Claude), по 3 лучшие цены со ссылками, своя база цен -->
-    <section class="panel" id="prices" data-group="purchase" hidden>
+    <section class="panel" id="prices" data-group="web" hidden>
       <div class="section-head">
         <h2>Поиск цен в интернете <span class="muted" id="pr-info"></span></h2>
         <div class="section-tools">

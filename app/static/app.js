@@ -2651,8 +2651,52 @@ async function uploadPricelists(fileList) {
   await loadPricelists();
   renderSupplierDocs();
   if (currentTab() !== "purchase") toast("Документ — во вкладке «Закупка» → «Документы поставщиков»");
+  else $("of-docs").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 $("of-files").addEventListener("change", (e) => uploadPricelists(e.target.files));
+
+// Поле загрузки под таблицей «Закупки» (0.43.0): щелчок — выбор файлов, перетаскивание, Ctrl+V — картинка из буфера
+// (скриншот) или текст письма поставщика. Всё уходит туда же, куда 📎 в чате (/pricelists/upload).
+function stamp() {
+  const d = new Date(), z = (n) => String(n).padStart(2, "0");
+  return `${z(d.getDate())}.${z(d.getMonth() + 1)}.${d.getFullYear()} ${z(d.getHours())}-${z(d.getMinutes())}-${z(d.getSeconds())}`;
+}
+function pastedFiles(cd) {
+  const files = [];
+  let k = 0;
+  for (const it of cd.items || []) {
+    if (it.kind !== "file") continue;
+    const f = it.getAsFile();
+    if (!f) continue;
+    if (f.type.startsWith("image/") && (!f.name || /^image\.\w+$/i.test(f.name))) {
+      const ext = (f.type.split("/")[1] || "png").replace("jpeg", "jpg");
+      files.push(new File([f], `Скриншот ${stamp()}${k++ ? " (" + k + ")" : ""}.${ext}`, { type: f.type }));
+    } else files.push(f);
+  }
+  return files;
+}
+const ofDrop = $("of-drop");
+ofDrop.addEventListener("click", () => $("of-files").click());
+ofDrop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("of-files").click(); } });
+for (const ev of ["dragenter", "dragover"]) ofDrop.addEventListener(ev, (e) => { e.preventDefault(); ofDrop.classList.add("over"); });
+ofDrop.addEventListener("dragleave", (e) => { if (!ofDrop.contains(e.relatedTarget)) ofDrop.classList.remove("over"); });
+ofDrop.addEventListener("drop", (e) => { e.preventDefault(); ofDrop.classList.remove("over"); uploadPricelists(e.dataTransfer.files); });
+document.addEventListener("paste", (e) => {
+  if (currentTab() !== "purchase" || document.body.classList.contains("no-purchase") || !currentTender()) return;
+  const a = document.activeElement;
+  const inField = a && a !== ofDrop && a.matches("input, textarea, select, [contenteditable]");
+  if (inField || document.querySelector("dialog[open]")) return;       // обычная вставка в поле ввода / окно
+  const cd = e.clipboardData;
+  if (!cd) return;
+  const files = pastedFiles(cd);
+  if (files.length) { e.preventDefault(); uploadPricelists(files); return; }
+  // текст — только если вставили именно в поле загрузки (чтобы случайный Ctrl+V не создавал файлов)
+  const text = (cd.getData("text/plain") || "").trim();
+  if (a !== ofDrop) return;
+  e.preventDefault();
+  if (text.length < 10) return toast("В буфере нет картинки или текста с ценами", true);
+  uploadPricelists([new File([text], `Сообщение поставщика ${stamp()}.txt`, { type: "text/plain" })]);
+});
 
 $("chat-files").addEventListener("change", (e) => uploadPricelists(e.target.files));
 // Сообщение поставщика с ценами (почта, мессенджер) — как прайс (0.20.0): текст уходит файлом «Сообщение поставщика
@@ -3819,10 +3863,58 @@ const addrList = (v) => String(v || "").split(/[,;\s]+/).map((x) => x.trim()).fi
 
 // Вкладка «Письма» (0.35.0): черновики писем и таблица позиций грузятся, только когда вкладка открыта (или «одной
 // страницей» / вид «по позициям»); до этого — короткая сводка loadMailSummary (база сайта, без NocoDB).
+// С 0.43.0 письма — в «Закупке» под таблицей: полные данные грузятся, когда блок показался на экране или выбрана его
+// вкладка (таблица предложений открывается сразу, письма её не задерживают).
 function requestsWanted() {
-  const tab = currentTab();
-  return tab === "mail";
+  return currentTab() === "purchase" && rqInView;
 }
+let rqInView = false;
+const RQ_SUBS = ["threads", "pos", "new", "sent"];
+function rqSub(sub, remember = true) {
+  if (!RQ_SUBS.includes(sub)) sub = "threads";
+  $("requests").dataset.sub = sub;
+  for (const b of document.querySelectorAll("#rq-subtabs .rq-sub")) b.classList.toggle("active", b.dataset.sub === sub);
+  if (sub === "new") $("rq-new").open = true;
+  if (sub === "threads") $("rq-inbox-box").open = true;
+  if (sub === "sent") $("rq-journal-box").open = true;
+  if (remember) storageSet("sb.rq.sub", sub);
+  rqInView = true;
+  ensureRequests();
+  rqSubSync();
+}
+// Счётчики на вкладках писем и строка «пусто», когда в выбранной вкладке ничего нет.
+function rqSubSync() {
+  const threads = (rq.d && rq.d.threads) || rq.threads || [];
+  const wait = threads.filter((t) => t.waiting).length;
+  const tc = $("rq-sub-threads");
+  tc.textContent = threads.length ? `· ${threads.length}` + (wait ? ` · ждут ответа ${wait}` : "") : "";
+  tc.classList.toggle("wait", Boolean(wait));
+  const journal = (rq.d && rq.d.journal) || [];
+  const sent = journal.filter((j) => j.status === "sent").length || (stg.req && stg.req.sent) || 0;
+  $("rq-sub-sent").textContent = sent ? `· ${sent}` : "";
+  const sub = $("requests").dataset.sub;
+  let empty = "";
+  if (rq.d) {
+    if (sub === "threads" && $("rq-threads-box").hidden && $("rq-inbox-box").hidden && $("rq-unmatched").hidden)
+      empty = "Ответов поставщиков пока нет. Запросы цен — во вкладке «Новый запрос цен».";
+    if (sub === "sent" && $("rq-journal-box").hidden) empty = "Запросов цен по этому конкурсу ещё не отправляли.";
+  }
+  $("rq-sub-empty").textContent = empty;
+  $("rq-sub-empty").hidden = !empty;
+}
+$("rq-subtabs").addEventListener("click", (e) => {
+  const b = e.target.closest(".rq-sub");
+  if (b) rqSub(b.dataset.sub);
+});
+(function rqWatch() {
+  const io = new IntersectionObserver((list) => {
+    rqInView = rqInView || list.some((x) => x.isIntersecting);
+    if (rqInView) ensureRequests();
+  }, { rootMargin: "200px" });
+  io.observe($("requests"));
+  // после загрузки всего скрипта (rqSubSync читает stg, объявленный ниже)
+  setTimeout(() => { const v = rqInView; rqSub(storageGet("sb.rq.sub") || "threads", false); rqInView = v; }, 0);
+})();
 function ensureRequests() {
   const t = currentTender();
   if (!t || t.source !== "nocodb" || blockOff("prices") || !requestsWanted()) return;
@@ -3849,6 +3941,7 @@ async function loadMailSummary() {
   stg.req = { sent: d.sent, answered: d.answered, letters: d.letters, waiting: d.waiting };
   setMailBadge(d.waiting);
   renderStages();
+  rqSubSync();
 }
 
 async function loadRequests() {
@@ -3887,6 +3980,8 @@ async function loadRequests() {
   setMailBadge(stg.req.waiting);
   renderStages();
   renderRequests();
+  if (!storageGet("sb.rq.sub")) rqSub(threads.length ? "threads" : "pos", false);
+  rqSubSync();
   if (plData) renderSupplierDocs();      // «Письма без цен» — ссылки на переписку нужны нити из запросов
   if (d.can_send) loadInbox();
 }
@@ -4113,6 +4208,7 @@ function renderInboxTable() {
 
 function renderJournal() {
   renderThreads();
+  rqSubSync();
   renderInboxTable();
   const j = (rq.d && rq.d.journal) || [];
   $("rq-journal-box").hidden = !j.length;
@@ -4577,10 +4673,8 @@ const ofNet = (r) => Boolean(r.ps && ((r.ps.rf || []).length || (r.ps.abroad || 
 const OF_CHIPS = [
   ["nothing", "без цены вообще", (r) => r.cnt === 0 && !ofNet(r) && !(r.ps && r.ps.best)],
   ["nosup", "без цен поставщиков", (r) => r.cnt === 0],
-  ["nonet", "без цен в интернете", (r) => !ofNet(r)],
   ["over", "выше НМЦ", (r) => r.ratio > 1],
   ["unwritten", "есть цены — не записаны", (r) => r.unwritten],
-  ["unverified", "только «не проверено»", (r) => !ofNet(r) && Boolean(r.ps && (r.ps.unverified || []).length)],
 ];
 
 function ofToggle(p, o) {
@@ -4609,7 +4703,7 @@ function renderOffers() {
   if (!sups.length) {
     $("of-write").textContent = d.pos_pending ? `Записать в NocoDB (правок ${d.pos_pending})` : "Записать в NocoDB";
     replaceSafe($("of-wrap"), el("div", { class: "muted", text: "Предложений пока нет. Они появляются, когда поставщики отвечают на запросы по почте " +
-      "(вкладка «Письма») или когда прайс, КП или счёт загружают в «Документы поставщиков» (📎)." }));
+      "(письма — ниже) или когда КП, прайс, счёт или скриншот загружают в поле ниже (📎)." }));
     $("of-legend").hidden = true;
     renderOfferComments();
     if (rq.d) renderRqPos();
@@ -4979,10 +5073,10 @@ async function askPositions(ns) {
     L.dirty = false;
   }
   rq.showAll = true;
-  $("rq-new").open = true;
   renderRequests();
-  setTab("mail");
-  requestAnimationFrame(() => $("rq-new").scrollIntoView({ behavior: "smooth", block: "start" }));
+  setTab("purchase");
+  rqSub("new");
+  requestAnimationFrame(() => $("requests").scrollIntoView({ behavior: "smooth", block: "start" }));
   const n = rq.d.letters.filter((L) => L.supplier_id && L.positions.length).length;
   toast(`Письма — только по выбранным позициям (${want.size}); поставщиков с этими брендами: ${n}. Проверьте адреса и нажмите «Отправить».`);
 }
@@ -5334,7 +5428,7 @@ function renderStages() {
 // 0.38.0: вид «по позициям» и «☰ одной страницей» убраны (пользователь 26.11.2026: «работают некорректно, раздувают код»). Выбор запоминается в браузере (sb.tab); без выбора — по роли: кто не загружает
 // документы, но вносит цены (закупщик), — «Закупка», остальные — «Конкурс». Вкладка без видимых разделов скрыта.
 const TAB_KEY = "sb.tab";
-const TABS = ["tender", "spec", "purchase", "mail", "bid", "chat"];
+const TABS = ["tender", "spec", "purchase", "web", "bid", "chat"];
 // Раздел может быть в нескольких вкладках (data-group="tender purchase": спецификация — и в «Конкурсе», и в «Закупке»,
 // 0.30.1 — закупщику позиции нужны под рукой).
 function tabSections(tab) { return [...document.querySelectorAll(`main > section[data-group~="${tab}"]`)]; }
@@ -5349,6 +5443,7 @@ function defaultTab() {
 }
 function currentTab() { return document.querySelector("main").dataset.tab || ""; }
 function setTab(tab, remember = true) {
+  if (tab === "mail") tab = "purchase";           // вкладки «Письма» с 0.43.0 нет — письма в «Закупке»
   if (!TABS.includes(tab)) tab = defaultTab();
   if (!tabVisible(tab)) tab = TABS.find(tabVisible) || "tender";
   document.querySelector("main").dataset.tab = tab;
