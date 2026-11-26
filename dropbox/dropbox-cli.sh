@@ -3,6 +3,7 @@
 #   docker compose exec dropbox dropbox connect      — подключить учётную запись Dropbox (один раз; см. README)
 #   docker compose exec dropbox dropbox status       — последняя сверка («Up to date» — всё на месте)
 #   docker compose exec dropbox dropbox ls           — папки в Dropbox подключённой учётной записи
+#   docker compose exec dropbox dropbox long         — файлы и папки, пропущенные из-за слишком длинного имени
 #   docker compose exec dropbox dropbox disconnect   — отключить учётную запись
 if [ "$(id -u)" = 0 ]; then
   exec setpriv --reuid=1000 --regid=1000 --init-groups \
@@ -31,8 +32,15 @@ case "${1:-status}" in
     cat /config/status.txt 2>/dev/null || echo "Сверка ещё не запускалась" ;;
   ls)
     rclone lsd dropbox: ;;
+  long)
+    if [ -s /config/long_names.txt ]; then
+      echo "Не синхронизируются — имя длиннее, чем позволяет Linux (≈ 120 русских букв). Переименуйте в Dropbox:"
+      sed 's/^/  /' /config/long_names.txt
+    else
+      echo "Файлов с слишком длинными именами нет"
+    fi ;;
   disconnect)
     rclone config delete dropbox && rm -f /config/bisync/resync.done && echo "Dropbox отключён" ;;
   *)
-    echo "Команды: connect, status, ls, disconnect" >&2; exit 2 ;;
+    echo "Команды: connect, status, ls, long, disconnect" >&2; exit 2 ;;
 esac
