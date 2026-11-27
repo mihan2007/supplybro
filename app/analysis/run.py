@@ -161,6 +161,63 @@ def _inventory(claude: Claude, docs_block: str, today: str, ps: Prompts | None =
                             schema=prompts.INVENTORY_SCHEMA, label="Позиции: перечень", max_tokens=64000)
 
 
+INVENTORY_DUP_FIX = ("\n\nВНИМАНИЕ: в прошлом ответе номера позиций повторялись ({nums}) — вложенные строки (детали, "
+                     "запчасти, характеристики под одним номером п/п) были выписаны отдельными позициями. Это одна "
+                     "позиция с вложенным перечнем (п. 2а): по одной строке на номер п/п.")
+
+
+def _dup_numbers(main: list[dict]) -> list[str]:
+    seen, dup = set(), []
+    for p in main:
+        n = _clean_n(p.get("n"))
+        if n in seen and n not in dup:
+            dup.append(n)
+        seen.add(n)
+    return dup
+
+
+def _inventory_checked(claude: Claude, docs_block: str, today: str, ps: Prompts | None = None) -> dict:
+    """Перечень позиций. Номер позиции повторяется — модель разложила сложную таблицу (позиция с вложенным перечнем
+    деталей) на строки: один раз переспрашиваем, не помогло — склеиваем строки одного номера в одну позицию."""
+    inv = _inventory(claude, docs_block, today, ps)
+    dup = _dup_numbers([p for p in inv.get("positions") or [] if str(p.get("name") or "").strip()])
+    if not dup:
+        return inv
+    retry = claude.json_call(system=prompts.system(ps), documents=docs_block,
+                             prompt=prompts.inventory_prompt(today, ps)
+                             + INVENTORY_DUP_FIX.format(nums=", ".join(dup[:20])),
+                             schema=prompts.INVENTORY_SCHEMA, label="Позиции: перечень (повтор)", max_tokens=64000)
+    again = _dup_numbers([p for p in retry.get("positions") or [] if str(p.get("name") or "").strip()])
+    if not again:
+        retry["dup_fixed"] = f"номера повторялись ({', '.join(dup[:20])}) — перечень запрошен заново"
+        return retry
+    retry["positions"] = _merge_duplicates(retry.get("positions") or [])
+    retry["dup_fixed"] = (f"номера повторялись и после повтора ({', '.join(again[:20])}) — строки одного номера "
+                          f"склеены в одну позицию, наименования проверить")
+    return retry
+
+
+def _merge_duplicates(main: list[dict]) -> list[dict]:
+    out: dict[str, dict] = {}
+    for p in main:
+        if not str(p.get("name") or "").strip():
+            continue
+        n = _clean_n(p.get("n"))
+        if n not in out:
+            out[n] = {**p, "_names": [p.get("name")]}
+        else:
+            out[n]["_names"].append(p.get("name"))
+    res = []
+    for n, p in out.items():
+        names = p.pop("_names")
+        if len(names) > 1:
+            uniq = list(dict.fromkeys(str(x).strip() for x in names))
+            p = {**p, "name": "; ".join(uniq[:5]) + (" и др." if len(uniq) > 5 else "")
+                 + f" ({len(names)} {_plural(len(names), 'строка', 'строки', 'строк')})", "qty": "1", "unit": "компл."}
+        res.append(p)
+    return res
+
+
 def _details(claude: Claude, docs_block: str, today: str, main_source: str, part: list[dict], label: str,
              ps: Prompts | None = None) -> list[dict]:
     """Подробности позиций одной части. Если ответ не поместился (модель много думала или ТЗ длинные) —
@@ -223,25 +280,46 @@ def _check_positions(inv: dict, details: dict[str, dict], start_price: str) -> t
     main_by_n = {_clean_n(p.get("n")): p for p in main}
     for src in inv.get("other_sources") or []:
         name = src.get("source") or "другой документ"
-        other = {_clean_n(p.get("n")): p for p in src.get("positions") or []}
+        other_list = [p for p in src.get("positions") or [] if str(p.get("name") or "").strip()]
+        match = _match_positions(main, other_list)
+        named = sum(1 for p in main if (o := match.get(_clean_n(p.get("n")))) and _same_name(p.get("name"), o.get("name")))
+        if main and other_list and len(other_list) != len(main) and named < len(main) / 2:
+            # Документ перечисляет не позиции основного перечня (например, детали оборудования поштучно).
+            checks.append(f"⚠ Документ «{name}»: {len(other_list)} {_plural(len(other_list), 'строка', 'строки', 'строк')} против {len(main)} поз. основного перечня, "
+                          f"наименования не совпадают — перечисляет не те позиции (например, состав), количество "
+                          f"с ним не сверялось.")
+            continue
+        other = {_clean_n(o.get("n")): o for o in other_list}
+        used = {_clean_n(o.get("n")) for o in match.values()}
         diffs = 0
         for n, p in main_by_n.items():
-            o = other.get(n)
+            o = match.get(n)
             if not o:
                 discrepancies.setdefault(n, []).append(f"⚠ Расхождение: позиции нет в документе «{name}»")
                 diffs += 1
                 continue
+            on = _clean_n(o.get("n"))
+            if on != n:
+                discrepancies.setdefault(n, []).append(f"⚠ В документе «{name}» эта позиция под № {on}")
+                diffs += 1
+            if not _same_name(p.get("name"), o.get("name")):
+                discrepancies.setdefault(n, []).append(
+                    f"⚠ Наименование отличается: {main_src} — «{p.get('name')}», {name} — «{o.get('name')}»")
+                diffs += 1
             a, b = _num(p.get("qty")), _num(o.get("qty"))
             if a is not None and b is not None and abs(a - b) > 1e-6:
                 discrepancies.setdefault(n, []).append(
                     f"⚠ Расхождение: {main_src} — {_fmt_qty(a, p.get('qty'))} {_unit(p.get('unit'))}, "
                     f"{name} — {_fmt_qty(b, o.get('qty'))} {_unit(o.get('unit'))}")
                 diffs += 1
-        extra = [n for n in other if n not in main_by_n]
+        extra = [n for n in other if n not in used]
         if extra:
             checks.append(f"⚠ В документе «{name}» есть позиции, которых нет в основном перечне: № {', '.join(extra[:20])}.")
         checks.append(f"✅ Состав и количество совпадают с документом «{name}»." if not diffs and not extra
                       else f"⚠ Расхождения с документом «{name}»: {diffs} поз. (см. «Примечание» позиций).")
+
+    if inv.get("dup_fixed"):
+        checks.append(f"⚠ Перечень позиций: {inv['dup_fixed']}.")
 
     rows, no_detail = [], []
     for p in main:
@@ -284,6 +362,54 @@ def _check_positions(inv: dict, details: dict[str, dict], start_price: str) -> t
     elif rows and any(s is not None for s in sums):
         checks.append("⚠ НМЦК указана не у всех позиций — сумму с НМЦ сравнить нельзя.")
     return rows, checks
+
+
+_NAME_STOP = {"и", "для", "с", "в", "на", "по", "к", "или", "из", "шт", "компл", "ед"}
+
+
+def _name_tokens(text) -> set[str]:
+    t = str(text or "").lower().replace("ё", "е")
+    return {w for w in re.findall(r"[0-9a-zа-я][0-9a-zа-я.\-/]*[0-9a-zа-я]|[0-9a-zа-я]", t) if w not in _NAME_STOP}
+
+
+def _model_tokens(tokens: set[str]) -> set[str]:
+    return {w for w in tokens if re.search(r"\d", w)}
+
+
+def _same_name(a, b) -> bool:
+    """Одно и то же ли наименование: совпадают марки / артикулы (слова с цифрами) и большая часть слов."""
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return False
+    ma, mb = _model_tokens(ta), _model_tokens(tb)
+    if ma and mb and not (ma <= mb or mb <= ma):
+        return False
+    return len(ta & tb) / min(len(ta), len(tb)) >= 0.6
+
+
+def _match_positions(main: list[dict], other: list[dict]) -> dict[str, dict]:
+    """Позиции другого документа к позициям основного перечня: по номеру, если наименование то же; иначе по
+    наименованию (первая свободная с тем же наименованием — одинаковое оборудование под разными номерами)."""
+    res: dict[str, dict] = {}
+    by_n = {_clean_n(o.get("n")): o for o in other}
+    taken: set[int] = set()
+    for p in main:
+        n = _clean_n(p.get("n"))
+        o = by_n.get(n)
+        if o is not None and _same_name(p.get("name"), o.get("name")):
+            res[n] = o
+            taken.add(id(o))
+    for p in main:
+        n = _clean_n(p.get("n"))
+        if n in res:
+            continue
+        o = next((o for o in other if id(o) not in taken and _same_name(p.get("name"), o.get("name"))), None)
+        if o is None:
+            o = by_n.get(n) if by_n.get(n) is not None and id(by_n[n]) not in taken else None
+        if o is not None:
+            res[n] = o
+            taken.add(id(o))
+    return res
 
 
 def _compose_product(title: str, rows: list[dict]) -> str:
@@ -372,7 +498,7 @@ def analyze(client_id: str, folder_name: str, folder: Path, progress, model: str
     try:
         # 1. Перечень позиций — первым вызовом: он записывает документы в кэш, остальные вызовы читают из кэша.
         progress("Перечень позиций (документы передаются модели)", 0.05)
-        inv = jobctl.result(pool.submit(_inventory, claude, docs_block, today, ps), check)
+        inv = jobctl.result(pool.submit(_inventory_checked, claude, docs_block, today, ps), check)
         main = [p for p in inv.get("positions") or [] if str(p.get("name") or "").strip()]
         inv["positions"] = main
 
