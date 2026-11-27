@@ -145,6 +145,16 @@ if [[ ",${COMPOSE_PROFILES:-}," == *",dropbox,"* ]]; then
     echo "3. Когда папка появится — снова: bash run.sh"
     exit 0
   fi
+  # 0.44.4: сайт должен брать конкурсы из папки, которую сверяет Dropbox, — иначе новые папки из Dropbox на сайте
+  # не видны, а то, что сделал сайт, не попадает в Dropbox (так было с /opt/supplybro-tenders до 27.11.2026).
+  SB_DBX_TENDERS="${DROPBOX_DIR:-/opt/supplybro-dropbox}/${DROPBOX_FOLDER:-Агент}"
+  if [ "$(realpath -m "$TENDERS_DIR")" != "$(realpath -m "$SB_DBX_TENDERS")" ]; then
+    echo
+    echo "!!! ВНИМАНИЕ: сайт берёт конкурсы из $TENDERS_DIR, а Dropbox синхронизирует $SB_DBX_TENDERS."
+    echo "!!! Новые папки из Dropbox на сайте не появятся, работа сайта не попадёт в Dropbox."
+    echo "!!! Исправить: TENDERS_DIR=$SB_DBX_TENDERS в .env, затем снова bash run.sh"
+    echo
+  fi
 fi
 
 # 3б. Папка конкурсов (Dropbox\Агент) должна быть видна из Ubuntu.

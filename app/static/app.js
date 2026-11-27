@@ -4077,7 +4077,7 @@ function letterCard(L, can) {
   const meta = el("div", { class: "muted small" },
     document.createTextNode(`поз. ${pos}` + (L.brands.length ? ` · ${L.brands.join(", ")}` : "") + (L.strong ? "" : " · бренд только в наименовании")),
     L.sent_at ? el("span", { class: "badge ok", text: "запрос отправляли " + new Date(L.sent_at * 1000).toLocaleDateString("ru-RU") }) : null);
-  const to = el("input", { type: "text", value: L.to, placeholder: L.supplier_id ? "адрес почты поставщика" : "адрес почты (несколько — через запятую)" });
+  const to = el("input", { type: "text", value: L.to, placeholder: L.supplier_id ? "адрес почты поставщика" : "адрес почты (несколько — через запятую, каждому уйдёт отдельное письмо)" });
   to.disabled = !can;
   to.addEventListener("change", () => onAddressChange(L, to, check, card));
   const head = el("label", { class: "rq-head" }, check, el("div", { class: "rq-title" }, title, meta));
@@ -4165,12 +4165,14 @@ async function sendRequests() {
   const empty = chosen.filter((L) => !L.positions.length);
   if (empty.length) return toast("В письме нет позиций: " + empty.map((L) => L.supplier_name || "другой адресат").join(", "), true);
   const lim = d.limits || { per_click: 25, per_hour: 30, pause: [4, 8] };
-  if (chosen.length > lim.per_click) return toast(`За один раз — не больше ${lim.per_click} писем: почтовые службы принимают большую пачку одинаковых писем за спам. Отметьте часть поставщиков и отправьте, остальных — следующим заходом.`, true);
-  const mins = Math.max(1, Math.round(chosen.length * (lim.pause[0] + lim.pause[1]) / 2 / 60));
-  if (!confirm(`Отправить ${chosen.length} писем с ящика ${box.address}?\nМежду письмами — пауза ${lim.pause[0]}–${lim.pause[1]} с, это займёт около ${mins} мин. Не больше ${lim.per_hour} писем с ящика в час.`)) return;
+  // 0.44.5: каждый адрес — отдельное письмо (в «Кому» только он), поэтому считаем адреса, а не карточки.
+  const nMail = chosen.reduce((a, L) => a + new Set(addrList(L.to)).size, 0);
+  if (nMail > lim.per_click) return toast(`За один раз — не больше ${lim.per_click} писем (каждый адрес — отдельное письмо, выбрано адресов: ${nMail}): почтовые службы принимают большую пачку одинаковых писем за спам. Отметьте часть поставщиков и отправьте, остальных — следующим заходом.`, true);
+  const mins = Math.max(1, Math.round(nMail * (lim.pause[0] + lim.pause[1]) / 2 / 60));
+  if (!confirm(`Отправить ${nMail} писем с ящика ${box.address}?\nКаждому адресу — отдельное письмо, других получателей он не увидит.\nМежду письмами — пауза ${lim.pause[0]}–${lim.pause[1]} с, это займёт около ${mins} мин. Не больше ${lim.per_hour} писем с ящика в час.`)) return;
   rq.sending = true;
   updateSendButton();
-  setStatus("rq-status", `Отправляю ${chosen.length} писем с паузами, около ${mins} мин — страницу не закрывайте…`);
+  setStatus("rq-status", `Отправляю ${nMail} писем с паузами, около ${mins} мин — страницу не закрывайте…`);
   try {
     const t = currentTender();
     const r = await api(clientPath(`/tenders/${state.tender}/requests/send`), { folder: (t && t.folder) || "" }, jsonPost({
@@ -4187,7 +4189,8 @@ async function sendRequests() {
       if (x.ok) { ok++; L.checked = false; L.sent_at = Date.now() / 1000; }
     }
     d.journal = r.journal;
-    setStatus("rq-status", `Отправлено ${ok} из ${chosen.length}.` + (ok < chosen.length ? " Причины — в карточках писем." : ""), ok < chosen.length);
+    const okMail = r.results.reduce((a, x) => a + ((x.sent_to && x.sent_to.length) || 0), 0);
+    setStatus("rq-status", `Отправлено ${okMail} из ${nMail}.` + (okMail < nMail ? " Причины — в карточках писем." : ""), okMail < nMail);
   } catch (err) {
     setStatus("rq-status", "Не отправлено: " + err.message, true);
   } finally {
@@ -4707,16 +4710,21 @@ function renderOffers() {
   const unsaved = [d.selected ? `отмечено цен: ${d.selected}` : "", d.pos_pending ? `правок бренда / страны: ${d.pos_pending}` : ""].filter(Boolean);
   $("of-unsaved").textContent = unsaved.length ? `⏳ Не записано в NocoDB — ${unsaved.join(", ")}. «Спецификация» показывает только то, что уже в базе; записать — кнопкой «Записать в NocoDB».` : "";
   $("of-unsaved").hidden = !unsaved.length;
-  if (!sups.length) {
+  // 0.44.4: без предложений таблица позиций всё равно видна — иначе нет ✏ (бренд / страна, цена вручную; К951).
+  const noOffers = !sups.length;
+  const emptyNote = () => el("div", { class: "muted", text: "Предложений пока нет. Они появляются, когда поставщики отвечают на запросы по почте " +
+    "(письма — ниже) или когда КП, прайс, счёт или скриншот загружают в поле ниже (📎)." +
+    (d.positions.length ? " Бренд, страну и цену вручную можно внести уже сейчас — кнопка ✏ у позиции." : "") });
+  if (noOffers) $("of-tools").hidden = !d.can_write || !d.positions.length;
+  if (noOffers && !d.positions.length) {
     $("of-write").textContent = d.pos_pending ? `Записать в NocoDB (правок ${d.pos_pending})` : "Записать в NocoDB";
-    replaceSafe($("of-wrap"), el("div", { class: "muted", text: "Предложений пока нет. Они появляются, когда поставщики отвечают на запросы по почте " +
-      "(письма — ниже) или когда КП, прайс, счёт или скриншот загружают в поле ниже (📎)." }));
+    replaceSafe($("of-wrap"), emptyNote());
     $("of-legend").hidden = true;
     renderOfferComments();
     if (rq.d) renderRqPos();
     return;
   }
-  $("of-legend").hidden = false;
+  $("of-legend").hidden = noOffers;
   const defs = ofDefs();
   const all = ofRows();
   const rows = all.filter((r) => cfPass("of", defs, r));
@@ -4773,8 +4781,9 @@ function renderOffers() {
       return el("td", { class: "num" }, el("div", { text: `${t.positions} поз.` }), el("div", { text: "≈ " + rub(t.sum) }),
         el("div", { class: "muted small", text: `лучших цен: ${t.best}` }));
     }), el("td"), el("td"));
-  const table = el("table", { class: "of-table" }, el("thead", {}, head), body, el("tfoot", {}, foot));
-  replaceSafe($("of-wrap"), table);
+  const table = el("table", { class: "of-table" }, el("thead", {}, head), body, noOffers ? null : el("tfoot", {}, foot));
+  if (noOffers) replaceSafe($("of-wrap"), emptyNote(), table);
+  else replaceSafe($("of-wrap"), table);
   if (rq.d) renderRqPos();      // цены поставщиков — в таблицу «Позиции и поставщики»
   const first = table.querySelector("th.stick0");
   if (first) table.style.setProperty("--stick1-left", first.offsetWidth + "px");

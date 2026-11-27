@@ -136,13 +136,21 @@ def build(folder: Path, positions: list[dict]) -> dict:
     suppliers: dict[str, dict] = {}
     cells: dict[str, dict[str, list[dict]]] = {}
     pending = []
+    # Поставщик письма — по документу, где модель его нашла (счёт), для всех файлов того же письма (Excel без названия
+    # компании не уходит в отдельную колонку с именем файла).
+    by_letter: dict = {}
+    for e in files:
+        lid = (e.get("mail") or {}).get("inbox_id")
+        if lid and (e.get("supplier") or "").strip():
+            by_letter.setdefault(lid, e["supplier"].strip())
     for e in files:
         if e.get("status") in ("queued", "running"):
             pending.append({"id": e["id"], "name": e.get("name"), "status": e["status"]})
             continue
         if e.get("status") != "done":
             continue
-        name = _supplier_of(e)
+        name = ((e.get("supplier") or "").strip() or by_letter.get((e.get("mail") or {}).get("inbox_id"))
+                or _supplier_of(e))
         key = pricelists._supplier_key(name) or e["id"]
         s = suppliers.setdefault(key, {"key": key, "name": name, "files": [], "vat": e.get("vat") or "", "inn": ""})
         s["inn"] = s["inn"] or e.get("supplier_inn") or ""
@@ -163,7 +171,8 @@ def build(folder: Path, positions: list[dict]) -> dict:
                 warn.append("фрагмент не найден в документе дословно")
             if m.get("match") != "exact":
                 warn.append("неполное совпадение позиции")
-            if m.get("price") and not m.get("price_in_line"):
+            # Пересчёт по строке: разобранные до 0.44.3 счета PDF ошибочно помечены «цены нет в строке».
+            if m.get("price") and not (m.get("price_in_line") or pricelists.price_in(m.get("line") or "", m["price"])):
                 warn.append("цены нет в строке документа — пересчитана моделью")
             cells.setdefault(n, {}).setdefault(key, []).append({
                 "file_id": e["id"], "file": e.get("name"), "at": e.get("uploaded_at") or 0,

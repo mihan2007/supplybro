@@ -394,10 +394,7 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
     init()
     if not letters:
         raise RequestError("не выбрано ни одного письма")
-    if len(letters) > MAX_LETTERS:
-        raise RequestError(f"за один раз — не больше {MAX_LETTERS} писем")
     box_row = mail._row(owner, box_id)
-    check_rate(box_row["address"], len(letters))
     by_n = {p["n"]: p for p in positions}
     prepared = []
     for L in letters:
@@ -409,7 +406,14 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
         if not subject or not body:
             raise RequestError(f"пустая тема или текст письма: {L.get('supplier_name') or ', '.join(to)}")
         pos = [by_n[str(n)] for n in L.get("positions") or [] if str(n) in by_n]
-        prepared.append((L, to, subject, body, pos))
+        # 0.44.5: на каждый адрес — своё письмо, в «Кому» только этот адрес (пользователь 27.11.2026: К951 ушёл
+        # одним письмом девяти поставщикам — все видели друг друга). Ни списка, ни скрытой копии.
+        for addr in dict.fromkeys(to):
+            prepared.append((L, [addr], subject, body, pos))
+    if len(prepared) > MAX_LETTERS:
+        raise RequestError(f"за один раз — не больше {MAX_LETTERS} писем (каждый адрес — отдельное письмо, "
+                           f"выбрано адресов: {len(prepared)})")
+    check_rate(box_row["address"], len(prepared))
     now = time.time()
     messages, ids = [], []
     for L, to, subject, body, pos in prepared:
@@ -435,15 +439,32 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
         messages.append(msg)
         ids.append((rid, tag))
     results = mail.send_many(owner, box_id, messages, pause=SEND_PAUSE)
-    out = []
+    # Итог — по карточке письма (key): ок, если ушло на все её адреса; ошибки — с адресом.
+    by_key: dict = {}
     for (L, to, *_), (rid, tag), r in zip(prepared, ids, results):
         with db.connect() as con:
             con.execute("UPDATE mail_requests SET status=?, error=?, sent_copy=?, sent_at=? WHERE id=?",
                         ("sent" if r["ok"] else "error", r["error"], r.get("sent_copy", ""),
                          time.time() if r["ok"] else None, rid))
-        if r["ok"] and L.get("supplier_id"):
+        k = L.get("key")
+        o = by_key.setdefault(k, {"L": L, "key": k, "ok": True, "errors": [], "id": rid, "tag": tag, "ids": [],
+                                  "tags": [], "sent_to": [], "sent_copy": []})
+        o["ids"].append(rid)
+        o["tags"].append(tag)
+        if r["ok"]:
+            o["sent_to"].append(to[0])
+            if r.get("sent_copy"):
+                o["sent_copy"].append(f"{to[0]}: {r['sent_copy']}")
+        else:
+            o["ok"] = False
+            o["errors"].append(f"{to[0]}: {r['error']}")
+    out = []
+    for o in by_key.values():
+        L = o.pop("L")
+        if o["sent_to"] and L.get("supplier_id"):
             remember_email(client_id, base_id, str(L["supplier_id"]), str(L.get("supplier_name") or ""),
-                           ", ".join(to), owner)
-        out.append({"key": L.get("key"), "ok": r["ok"], "error": r["error"], "id": rid, "tag": tag,
-                    "sent_copy": r.get("sent_copy", "")})
+                           ", ".join(o["sent_to"]), owner)
+        o["error"] = "; ".join(o.pop("errors"))
+        o["sent_copy"] = "; ".join(o["sent_copy"])
+        out.append(o)
     return out

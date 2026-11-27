@@ -147,6 +147,14 @@ case "${1:-}" in
     ssh "$SERVER" "cd '$SERVER_DIR' && bash -s" <<'EOS'
 echo " Версия сайта: $(cat VERSION), коммит $(cat app/COMMIT 2>/dev/null || echo '— (отправлена до 0.25.0)')"
 echo " Папка конкурсов сайта: $(grep '^TENDERS_DIR=' .env | cut -d= -f2-)"
+# 0.44.4: при Dropbox сайт должен смотреть в его папку.
+if grep -q '^COMPOSE_PROFILES=.*dropbox' .env; then
+  td=$(grep '^TENDERS_DIR=' .env | cut -d= -f2- | tr -d '"')
+  dd=$(grep '^DROPBOX_DIR=' .env | cut -d= -f2- | tr -d '"'); dd=${dd:-/opt/supplybro-dropbox}
+  df_=$(grep '^DROPBOX_FOLDER=' .env | cut -d= -f2- | tr -d '"'); df_=${df_:-Агент}
+  [ "$(realpath -m "$td")" = "$(realpath -m "$dd/$df_")" ] \
+    || echo " !!! Сайт смотрит НЕ в папку Dropbox ($dd/$df_) — новые конкурсы из Dropbox не видны"
+fi
 echo
 echo " Контейнеры:"
 docker compose ps --format '   {{.Service}}: {{.Status}}'

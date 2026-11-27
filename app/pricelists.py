@@ -89,10 +89,75 @@ TASK = """Задача:
 
 
 
-def task_prompt(positions: str, name: str, lines: str, ps: Prompts | None = None) -> str:
+def task_prompt(positions: str, name: str, lines: str, ps: Prompts | None = None, own: str = "") -> str:
+    # 0.44.2: свои юр. лица клиента — данными перед заданием (в счёте К950 модель записала поставщиком покупателя
+    # ООО «ПРОСТОР»). Правила задания (pricelists.task) не меняются.
+    own_line = (f"Наши организации (это покупатель / заказчик, НЕ поставщик): {own}\n\n") if own else ""
     return (f"Позиции тендера (№ | наименование | марка / модель / артикул | количество | НМЦ за единицу, руб.):\n"
             f"{positions}\n\nДокумент поставщика «{name}» — строки с номерами [L…]:\n{lines}\n\n"
-            + or_default(ps).text("pricelists.task"))
+            + own_line + or_default(ps).text("pricelists.task"))
+
+
+# ---- поставщик ≠ наша организация (0.44.2) ----
+_ROLE_RE = re.compile(r"(?i)\b(поставщик|продавец|исполнитель|грузоотправитель|получатель)\b\s*:?\s*(.+)")
+_ORG_RE = re.compile(r"(?i)(ООО|АО|ПАО|ЗАО|ОАО|ИП|ФГУП|МУП|ГУП)\s*[«\"„“']?[^,;\n]{1,80}")
+_INN_RE = re.compile(r"(?i)ИНН\s*:?\s*(\d{10}|\d{12})\b")
+_ROLE_ORDER = {"поставщик": 0, "продавец": 0, "исполнитель": 1, "грузоотправитель": 2, "получатель": 3}
+
+
+def own_entities(client_id: str) -> list:
+    try:
+        from .config import load_clients
+        c = load_clients().get(client_id)
+        return list(c.legal_entities) if c else []
+    except Exception:                                   # noqa: BLE001
+        return []
+
+
+def own_text(entities: list) -> str:
+    return "; ".join(e.name + (f" (ИНН {e.inn})" if e.inn else "") for e in entities)
+
+
+def is_own(name: str, inn: str, entities: list) -> bool:
+    inn = re.sub(r"\D", "", str(inn or ""))
+    if inn and any(e.inn and e.inn == inn for e in entities):
+        return True
+    return bool(name) and any(e.matches(name) for e in entities)
+
+
+def seller_from_lines(lines: list[str], entities: list) -> tuple[str, str]:
+    """Поставщик по строкам документа «Поставщик: ООО … ИНН …» (не наша организация). ('', '') — не нашли."""
+    found = []
+    for i, line in enumerate(lines):
+        m = _ROLE_RE.search(line)
+        if not m:
+            continue
+        rest = m.group(2)
+        # «Поставщик:» отдельной строкой: в тексте PDF название бывает и ниже, и выше (подпись по центру ячейки).
+        cands = [rest] if _ORG_RE.search(rest) else [x for x in (lines[i + 1] if i + 1 < len(lines) else "",
+                                                                 lines[i - 1] if i else "") if x]
+        for c in cands:
+            org = _ORG_RE.search(c)
+            if not org:
+                continue
+            name = " ".join(org.group(0).split()).rstrip(" ,.;")
+            inn_m = _INN_RE.search(c)
+            inn = inn_m.group(1) if inn_m else ""
+            if is_own(name, inn, entities):
+                continue
+            found.append((_ROLE_ORDER.get(m.group(1).lower(), 9), i, name, inn))
+            break
+    if not found:
+        # Нет подписи роли — первая организация с ИНН, которая не наша.
+        for i, line in enumerate(lines):
+            org, inn_m = _ORG_RE.search(line), _INN_RE.search(line)
+            if org and inn_m:
+                name = " ".join(org.group(0).split()).rstrip(" ,.;")
+                if not is_own(name, inn_m.group(1), entities):
+                    return name[:120], inn_m.group(1)
+        return "", ""
+    _, _, name, inn = min(found)
+    return name[:120], inn
 
 
 SCHEMA = {"type": "object", "required": ["matches"], "properties": {
@@ -250,13 +315,39 @@ def _norm_text(text: str) -> str:
 _NUM = re.compile(r"\d[\d\s .,']*\d|\d")
 
 
+_TOKEN = re.compile(r"\d[\d.,']*")
+_THOUSANDS = re.compile(r"\d{3}(?:[.,]\d{1,2})?")
+
+
 def _numbers(text: str) -> list[float]:
+    """Числа строки. 0.44.3: в строке счёта PDF цена и сумма разделены только пробелами («18 756,89 56 270,67») —
+    целиком это одно «число», поэтому ещё и каждое слово-число отдельно и группы через пробел по 3 цифры
+    («18» + «756,89»)."""
     out = []
     for m in _NUM.finditer(text or ""):
         v = parse_price(m.group(0))
         if v:
             out.append(v)
+    toks = _TOKEN.findall(text or "")
+    for i, t in enumerate(toks):
+        cand = t
+        v = parse_price(cand)
+        if v:
+            out.append(v)
+        for nxt in toks[i + 1:]:
+            if re.search(r"[.,]\d{1,2}$", cand) or not _THOUSANDS.fullmatch(nxt):
+                break
+            cand += " " + nxt
+            v = parse_price(cand)
+            if v:
+                out.append(v)
     return out
+
+
+def price_in(line: str, price) -> bool:
+    """Есть ли эта цена в строке документа (допуск 0,5 %)."""
+    price = parse_price(price)
+    return bool(price and line and any(abs(x - price) <= max(0.01, price * 0.005) for x in _numbers(line)))
 
 
 def _fmt(v: float) -> str:
@@ -288,7 +379,7 @@ def tender_positions(client_id: str, folder_name: str, folder: Path) -> tuple[li
 
 
 def _analyze_file(entry: dict, folder: Path, positions: list[dict], fx: dict, usage: Usage, cache,
-                  ps: Prompts | None = None) -> dict:
+                  ps: Prompts | None = None, own: list | None = None) -> dict:
     path = folder / entry["file"]
     if not path.is_file():
         raise RuntimeError("файл не найден в папке конкурса")
@@ -308,7 +399,7 @@ def _analyze_file(entry: dict, folder: Path, positions: list[dict], fx: dict, us
     claude = Claude(MODEL, usage, effort=EFFORT)
     claude.cache = cache
     ans = claude.json_call(system=or_default(ps).text("pricelists.system"), documents=None,
-                           prompt=task_prompt(pos_text, entry["name"], doc_text, ps),
+                           prompt=task_prompt(pos_text, entry["name"], doc_text, ps, own_text(own or [])),
                            schema=SCHEMA, label=f"прайс {entry['name']}", max_tokens=16000, timeout=600)
 
     by_n = {str(p.get("№")).strip(): p for p in positions}
@@ -340,7 +431,7 @@ def _analyze_file(entry: dict, folder: Path, positions: list[dict], fx: dict, us
             problems.append("цена не указана")
         elif price_rub is None:
             problems.append(f"нет курса ЦБ для {cur}")
-        price_in_line = bool(price and line and any(abs(x - price) <= max(0.01, price * 0.005) for x in _numbers(line)))
+        price_in_line = price_in(line, price)
         nmc = parse_price(p.get("Стоимость НМЦ"))
         ratio = round(price_rub / nmc, 3) if price_rub and nmc else None
         if ratio is not None and not (MIN_RATIO <= ratio <= MAX_RATIO):
@@ -358,7 +449,14 @@ def _analyze_file(entry: dict, folder: Path, positions: list[dict], fx: dict, us
         })
     matches.sort(key=lambda x: (float(x["pos"]) if re.fullmatch(r"\d+(\.\d+)?", x["pos"]) else 1e9, x["pos"]))
     supplier = " ".join(str(ans.get("supplier") or "").split())[:120]
-    return {"supplier": supplier, "supplier_inn": str(ans.get("supplier_inn") or "").strip()[:20],
+    supplier_inn = str(ans.get("supplier_inn") or "").strip()[:20]
+    if own and is_own(supplier, supplier_inn, own):
+        # Модель взяла покупателя (нашу организацию) — поставщик по строке «Поставщик / Продавец / Исполнитель».
+        name, inn = seller_from_lines(lines, own)
+        notes.append(f"модель указала поставщиком нашу организацию ({supplier or supplier_inn}) — "
+                     + (f"поставщик взят из документа: {name}" if name else "поставщик не определён, проверьте"))
+        supplier, supplier_inn = name, inn
+    return {"supplier": supplier, "supplier_inn": supplier_inn,
             "vat": ans.get("vat") or "не указано", "currency": doc_cur, "doc_date": str(ans.get("doc_date") or "")[:40],
             "lines": len(lines), "lines_sent": len(idx), "notes": notes, "matches": matches,
             "positions_total": len(positions)}
@@ -377,6 +475,7 @@ def process(client_id: str, folder_name: str, folder: Path, progress, cache_dir:
     # Кэш ответов модели: после паузы, отмены или перезапуска обработчика тот же прайс второй раз не оплачивается.
     cache = jobctl.AnswerCache(cache_dir) if cache_dir else None
     ps = for_client(client_id, entity)            # промты клиента и юр. лица (0.18.0 / 0.19.0)
+    own = own_entities(client_id)                 # наши юр. лица — не поставщик (0.44.2)
     for k, entry in enumerate(pending):
         progress(f"Прайс «{entry['name']}»: читаю файл", k / len(pending))
 
@@ -399,7 +498,7 @@ def process(client_id: str, folder_name: str, folder: Path, progress, cache_dir:
         try:
             if not fx:
                 fx = rates() or {}
-            res = _analyze_file(entry, folder, positions, fx, usage, cache, ps)
+            res = _analyze_file(entry, folder, positions, fx, usage, cache, ps, own)
             usd = round(usage.total_usd(), 4)
             total_usd += usd
             update(folder, lambda d: mark(d, status="done", step="", finished_at=time.time(),
@@ -456,12 +555,18 @@ def remove(folder: Path, file_id: str, by: str) -> None:
     update(folder, fn)
 
 
+FILE_LIKE = re.compile(r"\.(xlsx?|xlsm|docx?|pdf|png|jpe?g|gif|bmp|tiff?|txt|csv|rtf|odt|ods|zip|rar|7z)\s*$", re.I)
+
+
 def supplier_name(e: dict) -> str:
     """Имя поставщика документа: из самого документа (модель) → из запроса, на который это ответ → имя или адрес
     отправителя письма → имя файла. 0.31.1, пользователь 19.11.2026: «не видно, от какого поставщика пришло письмо» —
     у ответа без названия компании (запрос «другому адресату», цена в тексте) колонка называлась «Письмо»."""
     mail = e.get("mail") or {}
-    name = (e.get("supplier") or mail.get("supplier") or mail.get("from_name") or mail.get("from") or "").strip()
+    from_name = str(mail.get("from_name") or "")
+    if FILE_LIKE.search(from_name):      # до 0.44.3 parse() затирал имя отправителя именем последнего вложения
+        from_name = ""
+    name = (e.get("supplier") or mail.get("supplier") or from_name or mail.get("from") or "").strip()
     return name or Path(e.get("name") or "документ").stem
 
 

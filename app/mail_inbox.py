@@ -155,7 +155,7 @@ def html_to_text(text: str) -> str:
 def parse(raw: bytes) -> dict:
     """Письмо → {message_id, from_addr, from_name, to, subject, date, refs, text, attachments: [(имя, байты)]}."""
     msg = email.message_from_bytes(raw, policy=email.policy.default)
-    name, addr = parseaddr(str(msg.get("From") or ""))
+    from_name, addr = parseaddr(str(msg.get("From") or ""))
     refs = MSGID_RE.findall(str(msg.get("In-Reply-To") or "") + " " + str(msg.get("References") or ""))
     try:
         dt = parsedate_to_datetime(str(msg.get("Date")))
@@ -189,7 +189,7 @@ def parse(raw: bytes) -> dict:
     text = "\n\n".join(plain).strip() or html_to_text("\n".join(html_text))
     return {
         "message_id": _dec(msg.get("Message-ID")),
-        "from_addr": addr.strip().lower(), "from_name": _dec(name),
+        "from_addr": addr.strip().lower(), "from_name": _dec(from_name),
         "to": [a.lower() for _, a in getaddresses([str(msg.get("To") or ""), str(msg.get("Cc") or "")]) if a],
         "subject": _dec(msg.get("Subject")), "date": date, "refs": refs,
         "text": text[:200_000], "attachments": attachments, "inline": inline,
@@ -266,7 +266,10 @@ def match(m: dict, box: dict) -> dict:
     found = {}
     for key, r in pool.items():
         num = r["internal"].lower()
-        for variant in {num, supplier_requests.latin_tag(r["internal"]).lower()}:
+        # Прежний номер из метки запроса (SB-K947-12 → K947 / К947): номер конкурса сменили, а поставщик пишет старый.
+        old = TAG_RE.search(str(r.get("tag") or ""))
+        olds = {old.group(1).lower(), old.group(1).lower().replace("k", "к", 1)} if old else set()
+        for variant in {num, supplier_requests.latin_tag(r["internal"]).lower(), *olds}:
             if variant and re.search(rf"(?<![0-9a-zа-я]){re.escape(variant)}(?![0-9])", hay):
                 found[key] = r
     if len(found) == 1:
@@ -667,6 +670,11 @@ def due_boxes() -> list:
 def poller() -> None:
     """Поток обработчика: раз в 10 с смотрит, какие ящики пора проверить; раз в час чистит пропущенные письма."""
     purged = 0.0
+    if POLL_MINUTES <= 0:
+        # 0.44.4: MAIL_POLL_MINUTES=0 — почту читает только сервер. Локальная копия с общей папкой Dropbox иначе
+        # клала бы те же ответы поставщиков в те же папки второй раз.
+        print("Почта: опрос ящиков выключен (MAIL_POLL_MINUTES=0)", flush=True)
+        return
     while True:
         if time.time() - purged > 3600:
             try:
