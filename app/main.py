@@ -778,16 +778,18 @@ async def api_requests_send(client_id: str, record_id: int, folder: str = "", en
     if not box_id:
         raise HTTPException(400, "выберите почтовый ящик, с которого отправлять")
     owner = mail.owner_key()
-    # Шаблон (0.45.0): «приложить реквизиты» — карточка реквизитов юр. лица (запрос счёта на оплату).
+    # Шаблоны (0.45.0; с 0.45.2 — у каждого письма свой): «приложить реквизиты» — карточка реквизитов юр. лица
+    # (запрос счёта на оплату); галочки вложений — у письма (with_xlsx, with_requisites).
     extra = []
-    tpl = mail_templates.get(client.id, data.get("template_id")) if data.get("template_id") else None
-    if data.get("template_id") and not tpl:
-        raise HTTPException(400, "шаблон письма не найден — обновите страницу")
-    if tpl and tpl.get("attach_requisites") and data.get("with_requisites", True):
+    letters = list(data.get("letters") or [])
+    for L in letters:
+        if L.get("template_id") and not mail_templates.get(client.id, L.get("template_id")):
+            raise HTTPException(400, "шаблон письма не найден — обновите страницу")
+    if any(L.get("with_requisites") for L in letters):
         path, who = mail_templates.requisites_file(client, _entity(client, entity) or None)
         if not path or not path.is_file():
             raise HTTPException(400, f"карточки реквизитов{' ' + who if who else ''} нет в материалах юр. лица — "
-                                     "снимите «приложить реквизиты» или добавьте карточку")
+                                     "снимите «📎 реквизиты» в письме или добавьте карточку")
         extra.append((path.name, path.read_bytes(),
                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                       if path.suffix.lower() == ".docx" else "application/octet-stream"))
@@ -795,7 +797,7 @@ async def api_requests_send(client_id: str, record_id: int, folder: str = "", en
     def run():
         return supplier_requests.send(owner=owner, user=access.current_user(), client_id=client.id,
                                       base_id=client.nocodb.base_id, record_id=record_id, internal=ctx["internal"],
-                                      folder=folder, box_id=box_id, letters=list(data.get("letters") or []),
+                                      folder=folder, box_id=box_id, letters=letters,
                                       positions=positions, with_xlsx=bool(data.get("with_xlsx", True)),
                                       extra_attachments=extra)
 

@@ -430,10 +430,11 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
         tag = f"SB-{latin_tag(internal)}-{rid}"
         full_subject = subject if f"[{tag}]" in subject else f"{subject} [{tag}]"
         attach = []
-        if with_xlsx and pos:
+        if L.get("with_xlsx", with_xlsx) and pos:
             attach.append((f"Запрос цен {internal}.xlsx", xlsx_bytes(internal, pos),
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
-        attach.extend(extra_attachments or [])      # реквизиты по шаблону письма (0.45.0)
+        if L.get("with_requisites"):                 # реквизиты по шаблону письма (0.45.0, с 0.45.2 — у письма)
+            attach.extend(extra_attachments or [])
         msg = mail.build_message(box_row, ", ".join(to), full_subject, body, attach, {"X-SupplyBro-Tag": tag})
         with db.connect() as con:
             con.execute("UPDATE mail_requests SET subject=?, tag=?, message_id=?, attachment=? WHERE id=?",

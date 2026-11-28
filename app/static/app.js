@@ -4020,9 +4020,20 @@ const TPL_XLSX = "Перечень позиций — также во вложе
 
 function tplHash(text) { let h = 0; for (const ch of String(text)) h = (h * 31 + ch.codePointAt(0)) >>> 0; return h; }
 function rqTemplates() { return (rq.d && rq.d.templates) || []; }
-function rqTpl() {
+// Шаблон письма: свой у каждого письма (L.tpl, 0.45.2), по умолчанию — «для всех писем» (#rq-tpl).
+function rqTpl(L) {
   const list = rqTemplates();
-  return list.find((x) => x.id === $("rq-tpl").value) || list[0] || { id: "standard", standard: true };
+  const id = (L && L.tpl) || $("rq-tpl").value;
+  return list.find((x) => x.id === id) || list[0] || { id: "standard", standard: true };
+}
+// Вложения письма — по шаблону (у «Стандартного» — Excel); галочки в карточке меняют их у этого письма.
+function rqSetTpl(L, id) {
+  L.tpl = id;
+  const t = rqTpl(L);
+  L.xlsx = t.standard ? true : Boolean(t.attach_xlsx);
+  L.req = Boolean(t.attach_requisites);
+  if (!L.subjDirty) L.subject = rqSubject(L);
+  if (!L.dirty) L.body = rqBody(L);
 }
 function tplShortTitle(t) {
   t = String(t || "").replace(/\s+/g, " ").trim();
@@ -4046,23 +4057,23 @@ function tplFill(text, L, opts = {}) {
   return out.trim() + (opts.subject ? "" : "\n");
 }
 function rqSubject(L) {
-  const t = rqTpl();
+  const t = rqTpl(L);
   return t.standard ? (L.std_subject != null ? L.std_subject : L.subject) : tplFill(t.subject, L, { subject: true }).replace(/\s+/g, " ");
 }
-// Сменился шаблон (или письма загружены): тема и текст у писем, которые не правили руками.
+// «Шаблон для всех писем» сменился (или письма загружены): fromTemplate — всем письмам этот шаблон; иначе (шаблоны
+// изменили в редакторе) — у писем прежний выбор, удалённый шаблон → «для всех». Текст и тема — у не правленных руками.
 function rqApplyTpl(fromTemplate) {
   if (!rq.d) return;
-  const t = rqTpl();
-  storageSet("sb.rq.tpl", t.id);
-  if (fromTemplate) {
-    $("rq-xlsx").checked = t.standard ? true : Boolean(t.attach_xlsx);
-    $("rq-req").checked = true;
-  }
-  $("rq-req-box").hidden = !t.attach_requisites;
+  const id = $("rq-tpl").value;
+  storageSet("sb.rq.tpl", id);
+  const ids = new Set(rqTemplates().map((x) => x.id));
   for (const L of rq.d.letters) {
     if (L.std_subject == null) L.std_subject = L.subject;
-    if (!L.subjDirty) L.subject = rqSubject(L);
-    if (!L.dirty) L.body = rqBody(L);
+    if (fromTemplate || !L.tpl || !ids.has(L.tpl)) rqSetTpl(L, id);
+    else {
+      if (!L.subjDirty) L.subject = rqSubject(L);
+      if (!L.dirty) L.body = rqBody(L);
+    }
   }
 }
 function fillRqTemplates() {
@@ -4075,11 +4086,11 @@ function fillRqTemplates() {
 function rqBody(L) {
   const by = new Map(rq.d.positions.map((p) => [p.n, p]));
   const lines = L.positions.map((n) => by.get(n)).filter(Boolean).map((p) => p.line).join("\n");
-  const t = rqTpl();
-  if (!t.standard) return tplFill(t.body, L, { lines, xlsx: $("rq-xlsx").checked });
+  const t = rqTpl(L);
+  if (!t.standard) return tplFill(t.body, L, { lines, xlsx: L.xlsx !== false });
   // 0.44.0: у каждого письма своё обращение и формулировки (не одинаковые письма — не рассылка для Mail.ru)
   const intro = L.intro != null ? L.intro : rq.d.intro;
-  const outro = $("rq-xlsx").checked ? (L.outro_xlsx != null ? L.outro_xlsx : rq.d.outro_xlsx)
+  const outro = L.xlsx !== false ? (L.outro_xlsx != null ? L.outro_xlsx : rq.d.outro_xlsx)
     : (L.outro_plain != null ? L.outro_plain : rq.d.outro_plain);
   return intro + lines + outro;
 }
@@ -4163,13 +4174,40 @@ function letterCard(L, can) {
   } else if (baseList.length > 1) {
     hint = el("div", { class: "muted small", text: `в базе ${baseList.length} адреса — письмо уйдёт на все; лишние можно убрать` });
   }
-  card.append(head, el("div", { class: "rq-to" }, el("span", { class: "label", text: "Кому" }), to), ...(hint ? [hint] : []), result,
-    letterDetails(L, can));
+  card.append(head, el("div", { class: "rq-row" }, el("div", { class: "rq-to-col" },
+    el("div", { class: "rq-to" }, el("span", { class: "label", text: "Кому" }), to), ...(hint ? [hint] : [])), letterTpl(L, can)),
+    result, letterDetails(L, can));
   return card;
+}
+
+// Шаблон и вложения этого письма (0.45.2, пользователь 28.11.2026: выбор шаблона — в карточке, справа от «Кому»).
+function letterTpl(L, can) {
+  const sel = el("select", { class: "rq-card-tpl", title: "Шаблон этого письма" });
+  fillSelect(sel, rqTemplates().map((x) => ({ value: x.id, label: x.name })), rqTpl(L).id);
+  sel.disabled = !can;
+  sel.addEventListener("change", () => {
+    if (L.dirty && !confirm("Текст этого письма правили вручную. Заменить его текстом шаблона?")) { sel.value = rqTpl(L).id; return; }
+    L.dirty = false; L.subjDirty = false;
+    rqSetTpl(L, sel.value);
+    renderRequests();
+  });
+  const flag = (key, text, title) => {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = Boolean(L[key]);
+    cb.disabled = !can;
+    cb.addEventListener("change", () => { L[key] = cb.checked; if (!L.dirty) L.body = rqBody(L); renderRequests(); });
+    return el("label", { class: "inline small", title }, cb, document.createTextNode(" " + text));
+  };
+  const t = rqTpl(L);
+  return el("div", { class: "rq-tplbox" }, el("span", { class: "label", text: "Шаблон" }), sel,
+    el("div", { class: "rq-tplflags" }, flag("xlsx", "📎 Excel с позициями", "Приложить перечень позиций в Excel"),
+      t.attach_requisites || L.req ? flag("req", "📎 реквизиты", "Приложить карточку реквизитов нашего юр. лица") : null));
 }
 
 function letterDetails(L, can) {
   const det = el("details", { class: "rq-text" }, el("summary", { text: "Текст письма и позиции" }));
+  det.open = Boolean(L.open);
+  det.addEventListener("toggle", () => { L.open = det.open; });
   const subject = el("input", { type: "text", value: L.subject });
   subject.disabled = !can;
   subject.addEventListener("input", () => { L.subject = subject.value; L.subjDirty = true; });
@@ -4241,10 +4279,10 @@ async function sendRequests() {
   try {
     const t = currentTender();
     const r = await api(clientPath(`/tenders/${state.tender}/requests/send`), { folder: (t && t.folder) || "" }, jsonPost({
-      box_id: box.id, with_xlsx: $("rq-xlsx").checked,
-      template_id: rqTpl().standard ? "" : rqTpl().id, with_requisites: $("rq-req").checked,
+      box_id: box.id, with_xlsx: true,
       letters: chosen.map((L) => ({ key: L.key, supplier_id: L.supplier_id, supplier_name: L.supplier_name, to: L.to,
-        subject: L.subject, body: L.dirty ? L.body : rqBody(L), positions: L.positions })),
+        subject: L.subject, body: L.dirty ? L.body : rqBody(L), positions: L.positions,
+        template_id: rqTpl(L).standard ? "" : rqTpl(L).id, with_xlsx: L.xlsx !== false, with_requisites: Boolean(L.req) })),
     }));
     const byKey = new Map(r.results.map((x) => [x.key, x]));
     let ok = 0;
@@ -4756,7 +4794,6 @@ $("tpl-form").addEventListener("submit", async (ev) => {
   }
 });
 
-$("rq-xlsx").addEventListener("change", () => { if (rq.d) { for (const L of rq.d.letters) if (!L.dirty) L.body = rqBody(L); renderRequests(); } });
 $("rq-all").addEventListener("click", (e) => {
   e.preventDefault();
   for (const L of rq.d.letters) if (L.supplier_id && rqVisible(L) && L.level !== "grey" && addrList(L.to).length) L.checked = true;

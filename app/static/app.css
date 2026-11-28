@@ -863,3 +863,10 @@ body.no-purchase .of-drop { display: none; }
 #rq-tpl { max-width: 280px; }
 .rq-tpl-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 12px; padding: 8px 12px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+/* Шаблон в карточке письма (0.45.2): справа от «Кому» */
+.rq-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.rq-to-col { flex: 1 1 420px; min-width: 0; }
+.rq-tplbox { flex: 0 1 340px; display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: var(--bg); }
+.rq-tplbox select { width: 100%; }
+.rq-tplflags { grid-column: 1 / -1; display: flex; gap: 14px; flex-wrap: wrap; }
