@@ -2564,7 +2564,10 @@ function pricelistCard(f) {
       `найдено позиций: ${ms.length} из ${f.positions_total || (plData && plData.positions) || "?"}`];
     if (f.doc_date) facts.push("от " + f.doc_date);
     if (f.usd !== undefined) facts.push("≈ " + usd(f.usd));
-    box.append(el("div", { class: "pl-status ok", text: facts.join(" · ") }));
+    const factsBox = el("div", { class: "pl-status ok", text: facts.join(" · ") });
+    factsBox.append(" ", supEditBtn({ file: f.id, name: f.supplier || "", inn: f.supplier_inn || "",
+      model: f.supplier_model && f.supplier_model.name !== f.supplier ? [f.supplier_model.name] : [], edited: f.supplier_edit, files: 1 }));
+    box.append(factsBox);
     for (const n of f.notes || []) box.append(el("div", { class: "muted small", text: n }));
     if (!ms.length) {
       box.append(el("div", { class: "muted", text: "Позиций конкурса в документе не найдено." }));
@@ -3966,10 +3969,12 @@ async function loadRequests() {
   }
   if (my !== seq.rq) return;
   rq.d = d;
+  fillRqTemplates();
   rq.showAll = false;
   rq.brands = new Set();
   rq.brandsAll = false;
-  for (const L of d.letters) { L.dirty = false; L.result = null; }
+  for (const L of d.letters) { L.dirty = false; L.subjDirty = false; L.result = null; }
+  rqApplyTpl(true);
   mailState.boxes = d.boxes || [];
   const sentTo = new Set(d.journal.filter((j) => j.status === "sent").map((j) => j.supplier_id || j.to_addr));
   const answered = new Set(d.inbox.filter((x) => x.request_id).map((x) => x.request_id));
@@ -4009,9 +4014,69 @@ function renderRqHint() {
   h.hidden = !parts.length;
 }
 
+// ---- шаблоны писем (0.45.0) ----
+const TPL_GREETINGS = ["Добрый день!", "Здравствуйте!", "Добрый день, коллеги!"];
+const TPL_XLSX = "Перечень позиций — также во вложении (Excel): цены можно указать прямо в нём.";
+
+function tplHash(text) { let h = 0; for (const ch of String(text)) h = (h * 31 + ch.codePointAt(0)) >>> 0; return h; }
+function rqTemplates() { return (rq.d && rq.d.templates) || []; }
+function rqTpl() {
+  const list = rqTemplates();
+  return list.find((x) => x.id === $("rq-tpl").value) || list[0] || { id: "standard", standard: true };
+}
+function tplShortTitle(t) {
+  t = String(t || "").replace(/\s+/g, " ").trim();
+  if (t.length > 72) t = t.slice(0, 70).replace(/\s+\S*$/, "") + "…";
+  return t;
+}
+// Подстановка меток. L — письмо (поставщик, позиции); без L — пример для предпросмотра.
+function tplFill(text, L, opts = {}) {
+  const sup = (L && L.supplier_name) || "";
+  const vals = {
+    "приветствие": L && L.supplier_id ? TPL_GREETINGS[tplHash(L.key) % TPL_GREETINGS.length] : TPL_GREETINGS[0],
+    "поставщик": sup,
+    "позиции": opts.lines || "",
+    "номер": (rq.d && rq.d.internal) || "",
+    "предмет": tplShortTitle(rq.d && rq.d.title),
+    "вложение": opts.xlsx ? TPL_XLSX : "",
+    "подпись": (rq.d && rq.d.signature) || "",
+  };
+  let out = String(text || "").replace(/\{([^{}\n]{1,40})\}/g, (m, k) => (k.toLowerCase() in vals ? vals[k.toLowerCase()] : m));
+  out = out.replace(/[ \t]+([,.!?:;])/g, "$1").replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n");
+  return out.trim() + (opts.subject ? "" : "\n");
+}
+function rqSubject(L) {
+  const t = rqTpl();
+  return t.standard ? (L.std_subject != null ? L.std_subject : L.subject) : tplFill(t.subject, L, { subject: true }).replace(/\s+/g, " ");
+}
+// Сменился шаблон (или письма загружены): тема и текст у писем, которые не правили руками.
+function rqApplyTpl(fromTemplate) {
+  if (!rq.d) return;
+  const t = rqTpl();
+  storageSet("sb.rq.tpl", t.id);
+  if (fromTemplate) {
+    $("rq-xlsx").checked = t.standard ? true : Boolean(t.attach_xlsx);
+    $("rq-req").checked = true;
+  }
+  $("rq-req-box").hidden = !t.attach_requisites;
+  for (const L of rq.d.letters) {
+    if (L.std_subject == null) L.std_subject = L.subject;
+    if (!L.subjDirty) L.subject = rqSubject(L);
+    if (!L.dirty) L.body = rqBody(L);
+  }
+}
+function fillRqTemplates() {
+  const list = rqTemplates();
+  const sel = $("rq-tpl");
+  const keep = sel.value || storageGet("sb.rq.tpl") || "standard";
+  fillSelect(sel, list.map((x) => ({ value: x.id, label: x.name })), list.some((x) => x.id === keep) ? keep : (list[0] || {}).id);
+}
+
 function rqBody(L) {
   const by = new Map(rq.d.positions.map((p) => [p.n, p]));
   const lines = L.positions.map((n) => by.get(n)).filter(Boolean).map((p) => p.line).join("\n");
+  const t = rqTpl();
+  if (!t.standard) return tplFill(t.body, L, { lines, xlsx: $("rq-xlsx").checked });
   // 0.44.0: у каждого письма своё обращение и формулировки (не одинаковые письма — не рассылка для Mail.ru)
   const intro = L.intro != null ? L.intro : rq.d.intro;
   const outro = $("rq-xlsx").checked ? (L.outro_xlsx != null ? L.outro_xlsx : rq.d.outro_xlsx)
@@ -4107,7 +4172,7 @@ function letterDetails(L, can) {
   const det = el("details", { class: "rq-text" }, el("summary", { text: "Текст письма и позиции" }));
   const subject = el("input", { type: "text", value: L.subject });
   subject.disabled = !can;
-  subject.addEventListener("input", () => { L.subject = subject.value; });
+  subject.addEventListener("input", () => { L.subject = subject.value; L.subjDirty = true; });
   const body = el("textarea", { rows: "12" });
   body.value = L.dirty ? L.body : (L.body = rqBody(L));
   body.disabled = !can;
@@ -4177,6 +4242,7 @@ async function sendRequests() {
     const t = currentTender();
     const r = await api(clientPath(`/tenders/${state.tender}/requests/send`), { folder: (t && t.folder) || "" }, jsonPost({
       box_id: box.id, with_xlsx: $("rq-xlsx").checked,
+      template_id: rqTpl().standard ? "" : rqTpl().id, with_requisites: $("rq-req").checked,
       letters: chosen.map((L) => ({ key: L.key, supplier_id: L.supplier_id, supplier_name: L.supplier_name, to: L.to,
         subject: L.subject, body: L.dirty ? L.body : rqBody(L), positions: L.positions })),
     }));
@@ -4582,6 +4648,114 @@ $("thd-done").addEventListener("click", async () => {
 
 $("rq-send").addEventListener("click", sendRequests);
 $("rq-box").addEventListener("change", updateSendButton);
+$("rq-tpl").addEventListener("change", () => { rqApplyTpl(true); renderRequests(); });
+
+// Редактор шаблонов (0.45.0): общие шаблоны сотрудников клиента; «Стандартный» не правится.
+const tplEd = { list: [], marks: {}, required: [], cur: null };
+async function openTplEditor() {
+  setStatus("tpl-status", "");
+  try {
+    const r = await api(clientPath("/mail-templates"));
+    tplEd.list = r.templates; tplEd.marks = r.marks; tplEd.required = r.required || [];
+  } catch (err) { toast("Шаблоны не загрузились: " + err.message, true); return; }
+  replaceSafe($("tpl-marks"), ...Object.entries(tplEd.marks).map(([k, hint]) => {
+    const b = el("button", { type: "button", class: "tpl-mark" + (tplEd.required.includes(k) ? " req" : ""), title: hint, text: "{" + k + "}" });
+    b.addEventListener("click", () => tplInsert("{" + k + "}"));
+    return b;
+  }));
+  const want = $("rq-tpl").value;
+  tplPick(tplEd.list.find((x) => x.id === want && !x.standard) || tplEd.list.find((x) => !x.standard) || tplEd.list[0]);
+  $("tpl-dlg").showModal();
+}
+function tplFillList(selId) {
+  fillSelect($("tpl-list"), [...tplEd.list.map((x) => ({ value: x.id, label: x.name + (x.standard ? " — не правится" : "") })),
+    ...(tplEd.cur && !tplEd.cur.id ? [{ value: "", label: "(новый, не сохранён)" }] : [])], selId);
+}
+function tplPick(t) {
+  tplEd.cur = t ? { ...t } : null;
+  tplFillList(t ? t.id : "");
+  const std = Boolean(t && t.standard);
+  $("tpl-std-note").hidden = !std;
+  $("tpl-std-note").textContent = std ? (t.note || "") : "";
+  $("tpl-form").hidden = std;
+  $("tpl-del").disabled = std || !(t && t.id);
+  $("tpl-copy").disabled = std;
+  if (std || !t) return;
+  $("tpl-name").value = t.name || "";
+  $("tpl-subject").value = t.subject || "";
+  $("tpl-body").value = t.body || "";
+  $("tpl-xlsx").checked = t.attach_xlsx !== false;
+  $("tpl-req").checked = Boolean(t.attach_requisites);
+  $("tpl-meta").textContent = t.updated_at ? `Изменён: ${t.updated_by || "—"}, ${fmtWhen(t.updated_at)}` : "";
+  setStatus("tpl-status", "");
+  tplPreview();
+}
+function tplInsert(text) {
+  const ta = $("tpl-body");
+  const a = ta.selectionStart ?? ta.value.length, b = ta.selectionEnd ?? a;
+  ta.value = ta.value.slice(0, a) + text + ta.value.slice(b);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = a + text.length;
+  tplPreview();
+}
+function tplPreview() {
+  const sample = { key: "s0", supplier_id: "0", supplier_name: "ООО «Пример»" };
+  const lines = rq.d && rq.d.positions && rq.d.positions.length
+    ? rq.d.positions.slice(0, 3).map((p) => p.line).join("\n") + (rq.d.positions.length > 3 ? "\n…" : "")
+    : "1. Насос … — 1 шт\n2. …";
+  $("tpl-preview").textContent = "Тема: " + tplFill($("tpl-subject").value, sample, { subject: true }) + " [SB-…]\n\n" +
+    tplFill($("tpl-body").value, sample, { lines, xlsx: $("tpl-xlsx").checked });
+}
+async function tplReloadRequests(list, selId) {
+  tplEd.list = list;
+  if (rq.d) {
+    rq.d.templates = list;
+    fillRqTemplates();
+    if (selId && list.some((x) => x.id === selId)) $("rq-tpl").value = selId;
+    rqApplyTpl(false);
+    renderRequests();
+  }
+}
+$("rq-tpl-edit").addEventListener("click", openTplEditor);
+$("tpl-close").addEventListener("click", () => $("tpl-dlg").close());
+$("tpl-list").addEventListener("change", () => tplPick(tplEd.list.find((x) => x.id === $("tpl-list").value)));
+$("tpl-new").addEventListener("click", () => tplPick({ id: "", name: "Новый шаблон", subject: "Запрос цен {номер}: {предмет}",
+  body: "{приветствие}\n\nПросим …:\n\n{позиции}\n\n{вложение}\n\n{подпись}", attach_xlsx: true, attach_requisites: false }));
+$("tpl-copy").addEventListener("click", () => {
+  const c = tplEd.cur;
+  if (c) tplPick({ ...c, id: "", name: (c.name || "Шаблон") + " (копия)", updated_at: null });
+});
+for (const id of ["tpl-subject", "tpl-body"]) $(id).addEventListener("input", tplPreview);
+$("tpl-xlsx").addEventListener("change", tplPreview);
+$("tpl-del").addEventListener("click", async () => {
+  const c = tplEd.cur;
+  if (!c || !c.id || c.standard) return;
+  if (!confirm(`Удалить шаблон «${c.name}»? У сотрудников клиента он тоже пропадёт.`)) return;
+  try {
+    const r = await api(clientPath("/mail-templates/delete"), {}, jsonPost({ id: c.id }));
+    await tplReloadRequests(r.templates);
+    tplPick(r.templates.find((x) => !x.standard) || r.templates[0]);
+    toast("Шаблон удалён");
+  } catch (err) { setStatus("tpl-status", "Не удалено: " + err.message, true); }
+});
+$("tpl-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const c = tplEd.cur || {};
+  const body = { id: c.id || "", name: $("tpl-name").value, subject: $("tpl-subject").value, body: $("tpl-body").value,
+    attach_xlsx: $("tpl-xlsx").checked, attach_requisites: $("tpl-req").checked };
+  $("tpl-save").disabled = true;
+  try {
+    const r = await api(clientPath("/mail-templates/save"), {}, jsonPost(body));
+    await tplReloadRequests(r.templates, r.template.id);
+    tplPick(r.templates.find((x) => x.id === r.template.id));
+    setStatus("tpl-status", "Сохранено. Письма, которые не правили вручную, уже пересобраны по шаблону.");
+  } catch (err) {
+    setStatus("tpl-status", "Не сохранено: " + err.message, true);
+  } finally {
+    $("tpl-save").disabled = false;
+  }
+});
+
 $("rq-xlsx").addEventListener("change", () => { if (rq.d) { for (const L of rq.d.letters) if (!L.dirty) L.body = rqBody(L); renderRequests(); } });
 $("rq-all").addEventListener("click", (e) => {
   e.preventDefault();
@@ -4748,7 +4922,8 @@ function renderOffers() {
       const h = th("s:" + s.key, s.name, "of-sup");
       h.title = s.files.map((f) => `${f.name} · ${fmtWhen(f.at)}` + (f.mail ? ` · письмо от ${f.mail.from}` : "")).join("\n");
       h.append(el("div", { class: "muted small", text: [src, s.vat && s.vat !== "не указано" ? s.vat : "НДС не указан"].filter(Boolean).join(" · ") }),
-        ofCommentBtn("supplier:" + s.key, "поставщик " + s.name));
+        ofCommentBtn("supplier:" + s.key, "поставщик " + s.name), supEditBtn({ key: s.key, name: s.name, inn: s.inn,
+          model: s.model, edited: s.edited, files: s.files.length }));
       return h;
     }),
     th("best", "Лучшая цена"), th("ratio", "К НМЦ"));
@@ -4994,6 +5169,59 @@ function renderOfferComments() {
     el("div", { class: "muted small", text: `${ofTargetLabel(c.target)} · ${c.by || "—"} · ${fmtWhen(c.at)}` }),
     el("div", { text: c.text }))));
 }
+
+// Исправить поставщика (0.44.8): колонка «Предложений поставщиков» (все её документы) или один документ.
+// Уже записанные в NocoDB цены при следующей записи встанут на прежнее место этого поставщика с новым именем.
+function supEditBtn(ctx) {
+  const b = el("button", { class: "of-cm need-purchase", type: "button", title: "Исправить поставщика", text: "✎" });
+  b.addEventListener("click", (e) => { e.stopPropagation(); e.preventDefault(); openSupEdit(ctx); });
+  return b;
+}
+
+let seCtx = null;
+function openSupEdit(ctx) {
+  seCtx = ctx;
+  $("se-name").value = ctx.name || "";
+  $("se-inn").value = ctx.inn || "";
+  $("se-what").textContent = ctx.key ? `Колонка «${ctx.name}» — документов: ${ctx.files}. Поправится во всех.`
+    : "Только этот документ.";
+  const notes = [];
+  const model = (ctx.model || []).filter((x) => x && x !== ctx.name);
+  if (model.length) notes.push("Модель нашла в документе: " + model.join("; ") + ".");
+  if (ctx.edited) notes.push(`Исправлено: ${ctx.edited.by || "—"}, ${fmtWhen(ctx.edited.at)}.`);
+  notes.push("Если название совпадёт с другим поставщиком — колонки объединятся. Цены, уже записанные в NocoDB, при " +
+    "следующей записи встанут на прежнее место этого поставщика в «Отделе закупок» с новым названием.");
+  $("se-note").textContent = notes.join(" ");
+  setStatus("se-status", "");
+  $("se-go").disabled = false;
+  $("se-dlg").showModal();
+  $("se-name").focus();
+}
+$("se-close").addEventListener("click", () => $("se-dlg").close());
+$("se-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const t = currentTender();
+  if (!t || !seCtx) return;
+  const name = $("se-name").value.trim();
+  const inn = $("se-inn").value.replace(/\D/g, "");
+  if (!name) { setStatus("se-status", "Укажите поставщика.", true); return; }
+  if (inn && ![10, 12].includes(inn.length)) { setStatus("se-status", "ИНН — 10 или 12 цифр.", true); return; }
+  $("se-go").disabled = true;
+  setStatus("se-status", "Сохраняю…");
+  try {
+    const path = seCtx.key ? "/offers/supplier" : "/pricelists/supplier";
+    const body = seCtx.key ? { key: seCtx.key, name, inn } : { file: seCtx.file, name, inn };
+    await api(clientPath(path), { folder: t.folder }, jsonPost(body));
+  } catch (err) {
+    setStatus("se-status", "Не получилось: " + err.message, true);
+    $("se-go").disabled = false;
+    return;
+  }
+  $("se-dlg").close();
+  toast("Поставщик исправлен: " + name);
+  plData = null;
+  await loadOffers();
+});
 
 async function offersAction(path, body, okText) {
   const t = currentTender();

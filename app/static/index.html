@@ -355,12 +355,18 @@
         <summary><b>✉ Новый запрос цен</b> <span class="muted" id="rq-new-info"></span></summary>
         <!-- Фильтр по брендам (0.33.0): только поставщики выбранных брендов и только позиции этих брендов -->
         <div class="rq-brands small" id="rq-brands" hidden></div>
+        <!-- Шаблон письма (0.45.1: наверху — внизу у кнопки отправки его не замечали) -->
+        <div class="rq-tpl-bar need-purchase" id="rq-tpl-bar">
+          <label class="inline"><b>Шаблон письма</b> <select id="rq-tpl"></select></label>
+          <button class="btn small" id="rq-tpl-edit" type="button" title="Создать и править шаблоны писем">✎ Редактор шаблонов</button>
+        </div>
         <div class="rq-tools need-purchase" id="rq-tools" hidden>
           <a href="#" id="rq-all">выбрать всех с адресом</a> · <a href="#" id="rq-none">снять все</a>
         </div>
         <div class="rq-letters" id="rq-letters"></div>
         <div class="rq-actions need-purchase" id="rq-actions" hidden>
           <label class="inline"><input type="checkbox" id="rq-xlsx" checked> приложить перечень позиций (Excel)</label>
+          <label class="inline" id="rq-req-box" hidden><input type="checkbox" id="rq-req" checked> приложить реквизиты</label>
           <button class="btn primary" id="rq-send" type="button">Отправить выбранные</button>
         </div>
       </details>
@@ -647,6 +653,55 @@
       <div class="status" id="rn-status"></div>
       <div class="mf-actions">
         <button class="btn primary" id="rn-go" type="submit">Сменить номер</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Шаблоны писем поставщикам (0.45.0) -->
+  <dialog class="dlg tpl-dlg" id="tpl-dlg">
+    <div class="section-head">
+      <h2>Шаблоны писем поставщикам</h2>
+      <button class="btn ghost small" id="tpl-close" type="button">Закрыть</button>
+    </div>
+    <div class="tpl-top">
+      <label class="field"><span class="label">Шаблон</span><select id="tpl-list"></select></label>
+      <button class="btn small" id="tpl-new" type="button">+ Новый</button>
+      <button class="btn small" id="tpl-copy" type="button">Копия</button>
+      <button class="btn small danger" id="tpl-del" type="button">Удалить</button>
+    </div>
+    <p class="muted small" id="tpl-std-note" hidden></p>
+    <form id="tpl-form" autocomplete="off">
+      <label class="field"><span class="label">Название</span><input id="tpl-name" type="text" maxlength="80" required></label>
+      <label class="field"><span class="label">Тема (метка [SB-…] для ответов добавится при отправке)</span><input id="tpl-subject" type="text" maxlength="200" required></label>
+      <label class="field"><span class="label">Текст</span><textarea id="tpl-body" rows="16"></textarea></label>
+      <div class="tpl-marks small"><span class="muted">Вставить метку (щелчок — в место курсора):</span> <span id="tpl-marks"></span></div>
+      <div class="tpl-flags">
+        <label class="inline"><input type="checkbox" id="tpl-xlsx"> прикладывать перечень позиций (Excel)</label>
+        <label class="inline"><input type="checkbox" id="tpl-req"> прикладывать реквизиты юр. лица</label>
+      </div>
+      <details class="tpl-preview"><summary>Как будет выглядеть</summary><pre id="tpl-preview"></pre></details>
+      <div class="muted small" id="tpl-meta"></div>
+      <div class="status" id="tpl-status"></div>
+      <div class="mf-actions">
+        <button class="btn primary" id="tpl-save" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Исправить поставщика документа / колонки «Предложений поставщиков» (0.44.8) -->
+  <dialog class="dlg rn-dlg" id="se-dlg">
+    <div class="section-head">
+      <h2>Поставщик</h2>
+      <button class="btn ghost small" id="se-close" type="button">Закрыть</button>
+    </div>
+    <form id="se-form" autocomplete="off">
+      <p class="muted small" id="se-what"></p>
+      <label class="field"><span class="label">Название поставщика</span><input id="se-name" type="text" maxlength="120" placeholder="ООО «Ромашка»" required></label>
+      <label class="field"><span class="label">ИНН (если знаете)</span><input id="se-inn" type="text" inputmode="numeric" maxlength="12" placeholder="10 или 12 цифр"></label>
+      <div class="muted small rn-note" id="se-note"></div>
+      <div class="status" id="se-status"></div>
+      <div class="mf-actions">
+        <button class="btn primary" id="se-go" type="submit">Сохранить</button>
       </div>
     </form>
   </dialog>

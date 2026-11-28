@@ -388,7 +388,8 @@ def drafts(*, client_id: str, base_id: str, internal: str, title: str, rows: lis
 
 
 def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_id: int, internal: str, folder: str,
-         box_id: int, letters: list[dict], positions: list[dict], with_xlsx: bool = True) -> list[dict]:
+         box_id: int, letters: list[dict], positions: list[dict], with_xlsx: bool = True,
+         extra_attachments: list | None = None) -> list[dict]:
     """Отправить письма с ящика сотрудника. letters: [{key, supplier_id, supplier_name, to, subject, body,
     positions: [№]}]. Ответ: [{key, ok, error, id, tag}]."""
     init()
@@ -432,10 +433,11 @@ def send(*, owner: str, user: dict | None, client_id: str, base_id: str, record_
         if with_xlsx and pos:
             attach.append((f"Запрос цен {internal}.xlsx", xlsx_bytes(internal, pos),
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+        attach.extend(extra_attachments or [])      # реквизиты по шаблону письма (0.45.0)
         msg = mail.build_message(box_row, ", ".join(to), full_subject, body, attach, {"X-SupplyBro-Tag": tag})
         with db.connect() as con:
             con.execute("UPDATE mail_requests SET subject=?, tag=?, message_id=?, attachment=? WHERE id=?",
-                        (full_subject, tag, msg["Message-ID"], attach[0][0] if attach else "", rid))
+                        (full_subject, tag, msg["Message-ID"], ", ".join(a[0] for a in attach), rid))
         messages.append(msg)
         ids.append((rid, tag))
     results = mail.send_many(owner, box_id, messages, pause=SEND_PAUSE)

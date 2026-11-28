@@ -152,8 +152,14 @@ def build(folder: Path, positions: list[dict]) -> dict:
         name = ((e.get("supplier") or "").strip() or by_letter.get((e.get("mail") or {}).get("inbox_id"))
                 or _supplier_of(e))
         key = pricelists._supplier_key(name) or e["id"]
-        s = suppliers.setdefault(key, {"key": key, "name": name, "files": [], "vat": e.get("vat") or "", "inn": ""})
+        s = suppliers.setdefault(key, {"key": key, "name": name, "files": [], "vat": e.get("vat") or "", "inn": "",
+                                       "model": [], "edited": None})
         s["inn"] = s["inn"] or e.get("supplier_inn") or ""
+        if e.get("supplier_edit"):
+            s["edited"] = s["edited"] or e["supplier_edit"]
+            mm = (e.get("supplier_model") or {}).get("name") or ""
+            if mm and mm not in s["model"]:
+                s["model"].append(mm)
         s["files"].append({"id": e["id"], "name": e.get("name"), "file": e.get("file"), "at": e.get("uploaded_at"),
                            "vat": e.get("vat"), "doc_date": e.get("doc_date"), "mail": e.get("mail"),
                            "by": e.get("by")})
@@ -294,6 +300,27 @@ def delete_comment(folder: Path, comment_id: str, by: str, admin: bool = False) 
             raise OfferError("удалить можно только свой комментарий")
         data["comments"].remove(c)
     update(folder, fn, by, "комментарий удалён")
+
+
+def rename_supplier(folder: Path, key: str, name: str, inn: str, by: str, own: list | None = None) -> dict:
+    """Исправить поставщика колонки «Предложений поставщиков» (0.44.8): все его документы. Новое имя совпало с другим
+    поставщиком — колонки объединяются. Комментарии к поставщику переходят к новому имени."""
+    sup = next((x for x in build(folder, [])["suppliers"] if x["key"] == key), None)
+    if not sup:
+        raise OfferError("поставщик не найден — обновите страницу")
+    manual = [f["id"] for f in sup["files"] if str(f["id"]).startswith("manual-")]
+    ids = [f["id"] for f in sup["files"]]
+    pricelists.rename_supplier(folder, ids, name, inn, by, own)
+    new_key = pricelists._supplier_key(" ".join(str(name).split())) or key
+    if new_key != key:
+        def fn(data):
+            for c in data["comments"]:
+                if c.get("target") == f"supplier:{key}":
+                    c["target"] = f"supplier:{new_key}"
+        update(folder, fn, by, f"поставщик «{sup['name']}» → «{name}»")
+    else:
+        update(folder, lambda d: None, by, f"поставщик «{sup['name']}» → «{name}»")
+    return {"key": new_key, "files": len(ids), "manual": len(manual)}
 
 
 def select_best(folder: Path, positions: list[dict], by: str) -> int:

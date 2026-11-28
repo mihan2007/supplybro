@@ -101,6 +101,9 @@ RULES = [
     (re.compile(r"^/offers/position$"), "offers", "исправил бренд / страну позиции"),
     (re.compile(r"^/offers/comment(/delete)?$"), "purchase", "комментарий к предложениям поставщиков"),
     (re.compile(r"^/pricelists/remove$"), "purchase", "убрал прайс из списка"),
+    (re.compile(r"^/(offers|pricelists)/supplier$"), "purchase", "исправил поставщика документа"),
+    (re.compile(r"^/mail-templates/save$"), "purchase", "сохранил шаблон письма поставщикам"),
+    (re.compile(r"^/mail-templates/delete$"), "purchase", "удалил шаблон письма поставщикам"),
     # Запросы цен поставщикам по почте (0.27.0) — то же право, что прайсы.
     (re.compile(r"^/tenders/\d+/requests/send$"), "purchase", "отправил запросы цен поставщикам"),
     (re.compile(r"^/tenders/\d+/requests/email$"), "purchase", "указал адрес почты поставщика"),
@@ -125,6 +128,7 @@ BLOCK_PATHS = [
     (re.compile(r"^/tenders/[^/]+/spec$"), "spec"),
     (re.compile(r"^/tenders/[^/]+/requests(/|$)"), "prices"),
     (re.compile(r"^/requests(/|$)"), "prices"),
+    (re.compile(r"^/mail-templates(/|$)"), "prices"),
     (re.compile(r"^/chat(/|$)"), "chat"),
 ]
 

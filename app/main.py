@@ -21,7 +21,7 @@ from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import access, chat, db, mail, mail_inbox, offers, price_summary, pricelists, supplier_brands, supplier_requests, supplier_threads, tender_list, tender_rename, supplier_base, spec_delete
+from . import access, chat, db, mail, mail_inbox, mail_templates, offers, price_summary, pricelists, supplier_brands, supplier_requests, supplier_threads, tender_list, tender_rename, supplier_base, spec_delete
 from .noco_tables import own_table_async
 from .config import Client, load_clients
 from .analysis.corpus import TEXT_STATUSES
@@ -741,6 +741,8 @@ async def api_requests(client_id: str, record_id: int, folder: str = ""):
         "threads": supplier_threads.threads(client.id, ctx["internal"]),
         "me": mail.owner_key(),
         "can_send": access.can(access.current_user(), "purchase") if access.LOGIN_REQUIRED else True,
+        "title": ctx["title"],
+        "templates": mail_templates.listing(client.id),          # шаблоны писем (0.45.0)
     }
 
 
@@ -762,7 +764,8 @@ def api_requests_summary(client_id: str, internal: str = ""):
 
 
 @app.post("/api/clients/{client_id}/tenders/{record_id}/requests/send")
-async def api_requests_send(client_id: str, record_id: int, folder: str = "", data: dict = Body(...)):
+async def api_requests_send(client_id: str, record_id: int, folder: str = "", entity: str = "",
+                            data: dict = Body(...)):
     """Отправить выбранные письма с ящика сотрудника: {box_id, with_xlsx, letters: [{key, supplier_id,
     supplier_name, to, subject, body, positions}]}. Позиции письма — только из спецификации конкурса."""
     client = get_client(client_id)
@@ -775,12 +778,26 @@ async def api_requests_send(client_id: str, record_id: int, folder: str = "", da
     if not box_id:
         raise HTTPException(400, "выберите почтовый ящик, с которого отправлять")
     owner = mail.owner_key()
+    # Шаблон (0.45.0): «приложить реквизиты» — карточка реквизитов юр. лица (запрос счёта на оплату).
+    extra = []
+    tpl = mail_templates.get(client.id, data.get("template_id")) if data.get("template_id") else None
+    if data.get("template_id") and not tpl:
+        raise HTTPException(400, "шаблон письма не найден — обновите страницу")
+    if tpl and tpl.get("attach_requisites") and data.get("with_requisites", True):
+        path, who = mail_templates.requisites_file(client, _entity(client, entity) or None)
+        if not path or not path.is_file():
+            raise HTTPException(400, f"карточки реквизитов{' ' + who if who else ''} нет в материалах юр. лица — "
+                                     "снимите «приложить реквизиты» или добавьте карточку")
+        extra.append((path.name, path.read_bytes(),
+                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      if path.suffix.lower() == ".docx" else "application/octet-stream"))
 
     def run():
         return supplier_requests.send(owner=owner, user=access.current_user(), client_id=client.id,
                                       base_id=client.nocodb.base_id, record_id=record_id, internal=ctx["internal"],
                                       folder=folder, box_id=box_id, letters=list(data.get("letters") or []),
-                                      positions=positions, with_xlsx=bool(data.get("with_xlsx", True)))
+                                      positions=positions, with_xlsx=bool(data.get("with_xlsx", True)),
+                                      extra_attachments=extra)
 
     results = await asyncio.to_thread(_mail_call, run)
     return {"results": results, "journal": supplier_requests.journal(client.id, ctx["internal"])}
@@ -1459,6 +1476,55 @@ def api_offers_price(client_id: str, folder: str, data: dict = Body(...)):
     client, base, by = _offers_ctx(client_id, folder)
     _offers_call(offers.edit_price, base, str(data.get("file") or ""), str(data.get("pos") or ""), data.get("price_rub"), by)
     return {"ok": True}
+
+
+# ---------- шаблоны писем поставщикам (0.45.0) ----------
+
+def _tpl_call(fn, *args):
+    try:
+        return fn(*args)
+    except mail_templates.TemplateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/clients/{client_id}/mail-templates")
+def api_mail_templates(client_id: str):
+    client = get_client(client_id)
+    return {"templates": mail_templates.listing(client.id), "marks": mail_templates.MARKS,
+            "required": list(mail_templates.REQUIRED)}
+
+
+@app.post("/api/clients/{client_id}/mail-templates/save")
+def api_mail_templates_save(client_id: str, data: dict = Body(...)):
+    client = get_client(client_id)
+    by = (access.current_user() or {}).get("login", "")
+    return {"template": _tpl_call(mail_templates.save, client.id, data, by),
+            "templates": mail_templates.listing(client.id)}
+
+
+@app.post("/api/clients/{client_id}/mail-templates/delete")
+def api_mail_templates_delete(client_id: str, data: dict = Body(...)):
+    client = get_client(client_id)
+    by = (access.current_user() or {}).get("login", "")
+    _tpl_call(mail_templates.delete, client.id, str(data.get("id") or ""), by)
+    return {"templates": mail_templates.listing(client.id)}
+
+
+@app.post("/api/clients/{client_id}/offers/supplier")
+def api_offers_supplier(client_id: str, folder: str, data: dict = Body(...)):
+    """Исправить поставщика колонки (0.44.8): {key, name, inn} — все его документы."""
+    client, base, by = _offers_ctx(client_id, folder)
+    return _offers_call(offers.rename_supplier, base, str(data.get("key") or ""), str(data.get("name") or ""),
+                        str(data.get("inn") or ""), by, pricelists.own_entities(client.id))
+
+
+@app.post("/api/clients/{client_id}/pricelists/supplier")
+def api_pricelists_supplier(client_id: str, folder: str, data: dict = Body(...)):
+    """Исправить поставщика одного документа (0.44.8): {file, name, inn}."""
+    client, base, by = _offers_ctx(client_id, folder)
+    n = _offers_call(pricelists.rename_supplier, base, [str(data.get("file") or "")], str(data.get("name") or ""),
+                     str(data.get("inn") or ""), by, pricelists.own_entities(client.id))
+    return {"ok": True, "files": n}
 
 
 @app.post("/api/clients/{client_id}/offers/comment")
