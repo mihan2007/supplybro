@@ -635,8 +635,8 @@ main[data-tab="spec"] > section[data-group]:not([data-group~="spec"]) { display:
 /* «Конкурс» (0.39.0): документы — внизу, когда они загружены; пока их нет — наверху (загрузка на виду) */
 main[data-tab="tender"] > #docs.has-docs { order: 10; }
 /* «Закупка»: предложения → запросы → спецификация → цены из интернета (0.30.1) */
-main[data-tab="purchase"] > #offers { order: 1; }
-main[data-tab="purchase"] > #requests { order: 2; }
+main[data-tab="purchase"] > #requests { order: 1; }   /* 0.45.3: письма поставщикам — первыми (под таблицей их не видели) */
+main[data-tab="purchase"] > #offers { order: 2; }
 /* Строка этапов (0.30.0) */
 .stages { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .stages[hidden] { display: none; }
