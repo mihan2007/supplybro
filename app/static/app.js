@@ -4174,8 +4174,9 @@ function letterCard(L, can) {
   } else if (baseList.length > 1) {
     hint = el("div", { class: "muted small", text: `в базе ${baseList.length} адреса — письмо уйдёт на все; лишние можно убрать` });
   }
-  card.append(head, el("div", { class: "rq-row" }, el("div", { class: "rq-to-col" },
-    el("div", { class: "rq-to" }, el("span", { class: "label", text: "Кому" }), to), ...(hint ? [hint] : [])), letterTpl(L, can)),
+  // 0.45.4 (пользователь 28.11.2026, скриншот): шаблон и редактор шаблонов — в шапке карточки, справа от поставщика.
+  card.append(el("div", { class: "rq-headrow" }, head, letterTpl(L, can)),
+    el("div", { class: "rq-to" }, el("span", { class: "label", text: "Кому" }), to), ...(hint ? [hint] : []),
     result, letterDetails(L, can));
   return card;
 }
@@ -4199,7 +4200,10 @@ function letterTpl(L, can) {
     return el("label", { class: "inline small", title }, cb, document.createTextNode(" " + text));
   };
   const t = rqTpl(L);
-  return el("div", { class: "rq-tplbox" }, el("span", { class: "label", text: "Шаблон" }), sel,
+  const ed = el("button", { class: "btn small", type: "button", title: "Создать и править шаблоны писем", text: "✎ Редактор шаблонов" });
+  ed.addEventListener("click", (e) => { e.preventDefault(); openTplEditor(L.tpl); });
+  return el("div", { class: "rq-tplbox" },
+    el("div", { class: "rq-tplline" }, el("span", { class: "label", text: "Шаблон" }), sel, can ? ed : null),
     el("div", { class: "rq-tplflags" }, flag("xlsx", "📎 Excel с позициями", "Приложить перечень позиций в Excel"),
       t.attach_requisites || L.req ? flag("req", "📎 реквизиты", "Приложить карточку реквизитов нашего юр. лица") : null));
 }
@@ -4690,7 +4694,7 @@ $("rq-tpl").addEventListener("change", () => { rqApplyTpl(true); renderRequests(
 
 // Редактор шаблонов (0.45.0): общие шаблоны сотрудников клиента; «Стандартный» не правится.
 const tplEd = { list: [], marks: {}, required: [], cur: null };
-async function openTplEditor() {
+async function openTplEditor(wantId) {
   setStatus("tpl-status", "");
   try {
     const r = await api(clientPath("/mail-templates"));
@@ -4701,7 +4705,7 @@ async function openTplEditor() {
     b.addEventListener("click", () => tplInsert("{" + k + "}"));
     return b;
   }));
-  const want = $("rq-tpl").value;
+  const want = typeof wantId === "string" && wantId ? wantId : $("rq-tpl").value;
   tplPick(tplEd.list.find((x) => x.id === want && !x.standard) || tplEd.list.find((x) => !x.standard) || tplEd.list[0]);
   $("tpl-dlg").showModal();
 }
@@ -4754,7 +4758,7 @@ async function tplReloadRequests(list, selId) {
     renderRequests();
   }
 }
-$("rq-tpl-edit").addEventListener("click", openTplEditor);
+$("rq-tpl-edit").addEventListener("click", () => openTplEditor());
 $("tpl-close").addEventListener("click", () => $("tpl-dlg").close());
 $("tpl-list").addEventListener("change", () => tplPick(tplEd.list.find((x) => x.id === $("tpl-list").value)));
 $("tpl-new").addEventListener("click", () => tplPick({ id: "", name: "Новый шаблон", subject: "Запрос цен {номер}: {предмет}",
